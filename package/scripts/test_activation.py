@@ -643,6 +643,9 @@ class ActivationRefreshTest(unittest.TestCase):
                     [ "$attempts" -lt 6000 ] || exit 98
                     sleep 0.1
                   done
+                  # Signal before the push so the release thread can wait without
+                  # racing the loser's brief mutex hold + cleanup.
+                  : > "$ACTIVATION_TEST_MID_FINALIZATION_HOLD/loser-entering"
                 fi
                 if [ "$mutex_create" = true ]; then
                   if "$ACTIVATION_TEST_REAL_GIT" "$@"; then
@@ -1040,6 +1043,7 @@ class ActivationRefreshTest(unittest.TestCase):
         """Release the winner after the loser scans inside the skew window."""
         ready = hold / "ready"
         continue_path = hold / "continue"
+        loser_entering = hold / "loser-entering"
         # Activations that fail before publish never signal ready; bound the wait.
         for _ in range(1200):
             if ready.is_file():
@@ -1057,14 +1061,15 @@ class ActivationRefreshTest(unittest.TestCase):
                 if sticky and tip != sticky:
                     break
             time.sleep(0.05)
-        # Loser waits on ready only after the mutex is empty, then re-acquires.
-        # Hold the winner until that second mutex claim appears so scan_active_lanes
-        # observes tip/PR-head skew before PR dressing closes it.
+        # Loser signals after passing the ready wait and before re-acquiring.
+        # Prefer that over watching the mutex: scan + cleanup can drop the ref
+        # before a 100ms poll observes it (~120s false timeout).
         for _ in range(1200):
-            if self.remote_mutex_sha() is not None:
+            if loser_entering.is_file():
                 break
             time.sleep(0.1)
-        time.sleep(0.3)
+        # Allow acquire_activation_mutex + scan_active_lanes under skew.
+        time.sleep(0.5)
         continue_path.write_text("go\n", encoding="utf-8")
 
     def _run_concurrent_initial_refresh_with_skew_hold(
