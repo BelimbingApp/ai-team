@@ -4,6 +4,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -43,8 +44,34 @@ class ActivationRefreshTest(unittest.TestCase):
         self._init_adopter()
         self._write_gh_stub()
 
+    # Fixture knobs that must not leak from a polluted parent environment into
+    # activations that did not request them (follow-up runs after a race, or
+    # leftover ACTIVATION_TEST_* exports in a shared agent shell).
+    _ACTIVATION_TEST_OPTIONAL_ENV = (
+        "ACTIVATION_TEST_RACE_BARRIER",
+        "ACTIVATION_TEST_RACE_RUNNER",
+        "ACTIVATION_TEST_MID_FINALIZATION_HOLD",
+        "ACTIVATION_TEST_MUTEX_WINNER_DELAY",
+        "ACTIVATION_TEST_EMPTY_MUTEX_FAILURES",
+        "ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE",
+        "ACTIVATION_TEST_MUTEX_TRANSITION",
+        "ACTIVATION_TEST_MUTEX_TRANSITION_SHA",
+        "ACTIVATION_TEST_SUITE_MUTATION",
+        "AI_TEAM_MUTEX_WAIT_SECONDS",
+        "AI_TEAM_RECOVER_MUTEX_SHA",
+        "AI_TEAM_RECOVER_REFRESH_SHA",
+        "AI_TEAM_EXCLUSIVE_FIRST_REFRESH",
+    )
+
     def git_env(self) -> dict[str, str]:
         environment = os.environ.copy()
+        for key in self._ACTIVATION_TEST_OPTIONAL_ENV:
+            environment.pop(key, None)
+        # Drop any other ACTIVATION_TEST_* leftovers; run_activation re-adds the
+        # ones every activation needs.
+        for key in list(environment):
+            if key.startswith("ACTIVATION_TEST_"):
+                environment.pop(key, None)
         environment.update(
             GIT_TERMINAL_PROMPT="0",
             GIT_ASKPASS=os.devnull,
@@ -298,7 +325,15 @@ class ActivationRefreshTest(unittest.TestCase):
                     elif [ "$has_head" = false ]; then
                       if [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
                         number=$(cat "$state/pr-number")
-                        head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
+                        # Sticky PR head (#88): tip advance (force-push) must not
+                        # auto-update the API head. Real GitHub can lag; the
+                        # fixture used to always read the tip, which made tip/PR
+                        # skew impossible and hid OID-gate regressions.
+                        if [ -f "$state/pr-head" ]; then
+                          head=$(tr -d '\\n' < "$state/pr-head")
+                        else
+                          head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
+                        fi
                         printf '%s\\t%s\\tai-team/package-refresh\\tmain\\texample/adopter\\tfalse\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$head"
                       fi
                       if [ -f "$state/active-pr" ]; then
@@ -378,6 +413,8 @@ class ActivationRefreshTest(unittest.TestCase):
                     number=$(cat "$state/pr-number")
                     printf 'created\\n' >> "$state/pr-create-success"
                     printf 'true\\n' > "$state/pr-draft"
+                    head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
+                    printf '%s\\n' "$head" > "$state/pr-head"
                     if [ -f "$state/activate-late-lane" ]; then
                       : > "$state/active-pr"
                     fi
@@ -528,12 +565,18 @@ class ActivationRefreshTest(unittest.TestCase):
                 git_command="${arguments[$command_index]:-}"
                 mutex_create=false
                 mutex_source=''
+                refresh_push=false
                 if [ "$git_command" = "push" ]; then
                   for argument in "$@"; do
                     case "$argument" in
-                      [0-9a-fA-F]*:refs/heads/ai-team/activation-mutex)
+                      # Require a non-empty SHA so deletes (:ref) are not treated
+                      # as creates — that re-entered the race barrier on release.
+                      [0-9a-fA-F][0-9a-fA-F]*:refs/heads/ai-team/activation-mutex)
                         mutex_create=true
                         mutex_source="${argument%%:*}"
+                        ;;
+                      [0-9a-fA-F][0-9a-fA-F]*:refs/heads/ai-team/package-refresh)
+                        refresh_push=true
                         ;;
                     esac
                   done
@@ -583,6 +626,24 @@ class ActivationRefreshTest(unittest.TestCase):
                     sleep 0.1
                   done
                 fi
+                # #88: late mutex acquirer waits until the winner has published
+                # the verified tip (skew window open) before scanning.
+                # Only when the mutex is already empty: applying this on the
+                # initial barrier race lets a slow loser skip contention after
+                # the winner creates package-refresh (no "short mutex cleared").
+                if [ "$mutex_create" = true ] && \
+                   [ -n "${ACTIVATION_TEST_MID_FINALIZATION_HOLD:-}" ] && \
+                   "$ACTIVATION_TEST_REAL_GIT" --git-dir="$ACTIVATION_TEST_ORIGIN" \
+                     rev-parse --verify refs/heads/ai-team/package-refresh >/dev/null 2>&1 && \
+                   ! "$ACTIVATION_TEST_REAL_GIT" --git-dir="$ACTIVATION_TEST_ORIGIN" \
+                     rev-parse --verify refs/heads/ai-team/activation-mutex >/dev/null 2>&1; then
+                  attempts=0
+                  while [ ! -f "$ACTIVATION_TEST_MID_FINALIZATION_HOLD/ready" ]; do
+                    attempts=$((attempts + 1))
+                    [ "$attempts" -lt 6000 ] || exit 98
+                    sleep 0.1
+                  done
+                fi
                 if [ "$mutex_create" = true ]; then
                   if "$ACTIVATION_TEST_REAL_GIT" "$@"; then
                     status=0
@@ -591,6 +652,29 @@ class ActivationRefreshTest(unittest.TestCase):
                   fi
                   if [ "$status" -eq 0 ] && [ -n "${ACTIVATION_TEST_MUTEX_WINNER_DELAY:-}" ]; then
                     sleep "$ACTIVATION_TEST_MUTEX_WINNER_DELAY"
+                  fi
+                  exit "$status"
+                fi
+                # #88: after mutex release, the verified tip force-push opens the
+                # tip/PR-head skew window. Hold the winner there until the test
+                # releases continue so the loser can scan deterministically.
+                if [ "$refresh_push" = true ] && \
+                   [ -n "${ACTIVATION_TEST_MID_FINALIZATION_HOLD:-}" ]; then
+                  if "$ACTIVATION_TEST_REAL_GIT" "$@"; then
+                    status=0
+                  else
+                    status=$?
+                  fi
+                  if [ "$status" -eq 0 ] && \
+                     ! "$ACTIVATION_TEST_REAL_GIT" --git-dir="$ACTIVATION_TEST_ORIGIN" \
+                       rev-parse --verify refs/heads/ai-team/activation-mutex >/dev/null 2>&1; then
+                    : > "$ACTIVATION_TEST_MID_FINALIZATION_HOLD/ready"
+                    attempts=0
+                    while [ ! -f "$ACTIVATION_TEST_MID_FINALIZATION_HOLD/continue" ]; do
+                      attempts=$((attempts + 1))
+                      [ "$attempts" -lt 6000 ] || exit 99
+                      sleep 0.1
+                    done
                   fi
                   exit "$status"
                 fi
@@ -613,6 +697,7 @@ class ActivationRefreshTest(unittest.TestCase):
         recover_refresh_sha: str | None = None,
         mutex_wait_seconds: int | None = None,
         mutex_winner_delay: int | None = None,
+        mid_finalization_hold: Path | None = None,
         suite_mutation: str | None = None,
         git_dir: Path | None = None,
         mutex_empty_failures: int | None = None,
@@ -650,6 +735,10 @@ class ActivationRefreshTest(unittest.TestCase):
             environment["AI_TEAM_MUTEX_WAIT_SECONDS"] = str(mutex_wait_seconds)
         if mutex_winner_delay is not None:
             environment["ACTIVATION_TEST_MUTEX_WINNER_DELAY"] = str(mutex_winner_delay)
+        if mid_finalization_hold is not None:
+            environment["ACTIVATION_TEST_MID_FINALIZATION_HOLD"] = bash_path(
+                mid_finalization_hold
+            )
         if suite_mutation is not None:
             environment["ACTIVATION_TEST_SUITE_MUTATION"] = suite_mutation
         if git_dir is not None:
@@ -914,16 +1003,95 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertEqual(self.git_output("status", "--porcelain", cwd=checkout), "")
         self.assertEqual(list(self.activation_tmp.iterdir()), [])
 
-    def test_concurrent_initial_refresh_is_idempotent_and_onboards_only_after_merge(self):
+    def _restore_oid_gate(self, activate: Path) -> None:
+        """Mutate activate.sh back to the pre-#87 OID-gated exemption."""
+        text = activate.read_text(encoding="utf-8")
+        old = (
+            '  scanned_prs=$(printf \'%s\\n\' "$scanned_pr_rows" | awk -F\'\\t\' \\\n'
+            '    -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \\\n'
+            '    -v agent="agent:$BOOTSTRAP_AGENT" \\\n'
+            "    'NF && !($3 == branch && $4 == base && $5 == repo && $6 == \"false\" "
+            "&& $7 == agent && $8 == \"true\" && $9 == \"true\") { print \"PR #\" $1 }')"
+        )
+        new = (
+            '  scanned_prs=$(printf \'%s\\n\' "$scanned_pr_rows" | awk -F\'\\t\' \\\n'
+            '    -v head="$REMOTE_UPDATE_SHA" -v repo="$REPO" -v base="$BASE" '
+            '-v branch="$UPDATE_BRANCH" \\\n'
+            '    -v agent="agent:$BOOTSTRAP_AGENT" \\\n'
+            "    'NF && !($2 != \"\" && $2 == head && $3 == branch && $4 == base && "
+            "$5 == repo && $6 == \"false\" && $7 == agent && $8 == \"true\" && "
+            "$9 == \"true\") { print \"PR #\" $1 }')"
+        )
+        if old not in text:
+            raise AssertionError("cannot locate ownership-only scan_active_lanes awk")
+        activate.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    def _publish_oid_gate_mutation(self, second_checkout: Path) -> None:
+        """Commit the OID-gate mutation on main so both checkouts stay clean."""
+        self._restore_oid_gate(self.activate)
+        self.git("add", ".ai-team/activate.sh")
+        self.git("commit", "-qm", "test mutation: restore OID-gated refresh exemption")
+        self.git("push", "-q", "origin", "main")
+        self.git("pull", "-q", "--ff-only", "origin", "main", cwd=second_checkout)
+        # Keep self.activate path accurate after the commit.
+        self.activate = self.checkout / ".ai-team" / "activate.sh"
+
+    def _release_mid_finalization_hold(self, hold: Path) -> None:
+        """Release the winner after the loser scans inside the skew window."""
+        ready = hold / "ready"
+        continue_path = hold / "continue"
+        # Activations that fail before publish never signal ready; bound the wait.
+        for _ in range(1200):
+            if ready.is_file():
+                break
+            time.sleep(0.1)
+        else:
+            continue_path.write_text("timeout\n", encoding="utf-8")
+            return
+        # Confirm sticky head lagged the tip (skew window is open).
+        for _ in range(200):
+            tip = self.remote_update_sha()
+            sticky_path = self.state / "pr-head"
+            if tip and sticky_path.is_file():
+                sticky = sticky_path.read_text(encoding="utf-8").strip()
+                if sticky and tip != sticky:
+                    break
+            time.sleep(0.05)
+        # Loser waits on ready only after the mutex is empty, then re-acquires.
+        # Hold the winner until that second mutex claim appears so scan_active_lanes
+        # observes tip/PR-head skew before PR dressing closes it.
+        for _ in range(1200):
+            if self.remote_mutex_sha() is not None:
+                break
+            time.sleep(0.1)
+        time.sleep(0.3)
+        continue_path.write_text("go\n", encoding="utf-8")
+
+    def _run_concurrent_initial_refresh_with_skew_hold(
+        self,
+        *,
+        restore_oid_gate: bool = False,
+    ) -> tuple[
+        subprocess.CompletedProcess[str],
+        subprocess.CompletedProcess[str],
+        str,
+        str,
+    ]:
         original_head = self.git_output("rev-parse", "HEAD")
         self.install_git_race_shim()
         second_checkout = self.root / "checkout-two"
         self.git("clone", "-q", str(self.origin), str(second_checkout), cwd=self.root)
+        if restore_oid_gate:
+            self._publish_oid_gate_mutation(second_checkout)
+            original_head = self.git_output("rev-parse", "HEAD")
         second_head = self.git_output("rev-parse", "HEAD", cwd=second_checkout)
         race_barrier = self.root / "race-barrier"
         race_barrier.mkdir()
+        hold = self.root / "mid-finalization-hold"
+        hold.mkdir()
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            release = executor.submit(self._release_mid_finalization_hold, hold)
             futures = [
                 executor.submit(
                     self.run_activation,
@@ -932,15 +1100,24 @@ class ActivationRefreshTest(unittest.TestCase):
                     race_runner=f"runner-{index}",
                     fixed_commit_time=True,
                     mutex_wait_seconds=120,
-                    # #86: mid-finalization tip/PR-head skew must still yield
-                    # durable exit 3 (activate.sh exempts ownership-proven
-                    # refresh PRs without requiring OID match). Do not reintroduce
-                    # mutex_winner_delay here — that only hid the race (#82).
+                    mid_finalization_hold=hold,
+                    # #88: force tip/PR-head skew after verified publish; do not
+                    # reintroduce mutex_winner_delay (#82 green-by-avoidance).
                     exclusive_first_refresh=True,
                 )
-                for index, checkout in enumerate((self.checkout, second_checkout), start=1)
+                for index, checkout in enumerate(
+                    (self.checkout, second_checkout), start=1
+                )
             ]
             first, raced = [future.result() for future in futures]
+            release.result()
+        return first, raced, original_head, second_head
+
+    def test_concurrent_initial_refresh_is_idempotent_and_onboards_only_after_merge(self):
+        first, raced, original_head, second_head = (
+            self._run_concurrent_initial_refresh_with_skew_hold()
+        )
+        second_checkout = self.root / "checkout-two"
 
         self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
         self.assertEqual(raced.returncode, 3, raced.stdout + raced.stderr)
@@ -1048,6 +1225,20 @@ class ActivationRefreshTest(unittest.TestCase):
             self.suite_marker.read_text(encoding="utf-8").splitlines(),
             ["one updater", "one updater"],
         )
+
+    def test_mid_finalization_oid_gate_fails_by_construction(self):
+        """#88: restoring the OID gate must fail under the forced skew window."""
+        first, raced, _, _ = self._run_concurrent_initial_refresh_with_skew_hold(
+            restore_oid_gate=True
+        )
+        codes = {first.returncode, raced.returncode}
+        combined = first.stdout + first.stderr + raced.stdout + raced.stderr
+        # Winner still finishes (exit 3 after hold); loser must refuse (exit 1)
+        # when scan_active_lanes treats tip/PR skew as a foreign active lane.
+        self.assertIn(1, codes, combined)
+        self.assertIn(3, codes, combined)
+        self.assertIn("refuses active task lanes", combined)
+        self.assertIn("PR #51", combined)
 
     def test_real_claim_and_activation_share_one_atomic_mutex(self):
         original_head = self.git_output("rev-parse", "HEAD")
