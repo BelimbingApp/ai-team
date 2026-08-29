@@ -1,0 +1,43 @@
+name: mechanisms
+
+# The package gates itself with the mechanisms it ships. gate.sh derives the
+# checks it expects from the checks observed on the default branch, so every
+# job here must run on `push` to main and on `pull_request` alike — a job that
+# runs on only one of them makes the gate either blind or permanently red.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mechanisms-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  tests:
+    name: Mechanism tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the package
+        uses: actions/checkout@v5
+
+      - name: Run the mechanism suite
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
+  shell:
+    name: Shell lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the package
+        uses: actions/checkout@v5
+
+      - name: Run shellcheck over the mechanisms
+        run: shellcheck scripts/*.sh
