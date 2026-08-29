@@ -3,8 +3,19 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT_DIRECTORY = Path(__file__).parent
-REPOSITORY_ROOT = SCRIPT_DIRECTORY.parents[2]
+SCRIPT_DIRECTORY = Path(__file__).parent.resolve()
+# The package is the repository here and a subdirectory of one wherever it is
+# mounted, so neither the root nor the pathspec can be a literal. Ask git for
+# the root and derive the pathspec from this file's own position under it.
+REPOSITORY_ROOT = Path(
+    subprocess.run(
+        ["git", "-C", str(SCRIPT_DIRECTORY), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+).resolve()
+SCRIPT_PATHSPEC = SCRIPT_DIRECTORY.relative_to(REPOSITORY_ROOT).as_posix()
 
 
 class ScriptExecutabilityTest(unittest.TestCase):
@@ -18,7 +29,7 @@ class ScriptExecutabilityTest(unittest.TestCase):
                 "-rz",
                 "HEAD",
                 "--",
-                "docs/ai-team/scripts",
+                SCRIPT_PATHSPEC,
             ],
             text=True,
             capture_output=True,
