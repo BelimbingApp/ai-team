@@ -53,7 +53,17 @@ class ClaimOwnLabelTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
-                  "issue view") printf '%s\\n' "$CLAIM_TEST_ISSUE_JSON" ;;
+                  "issue view")
+                    # claim.sh reads the labels back after writing them and
+                    # judges the lookup by its exit status, so this has to
+                    # answer --json labels --jq the way gh does (#15).
+                    if printf '%s' "$*" | grep -q -- '--json labels'; then
+                      printf 'agent:%s,task:active\\n' "${CLAIM_AGENT:-}"
+                    else
+                      printf '%s\\n' "$CLAIM_TEST_ISSUE_JSON"
+                    fi
+                    ;;
+                  "pr view") printf 'agent:%s,task:active\\n' "${CLAIM_AGENT:-}" ;;
                   "pr list") printf '%s\\n' "${CLAIM_TEST_PR_LIST:-[]}" ;;
                   "label list") printf '[{"name":"agent:fable"}]\\n' ;;
                   "pr create")

@@ -112,21 +112,37 @@ finish_claim_labels() {
   # Tolerant removal: an own-label follow-up may never have carried task:ready.
   gh issue edit "$issue" --repo "$repo" --remove-label task:ready >/dev/null 2>&1 || true
 
-  pr_labels=$(gh pr view "$pr" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || pr_labels=""
-  issue_labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || issue_labels=""
+  # The exit status, never the output, decides whether the readback happened.
+  # An unlabelled resource answers with an EMPTY string and exits zero — and
+  # that is precisely the half-claim this function exists to catch, so
+  # treating empty as "could not read" would send the one case that matters
+  # down the warning path and exit zero on it (#18 review, codex-gpt-5).
+  local pr_read=1 issue_read=1 unread=""
+  pr_labels=$(gh pr view "$pr" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || pr_read=0
+  issue_labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || issue_read=0
 
-  if [[ -z "$pr_labels" || -z "$issue_labels" ]]; then
-    echo "warning: could not read back the labels for PR #$pr / issue #$issue." >&2
-    echo "         The claim stands, but verify it: gh pr view $pr --json labels" >&2
-    return 0
+  # Each side is judged on its own: one unreadable lookup must not hide a
+  # missing label proven on the other.
+  if [[ $pr_read -eq 1 ]]; then
+    case ",$pr_labels," in *",agent:$agent,"*) ;; *) missing+="PR #$pr agent:$agent; " ;; esac
+    case ",$pr_labels," in *",task:active,"*) ;; *) missing+="PR #$pr task:active; " ;; esac
+  else
+    unread+="PR #$pr; "
+  fi
+  if [[ $issue_read -eq 1 ]]; then
+    case ",$issue_labels," in *",agent:$agent,"*) ;; *) missing+="issue #$issue agent:$agent; " ;; esac
+    case ",$issue_labels," in *",task:active,"*) ;; *) missing+="issue #$issue task:active; " ;; esac
+  else
+    unread+="issue #$issue; "
   fi
 
-  case ",$pr_labels," in *",agent:$agent,"*) ;; *) missing+="PR #$pr agent:$agent; " ;; esac
-  case ",$pr_labels," in *",task:active,"*) ;; *) missing+="PR #$pr task:active; " ;; esac
-  case ",$issue_labels," in *",agent:$agent,"*) ;; *) missing+="issue #$issue agent:$agent; " ;; esac
-  case ",$issue_labels," in *",task:active,"*) ;; *) missing+="issue #$issue task:active; " ;; esac
-
-  [[ -z "$missing" ]] && return 0
+  if [[ -z "$missing" ]]; then
+    if [[ -n "$unread" ]]; then
+      echo "warning: could not read back the labels for $unread" >&2
+      echo "         The claim stands, but verify it: gh pr view $pr --json labels" >&2
+    fi
+    return 0
+  fi
 
   echo "HALF-CLAIM: PR #$pr exists but the labels did not land — $missing" >&2
   echo "The board still reads #$issue as unclaimed, so another agent can collide." >&2

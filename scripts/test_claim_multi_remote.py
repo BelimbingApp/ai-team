@@ -62,8 +62,16 @@ class ClaimMultiRemoteTest(unittest.TestCase):
                     printf 'example/canonical\\n'
                     ;;
                   "issue view")
-                    printf '%s\\n' '{{"state":"OPEN","labels":[{{"name":"task:ready"}}],"title":"multi-remote claim","url":"https://example/issues/42"}}'
+                    # claim.sh reads the labels back after writing them and
+                    # judges the lookup by its exit status, so this has to
+                    # answer --json labels --jq the way gh does (#15).
+                    if printf '%s' "$*" | grep -q -- '--json labels'; then
+                      printf 'agent:%s,task:active\\n' "${{CLAIM_AGENT:-}}"
+                    else
+                      printf '%s\\n' '{{"state":"OPEN","labels":[{{"name":"task:ready"}}],"title":"multi-remote claim","url":"https://example/issues/42"}}'
+                    fi
                     ;;
+                  "pr view") printf 'agent:%s,task:active\\n' "${{CLAIM_AGENT:-}}" ;;
                   "pr list")
                     printf '[]\\n'
                     ;;

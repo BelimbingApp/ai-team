@@ -58,12 +58,16 @@ class ClaimHalfClaimTest(unittest.TestCase):
                   "repo view") printf 'example/canonical\\n' ;;
                   "issue view")
                     if printf '%s' "$*" | grep -q -- '--json labels'; then
+                      [ "${CLAIM_TEST_READBACK_FAILS:-0}" = "1" ] && exit 1
                       printf '%s\\n' "${CLAIM_TEST_ISSUE_READBACK:-}"
                     else
                       printf '%s\\n' "$CLAIM_TEST_ISSUE_JSON"
                     fi
                     ;;
-                  "pr view") printf '%s\\n' "${CLAIM_TEST_PR_READBACK:-}" ;;
+                  "pr view")
+                    [ "${CLAIM_TEST_READBACK_FAILS:-0}" = "1" ] && exit 1
+                      printf '%s\\n' "${CLAIM_TEST_PR_READBACK:-}"
+                      ;;
                   "pr list") printf '%s\\n' "${CLAIM_TEST_PR_LIST:-[]}" ;;
                   "label list") printf '[{"name":"agent:fable"},{"name":"agent:opus-5"}]\\n' ;;
                   "pr create") printf 'https://example/pull/99\\n' ;;
@@ -87,7 +91,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
         return env
 
     def run_claim(self, *, agent="opus-5", pr_list="[]", issue_labels=("task:ready",),
-                  pr_readback="", issue_readback=""):
+                  pr_readback="", issue_readback="", readback_fails=False):
         env = self.git_env()
         env["CLAIM_AGENT"] = agent
         env["CLAIM_TEST_ISSUE_JSON"] = json.dumps({
@@ -100,6 +104,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
         env["CLAIM_TEST_PR_READBACK"] = pr_readback
         env["CLAIM_TEST_ISSUE_READBACK"] = issue_readback
         env["CLAIM_TEST_EDITS"] = str(self.edits)
+        env["CLAIM_TEST_READBACK_FAILS"] = "1" if readback_fails else "0"
         return run_with_bash_path(
             ["bash", str(SCRIPT), "42"],
             stub_directory=self.bin,
@@ -173,12 +178,35 @@ class ClaimHalfClaimTest(unittest.TestCase):
 
     def test_an_unreadable_readback_warns_and_leaves_the_claim_standing(self):
         # gh unavailable is not evidence that a label is missing; the claim
-        # succeeded and the agent is told how to check it.
-        result = self.run_claim(pr_readback="", issue_readback="")
+        # succeeded and the agent is told how to check it. Only a non-zero
+        # exit means "could not read".
+        result = self.run_claim(readback_fails=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not read back the labels", result.stderr)
         self.assertIn("claimed #42", result.stdout)
+
+    def test_an_empty_readback_is_no_labels_at_all_not_an_unreadable_one(self):
+        # The regression the #18 review caught: `--jq '[.labels[].name]
+        # | join(",")'` answers "" and exits zero for an unlabelled resource,
+        # which is exactly the half-claim. Reading emptiness as "could not
+        # read" sent the one case this function exists for down the warning
+        # path and exited zero on it.
+        result = self.run_claim(pr_readback="", issue_readback="")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("HALF-CLAIM", result.stderr)
+        self.assertIn(f"PR #99 agent:opus-5", result.stderr)
+        self.assertIn("issue #42 task:active", result.stderr)
+        self.assertNotIn("could not read back", result.stderr)
+
+    def test_one_unreadable_side_does_not_hide_a_missing_label_on_the_other(self):
+        # Only the PR lookup fails; the issue answers with an empty label set.
+        # The proven-missing side must still fail the claim.
+        result = self.run_claim(pr_readback="agent:opus-5,task:active", issue_readback="")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("issue #42 agent:opus-5", result.stderr)
 
 
 if __name__ == "__main__":
