@@ -59,13 +59,32 @@ if [[ "$state" == "OPEN" ]]; then
     exit 1
   fi
 
-  merge_json=$(gh api -X PUT "repos/$repo/pulls/$pr/merge" -f merge_method=merge 2>/dev/null) || {
+  # A passed gate establishes the AI Team's own exact-head review evidence; it
+  # cannot waive GitHub branch protections. Keep GitHub's response visible on
+  # an endpoint failure, then name that boundary so a shared account is not
+  # mistaken for a native approving reviewer (#35).
+  if ! merge_json=$(gh api -X PUT "repos/$repo/pulls/$pr/merge" -f merge_method=merge 2>&1); then
     echo "merge request failed for PR #$pr" >&2
+    if [[ -n "$merge_json" ]]; then
+      printf '%s\n' "$merge_json" >&2
+    fi
+    cat >&2 <<'TXT'
+The AI Team gate does not override GitHub branch protections or other repository
+merge rules. If this repository requires a native GitHub approval, obtain one
+from a separate eligible reviewer or automation; only the repository owner can
+intentionally change that external rule.
+TXT
     exit 1
-  }
+  fi
   if [[ "$(jq -r '.merged // false' <<<"$merge_json")" != "true" ]]; then
     message=$(jq -r '.message // "GitHub did not merge the PR"' <<<"$merge_json")
     echo "PR #$pr was not merged: $message" >&2
+    cat >&2 <<'TXT'
+The AI Team gate does not override GitHub branch protections or other repository
+merge rules. If this repository requires a native GitHub approval, obtain one
+from a separate eligible reviewer or automation; only the repository owner can
+intentionally change that external rule.
+TXT
     exit 1
   fi
   merge_sha=$(jq -r '.sha // empty' <<<"$merge_json")
