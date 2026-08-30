@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 
 BLOCKED_LABEL = "task:blocked"
+MARKER_INFIX = "-blocked-by-sweep:"
 READY_LABEL = "task:ready"
 BLOCKED_BY_RE = re.compile(
     r"(?i)(?<![\w-])Blocked-By:[ \t]*(#[0-9]+(?:[ \t]*,[ \t]*#[0-9]+)*)(?=[ \t]*(?:[.;]|$))"
@@ -112,7 +113,10 @@ def label_names(issue: dict) -> tuple[str, ...]:
 
 
 def transition_for(
-    issue: dict, blocker_states: dict[int, str | None], comments: list[str] | None = None
+    issue: dict,
+    blocker_states: dict[int, str | None],
+    comments: list[str] | None = None,
+    repository: str | None = None,
 ) -> Transition | None:
     """Build an idempotent transition, or return None when it is unsafe."""
 
@@ -128,28 +132,60 @@ def transition_for(
     if READY_LABEL not in labels:
         labels.append(READY_LABEL)
 
-    marker = comment_marker(blockers)
     existing_comments = comments or []
     comment = None
-    if not any(marker in body for body in existing_comments):
+    if not any(marker_matches(blockers, body) for body in existing_comments):
         references = ", ".join(f"#{number}" for number in blockers)
         comment = (
             f"Blocked-By sweep: all declared blockers are closed ({references}); "
-            f"marking this task ready. {marker}"
+            f"marking this task ready. {comment_marker(blockers, repository)}"
         )
 
     return Transition(tuple(labels), comment)
 
 
-def comment_marker(blockers: tuple[int, ...]) -> str:
+def sweep_slug(repository: str | None) -> str:
+    """The adopter-specific half of the marker and User-Agent.
+
+    Derived from GITHUB_REPOSITORY (which the workflow always supplies) so no
+    adopter ships another repository's name in its issue comments (#2). The
+    repository's own name, lowercased, with anything outside [a-z0-9-]
+    collapsed to '-'; a missing or empty value degrades to the neutral
+    'ai-team' rather than crashing a sweep that only needed the suffix.
+    """
+
+    name = (repository or "").rsplit("/", 1)[-1].lower()
+    slug = re.sub(r"[^a-z0-9-]+", "-", name).strip("-")
+
+    return slug or "ai-team"
+
+
+def comment_marker(blockers: tuple[int, ...], repository: str | None = None) -> str:
     references = ",".join(str(number) for number in blockers)
-    return f"<!-- belimbing-blocked-by-sweep:{references} -->"
+    return f"<!-- {sweep_slug(repository)}{MARKER_INFIX}{references} -->"
+
+
+def marker_matches(blockers: tuple[int, ...], body: str) -> bool:
+    """Whether a comment already carries this blocker-set's marker.
+
+    Matched on the stable infix, deliberately ignoring the prefix: markers
+    written under any earlier adopter name (belimbing-, bilimbi-, a fork's)
+    still count as "already posted", so adopting this package — or renaming a
+    repository — never makes the sweep re-post a duplicate unblock comment on
+    every issue it has ever swept (#2's migration trap).
+    """
+
+    references = ",".join(str(number) for number in blockers)
+
+    return f"{MARKER_INFIX}{references} -->" in body
 
 
 class GitHubAPI:
     def __init__(self, repository: str, token: str):
         self.base_url = f"https://api.github.com/repos/{repository}"
+        self.repository = repository
         self.token = token
+        self.user_agent = f"{sweep_slug(repository)}-blocked-by-sweep"
 
     def request(self, path: str, method: str = "GET", payload: dict | None = None):
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -160,7 +196,7 @@ class GitHubAPI:
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
-                "User-Agent": "belimbing-blocked-by-sweep",
+                "User-Agent": self.user_agent,
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             method=method,
@@ -221,7 +257,7 @@ def sweep(api: GitHubAPI) -> int:
         if any(states[number] != "closed" for number in blockers):
             continue
 
-        transition = transition_for(issue, states, api.comments(issue["number"]))
+        transition = transition_for(issue, states, api.comments(issue["number"]), api.repository)
         if transition is None:
             continue
 
