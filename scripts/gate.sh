@@ -125,11 +125,18 @@ else
   say_bad "BEHIND origin/$BASE ($(git rev-parse --short "origin/$BASE")) — merge $BASE into the branch first"
 fi
 
-# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The current
-#    main tip supplies the expected check names. This is observed repository
-#    state, not a count copied into the script; when CI adds or removes a job,
-#    the gate follows main. A passing early check can therefore never authorize
-#    a merge while another expected check has not reported on the reviewed SHA.
+# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The heads of
+#    the last five merged pull requests supply the expected check names: only
+#    names present on every head are universal enough to require. A
+#    default-branch tip also carries push- and schedule-only checks, which a
+#    pull request can never produce; using that tip as the baseline made those
+#    checks permanently missing from ordinary pull requests (#1). Sampling one
+#    merged PR had the same failure for path-filtered jobs (#22).
+#
+#    This is observed repository state, not a count copied into the script; when
+#    CI adds or removes a job, the gate follows the recent merged PRs. A passing
+#    early check can therefore never authorize a merge while another expected
+#    check has not reported on the reviewed SHA.
 # Judge the LATEST run of each check NAME, not every run on the SHA. A
 # superseded run stays on the commit forever: `concurrency: cancel-in-progress`
 # leaves a `cancelled` entry behind whenever a PR is force-pushed or pushed
@@ -139,39 +146,71 @@ fi
 runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null \
   | jq -sc '[.[].check_runs[]]')
 
-main_sha=$(git rev-parse "origin/$BASE")
-main_runs=$(gh api "repos/$REPO/commits/$main_sha/check-runs" --paginate 2>/dev/null \
-  | jq -sc '[.[].check_runs[]]')
+# The first pull request may have no historical PR head. Do not fall back to
+# the default branch, whose push/schedule runs are exactly the source of the
+# false expectation this check prevents. Instead, the first PR bootstraps from
+# every check that actually reported on its reviewed SHA, with a visible WARN
+# that this is weaker evidence than the normal observed baseline.
+#
+# For later PRs, intersect the names observed on the five most recent merged
+# PR heads. A path-filtered job absent from any one of those heads drops out,
+# while a universal job remains expected. If a merged head cannot be read, do
+# not silently turn that observation failure into first-PR bootstrap evidence.
+merged_heads=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
+  --json headRefOid,mergedAt \
+  --jq 'map(select(.mergedAt != null)) | sort_by(.mergedAt) | reverse | .[0:5] | .[].headRefOid // empty' \
+  2>/dev/null || true)
+baseline_count=0
+baseline_fetch_failed=0
+expected_names='[]'
+while IFS= read -r merged_head; do
+  [ -n "$merged_head" ] || continue
+  baseline_count=$((baseline_count + 1))
+  baseline_payload=$(gh api "repos/$REPO/commits/$merged_head/check-runs" --paginate 2>/dev/null) || {
+    baseline_fetch_failed=1
+    break
+  }
+  head_names=$(printf '%s' "$baseline_payload" | jq -sc '[.[].check_runs[].name] | unique' 2>/dev/null) || {
+    baseline_fetch_failed=1
+    break
+  }
+  if [ "$baseline_count" -eq 1 ]; then
+    expected_names="$head_names"
+  else
+    expected_names=$(jq -nc --argjson left "$expected_names" --argjson right "$head_names" \
+      '$left as $left | $right as $right | [$left[] | . as $name | select($right | index($name))]')
+  fi
+done <<< "$merged_heads"
 
 latest=$(printf '%s' "$runs" | jq -c '
   group_by(.name)
   | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
 
-expected_latest=$(printf '%s' "$main_runs" | jq -c '
-  group_by(.name)
-  | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
-
 n=$(printf '%s' "$latest" | jq -r 'length' 2>/dev/null || echo 0)
-expected_n=$(printf '%s' "$expected_latest" | jq -r 'length' 2>/dev/null || echo 0)
 present_names=$(printf '%s' "$latest" | jq -c '[.[].name] | unique' 2>/dev/null || echo '[]')
-expected_names=$(printf '%s' "$expected_latest" | jq -c '[.[].name] | unique' 2>/dev/null || echo '[]')
-missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
-  '$expected - $present' 2>/dev/null || echo '[]')
-missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
 bad=$(printf '%s' "$latest" | jq -r \
       '[.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))]|length' \
       2>/dev/null || echo 1)
-if [ "${expected_n:-0}" -lt 1 ]; then
-  say_bad "cannot observe expected checks on origin/$BASE ${main_sha:0:8}"
-elif [ "${n:-0}" -lt 1 ]; then
+expected_n=$(printf '%s' "$expected_names" | jq -r 'length' 2>/dev/null || echo 0)
+missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
+  '$expected - $present' 2>/dev/null || echo '[]')
+missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
+if [ "${n:-0}" -lt 1 ]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"
-elif [ "${missing_n:-0}" -gt 0 ]; then
-  say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 elif [ "${bad:-1}" != "0" ]; then
   say_bad "checks on ${REVIEWED:0:8}: $n distinct, $bad not passing"
   printf '%s' "$latest" | jq -r \
     '.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
+elif [ "${baseline_fetch_failed:-0}" = "1" ]; then
+  say_bad "cannot observe check runs for the merged pull-request baseline"
+elif [ "${baseline_count:-0}" -lt 1 ]; then
+  say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
+  say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
+elif [ "${expected_n:-0}" -lt 1 ]; then
+  say_bad "cannot observe a common expected check name across the last $baseline_count merged pull requests"
+elif [ "${missing_n:-0}" -gt 0 ]; then
+  say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 else
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing"
 fi
@@ -253,81 +292,34 @@ case "$lane_issue" in
     ;;
 esac
 
-# `gh api --paginate` prints one JSON array per page. Slurp and flatten those
-# pages before deriving the latest machine verdict for each stable reviewer.
-reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null \
-  | jq -s 'add // []' 2>/dev/null)
-[ -n "$reviews" ] || reviews='[]'
-
-latest_reviews=$(printf '%s' "$reviews" | jq -c --arg sha "$REVIEWED" '
-  def from_agent:
-    ([((.body // "") | split("\n")[]
-       | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
-       | ascii_downcase)] | unique) as $agents
-    | if ($agents | length) == 1 then $agents[0] else "" end;
-  def explicit_verdicts:
-    [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
-       | ascii_downcase)] | unique;
-  [.[]
-   | select(.commit_id == $sha)
-   | . + {agent: from_agent, explicit_verdicts: explicit_verdicts}
-   | . + {explicit_verdict:
-       (if (.explicit_verdicts | length) == 1
-        then .explicit_verdicts[0]
-        else ""
-        end)}
-   | . + {verdict:
-       (if .state == "DISMISSED"
-        then ""
-        elif .state == "CHANGES_REQUESTED"
-        then "changes required"
-        elif (.explicit_verdicts | length) > 1
-        then ""
-        elif .explicit_verdict == "changes required"
-        then "changes required"
-        elif .state == "APPROVED"
-             or .explicit_verdict == "accept"
-             or .explicit_verdict == "accept with follow-up"
-        then "accept"
-        else ""
-        end)}
-   | select(.agent != "")]
-  | sort_by(.agent, .submitted_at, .id)
-  | group_by(.agent)
-  | map(last)
-' 2>/dev/null || echo '[]')
-
-accepted_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "accept") | .agent] | unique | join(",")' \
-  2>/dev/null)
-blocking_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "changes required") | .agent] | unique | join(",")' \
-  2>/dev/null)
-
-if [ -n "$accepted_agents" ]; then
-  say_ok "independent exact-head acceptance from $accepted_agents"
-else
-  say_bad "no independent exact-head acceptance; require **From:** <reviewer> plus APPROVED or **Verdict:** accept"
-fi
-if [ -z "$blocking_agents" ]; then
-  say_ok "no independent exact-head changes-required verdict"
-else
-  say_bad "independent exact-head changes required by $blocking_agents"
+# The review grammar has one canonical implementation. Both this local
+# pre-flight and the required CI workflow call review_gate.sh, so an author
+# cannot get a different verdict by switching landing paths.
+review_exit=0
+review_output=$("$here/review_gate.sh" "$PR" "$REVIEWED" 2>&1) || review_exit=$?
+while IFS= read -r review_line; do
+  [ -n "$review_line" ] || continue
+  case "$review_line" in
+    "PASS: "*) say_ok "${review_line#PASS: }" ;;
+    "FAIL: "*) say_bad "${review_line#FAIL: }" ;;
+    "WARN: "*) say_warn "${review_line#WARN: }" ;;
+    "ERROR: "*) say_bad "review gate: ${review_line#ERROR: }" ;;
+    *)         say_warn "review gate: $review_line" ;;
+  esac
+done <<< "$review_output"
+if [ "$review_exit" -gt 1 ]; then
+  say_bad "review gate could not evaluate the PR"
 fi
 
-# 5c. A review that carries a **From:** marker but no line-anchored **Verdict:**
-# (or 2+ conflicting ones) is silently excluded above rather than counted — say
-# so, so a reviewer who wrote an inline verdict finds out from the gate instead
-# of a "no acceptance" message that looks identical to never having reviewed (#359).
-malformed_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "") | .agent] | unique | join("\n")' \
-  2>/dev/null)
-if [ -n "$malformed_agents" ]; then
-  while IFS= read -r agent; do
-    [ -n "$agent" ] || continue
-    say_warn "a review marker from $agent was seen at ${REVIEWED:0:8} but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"
-  done <<< "$malformed_agents"
+# Keep the comment-stream diagnostic below focused on the case where a review
+# was not already accepted. Comments are informational only and never count.
+accepted_agents=""
+if grep -q '^PASS: independent exact-head acceptance' <<< "$review_output"; then
+  accepted_agents="present"
+elif ! grep -q '^FAIL:' <<< "$review_output"; then
+  # A malformed or partially shipped delegate must not turn the review
+  # dimension into silence. Gate success requires affirmative acceptance.
+  say_bad "review gate did not report an independent exact-head acceptance"
 fi
 
 # 5d. gh pr review --approve is refused on our own PRs (shared account), and

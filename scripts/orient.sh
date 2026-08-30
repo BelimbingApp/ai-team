@@ -127,6 +127,59 @@ gh pr list --repo "$REPO" --state open --limit 40 \
   || echo "  (gh unavailable)"
 
 echo
+echo "== half-claims — a lane exists but the board does not show it =="
+# claim.sh can be interrupted between creating the PR and applying the labels.
+# Both halves of the evidence are already on this page — an open PR carrying no
+# agent:* label, and an issue that still reads unclaimed — and nothing joined
+# them, so a lane on #1 sat invisible until a steward noticed by eye (#19).
+# The lane issue comes from the shared contract in _lane_issue.sh rather than a
+# second parser, and the owner comes from the PR body's **From:** marker, the
+# same source claim.sh uses to decide whether a half-claim is yours to finish.
+unlabelled=$(gh pr list --repo "$REPO" --state open --limit 40 --json number,labels \
+  --jq '.[]|select([.labels[].name|select(startswith("agent:"))]|length == 0)|.number' 2>/dev/null)
+half_claims=0
+for half_pr in $unlabelled; do
+  half_detail=$(gh pr view "$half_pr" --repo "$REPO" --json title,body,headRefName 2>/dev/null) || continue
+  half_title=$(printf '%s' "$half_detail" | jq -r '.title // ""')
+  half_body=$(printf '%s' "$half_detail" | jq -r '.body // ""')
+  half_branch=$(printf '%s' "$half_detail" | jq -r '.headRefName // ""')
+  half_issue=$(ai_team_derive_lane_issue "$half_title" "$half_branch" "$half_body" "")
+  case "$half_issue" in
+    ''|none|error:*) continue ;;
+  esac
+  # Only a lane the board is not already showing. An issue that carries its own
+  # agent:* label is claimed, whatever the PR looks like.
+  half_owners=$(gh issue view "$half_issue" --repo "$REPO" --json labels \
+    --jq '[.labels[].name|select(startswith("agent:"))]|length' 2>/dev/null) || continue
+  [ "$half_owners" = "0" ] || continue
+  half_state=$(gh issue view "$half_issue" --repo "$REPO" --json labels \
+    --jq '[.labels[].name|select(startswith("task:"))]|join(" ")' 2>/dev/null)
+  # Same **From:** idiom gate.sh reads verdicts with, so one marker grammar
+  # serves the whole package rather than a second one drifting here.
+  # `unique`, then require exactly one — the same shape gate.sh's from_agent
+  # uses, and the reason it is written that way. Taking .[0] would let a body
+  # carrying two distinct markers hand the lane to whichever appeared first,
+  # which is precisely the ownership guess this section exists to refuse.
+  half_marker=$(printf '%s' "$half_detail" | jq -r '
+    ([((.body // "") | split("\n")[]
+       | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
+       | ascii_downcase)] | unique) as $ids
+    | if ($ids | length) == 1 then $ids[0] else "" end' 2>/dev/null)
+  half_claims=$((half_claims + 1))
+  printf '  #%s holds #%s, which still reads %s\n' \
+    "$half_pr" "$half_issue" "${half_state:-no task label}"
+  if [ -n "$half_marker" ]; then
+    printf '      its owner re-runs claim.sh, or anyone repairs it:\n'
+    printf '      gh pr edit %s --add-label agent:%s --add-label task:active\n' "$half_pr" "$half_marker"
+    printf '      gh issue edit %s --add-label agent:%s --add-label task:active --remove-label task:ready\n' \
+      "$half_issue" "$half_marker"
+  else
+    printf '      no **From:** marker on the PR — ask on the lane before labelling it\n'
+  fi
+done
+[ "$half_claims" -eq 0 ] && echo "  none"
+
+echo
 echo "== holds that have been addressed — the author pushed after the label =="
 # A hold transfers the obligation to whoever set it, and nothing else tells that
 # person when it comes due. A review hold once remained for 75 minutes after the
