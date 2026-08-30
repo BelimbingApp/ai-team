@@ -248,8 +248,12 @@ out in the parent's checkout, and a named worktree on it will be refused.
 
 Declare dependencies as either a `Blocked-By: #N, #M` header or an inline prose
 sentence ending the reference list (`... Blocked-By: #N. ...`), so a sweep can
-clear them when every blocker closes. Code blocks and quotes are documentation,
-not declarations.
+clear them when every blocker closes. Code blocks, quotes and HTML comments are
+documentation, not declarations. The package owns this prose boundary:
+`scripts/blocked_by_sweep.py` (in the package layout) exposes `safe_lines` and
+`parse_blockers`, and an adopter that reads issue or PR prose for its own
+tooling imports them rather than writing a second parser — two parsers over the
+same body will drift, and the weaker one becomes the exploitable one.
 
 ---
 

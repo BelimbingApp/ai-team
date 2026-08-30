@@ -281,3 +281,31 @@ Parent: #339. Blocked-By: #344. Blocks lane 3 (sync preparation and publication)
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HtmlCommentBoundaryTest(unittest.TestCase):
+    """Markdown renders HTML comments invisible, so they are not prose (#3)."""
+
+    def test_a_declaration_inside_a_comment_line_is_not_a_declaration(self):
+        self.assertEqual(parse_blockers("<!-- Blocked-By: #1 -->"), ())
+
+    def test_a_declaration_inside_a_multiline_comment_is_not_a_declaration(self):
+        self.assertEqual(parse_blockers("<!--\nBlocked-By: #2\n-->\nBlocked-By: #3\n"), (3,))
+
+    def test_an_inline_comment_span_is_invisible_text(self):
+        self.assertEqual(parse_blockers("see <!-- Blocked-By: #4. --> nothing"), ())
+
+    def test_prose_before_an_unclosed_comment_opener_still_declares(self):
+        self.assertEqual(parse_blockers("Blocked-By: #5. <!-- note"), (5,))
+
+    def test_a_comment_opener_inside_a_fence_does_not_open_a_comment(self):
+        self.assertEqual(parse_blockers("```\n<!--\n```\nBlocked-By: #6\n"), (6,))
+
+    def test_a_fence_marker_inside_a_comment_does_not_open_a_fence(self):
+        self.assertEqual(parse_blockers("<!--\n```\n-->\nBlocked-By: #10\n"), (10,))
+
+    def test_prose_after_a_multiline_comment_closes_on_the_same_line_declares(self):
+        self.assertEqual(parse_blockers("<!--\nnoise\n--> Blocked-By: #9.\n"), (9,))
+
+    def test_a_documented_example_declaration_in_a_comment_never_arms_the_sweep(self):
+        self.assertEqual(parse_blockers("<!-- write: Blocked-By: #8. -->"), ())

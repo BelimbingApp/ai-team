@@ -23,11 +23,17 @@ READY_LABEL = "task:ready"
 BLOCKED_BY_RE = re.compile(
     r"(?i)(?<![\w-])Blocked-By:[ \t]*(#[0-9]+(?:[ \t]*,[ \t]*#[0-9]+)*)(?=[ \t]*(?:[.;]|$))"
 )
-# Only prose can declare a dependency. The guard is intentionally local: there
-# is no same-repository parser to keep in lockstep with this Markdown boundary.
+# Only prose can declare a dependency. This module owns that boundary for the
+# whole package (#3): an adopter that reads issue or PR prose for its own gate
+# imports safe_lines/parse_blockers instead of writing a second parser, so two
+# parsers can never disagree about the same body and the weaker one can never
+# become the exploitable one.
 OPENING_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 CLOSING_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[ \t]*$")
 INDENTED_CODE_RE = re.compile(r"^( {4}|[ ]*\t)")
+INLINE_COMMENT_RE = re.compile(r"<!--.*?-->")
+
+__all__ = ["safe_lines", "parse_blockers", "transition_for", "sweep"]
 
 
 @dataclass(frozen=True)
@@ -39,14 +45,18 @@ class Transition:
 def safe_lines(body: str) -> list[str]:
     """Body lines that Markdown renders as prose.
 
-    Fenced blocks, indented code and blockquotes are dropped, so documenting the
+    This is the package's one prose boundary (#3). Fenced blocks, indented
+    code, blockquotes and HTML comments are dropped, so documenting the
     convention inside an issue cannot arm the sweep against that issue. A fence
     closes only on a run of the same character at least as long as the one that
-    opened it, so a ```` block is not ended by a ``` line.
+    opened it, so a ```` block is not ended by a ``` line. HTML comments are
+    excluded because Markdown renders them invisible — and the sweep's own
+    idempotency marker is one, so a quoted marker must never read as prose.
     """
 
     lines: list[str] = []
     fence: str | None = None
+    in_comment = False
 
     for line in body.split("\n"):
         raw_line = line.replace("\r", "")
@@ -64,7 +74,16 @@ def safe_lines(body: str) -> list[str]:
                 fence = None
             continue
 
-        if INDENTED_CODE_RE.match(raw_line) or trimmed.startswith(">"):
+        if in_comment:
+            # Comment state is entered only outside fences, and everything up
+            # to the closer is invisible text — including any indentation or
+            # fence marker it carries — so only the closer matters here.
+            _, closed, rest = raw_line.partition("-->")
+            if not closed:
+                continue
+            trimmed = rest.strip()
+            in_comment = False
+        elif INDENTED_CODE_RE.match(raw_line) or trimmed.startswith(">"):
             continue
 
         opening = OPENING_FENCE_RE.match(trimmed)
@@ -72,7 +91,13 @@ def safe_lines(body: str) -> list[str]:
             fence = opening.group(1)
             continue
 
-        lines.append(trimmed)
+        trimmed = INLINE_COMMENT_RE.sub(" ", trimmed)
+        before, opener, _ = trimmed.partition("<!--")
+        if opener:
+            in_comment = True
+            trimmed = before
+
+        lines.append(trimmed.strip())
 
     return lines
 
@@ -85,7 +110,10 @@ def parse_blockers(body: str | None) -> tuple[int, ...]:
     """Return issue numbers from every valid prose Blocked-By declaration.
 
     Standalone headers and inline sentences ending the reference list with a
-    period or semicolon are both declarations. All declarations are unioned
+    period or semicolon are both declarations. Inline stays a declaration by
+    decision (#3): a real blocker was declared mid-sentence (belimbing #345)
+    and honored, and dropping the form would silently strand issues written
+    that way in task:blocked — a fail-closed state nobody is watching. All declarations are unioned
     rather than only the first: recording a new blocker by adding a line is the
     natural edit, and reading only the first silently dropped the rest -- which
     marked an issue ready while a blocker was open.
