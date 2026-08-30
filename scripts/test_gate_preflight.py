@@ -8,7 +8,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("gate.sh")
 
@@ -156,6 +156,7 @@ class GateMechanismTest(unittest.TestCase):
         body: str | None = None,
         branch: str | None = None,
         title: str | None = None,
+        review_gate_body: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         base = Path(self.dir.name)
         checkout = base / "checkout"
@@ -233,7 +234,18 @@ class GateMechanismTest(unittest.TestCase):
             head: {"check_runs": runs} for head, runs in baseline_check_runs_by_head.items()
         })
 
-        args = ["bash", str(SCRIPT), "1"]
+        script = SCRIPT
+        if review_gate_body is not None:
+            mechanisms = base / "mechanisms"
+            mechanisms.mkdir()
+            for name in ("gate.sh", "review_gate.sh", "_lane_issue.sh", "_default_branch.sh"):
+                shutil.copy2(SCRIPT.with_name(name), mechanisms / name)
+            review_gate = mechanisms / "review_gate.sh"
+            review_gate.write_text(review_gate_body, encoding="utf-8")
+            review_gate.chmod(review_gate.stat().st_mode | stat.S_IXUSR)
+            script = mechanisms / "gate.sh"
+
+        args = ["bash", bash_path(script), "1"]
         if reviewed is not None:
             args.append(reviewed)
 
@@ -543,6 +555,20 @@ class GateMechanismTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_silent_review_delegate_cannot_erase_the_review_dimension(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            review_gate_body="#!/usr/bin/env bash\nexit 0\n",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "review gate did not report an independent exact-head acceptance",
+            result.stdout,
+        )
         self.assertIn("GATE: FAIL", result.stdout)
 
     def test_same_lane_approval_is_not_independent(self):

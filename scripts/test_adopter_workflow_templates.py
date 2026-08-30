@@ -33,7 +33,7 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
         self.assertIn("GITHUB_REPOSITORY: ${{ github.repository }}", SWEEP)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", SWEEP)
 
-    def test_install_guide_names_both_adopter_owned_templates(self):
+    def test_install_guide_names_all_adopter_owned_templates(self):
         document = (TEMPLATES.parent / "README.md").read_text(encoding="utf-8")
         self.assertIn(
             "cp docs/ai-team/templates/mechanisms.yml .github/workflows/ai-team-mechanisms.yml",
@@ -41,6 +41,10 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
         )
         self.assertIn(
             "cp docs/ai-team/templates/blocked-by-sweep.yml .github/workflows/ai-team-blocked-by-sweep.yml",
+            document,
+        )
+        self.assertIn(
+            "cp docs/ai-team/templates/independent-review.yml .github/workflows/ai-team-independent-review.yml",
             document,
         )
         self.assertIn("issues: write", document)

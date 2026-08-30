@@ -292,81 +292,34 @@ case "$lane_issue" in
     ;;
 esac
 
-# `gh api --paginate` prints one JSON array per page. Slurp and flatten those
-# pages before deriving the latest machine verdict for each stable reviewer.
-reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null \
-  | jq -s 'add // []' 2>/dev/null)
-[ -n "$reviews" ] || reviews='[]'
-
-latest_reviews=$(printf '%s' "$reviews" | jq -c --arg sha "$REVIEWED" '
-  def from_agent:
-    ([((.body // "") | split("\n")[]
-       | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
-       | ascii_downcase)] | unique) as $agents
-    | if ($agents | length) == 1 then $agents[0] else "" end;
-  def explicit_verdicts:
-    [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
-       | ascii_downcase)] | unique;
-  [.[]
-   | select(.commit_id == $sha)
-   | . + {agent: from_agent, explicit_verdicts: explicit_verdicts}
-   | . + {explicit_verdict:
-       (if (.explicit_verdicts | length) == 1
-        then .explicit_verdicts[0]
-        else ""
-        end)}
-   | . + {verdict:
-       (if .state == "DISMISSED"
-        then ""
-        elif .state == "CHANGES_REQUESTED"
-        then "changes required"
-        elif (.explicit_verdicts | length) > 1
-        then ""
-        elif .explicit_verdict == "changes required"
-        then "changes required"
-        elif .state == "APPROVED"
-             or .explicit_verdict == "accept"
-             or .explicit_verdict == "accept with follow-up"
-        then "accept"
-        else ""
-        end)}
-   | select(.agent != "")]
-  | sort_by(.agent, .submitted_at, .id)
-  | group_by(.agent)
-  | map(last)
-' 2>/dev/null || echo '[]')
-
-accepted_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "accept") | .agent] | unique | join(",")' \
-  2>/dev/null)
-blocking_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "changes required") | .agent] | unique | join(",")' \
-  2>/dev/null)
-
-if [ -n "$accepted_agents" ]; then
-  say_ok "independent exact-head acceptance from $accepted_agents"
-else
-  say_bad "no independent exact-head acceptance; require **From:** <reviewer> plus APPROVED or **Verdict:** accept"
-fi
-if [ -z "$blocking_agents" ]; then
-  say_ok "no independent exact-head changes-required verdict"
-else
-  say_bad "independent exact-head changes required by $blocking_agents"
+# The review grammar has one canonical implementation. Both this local
+# pre-flight and the required CI workflow call review_gate.sh, so an author
+# cannot get a different verdict by switching landing paths.
+review_exit=0
+review_output=$("$here/review_gate.sh" "$PR" "$REVIEWED" 2>&1) || review_exit=$?
+while IFS= read -r review_line; do
+  [ -n "$review_line" ] || continue
+  case "$review_line" in
+    "PASS: "*) say_ok "${review_line#PASS: }" ;;
+    "FAIL: "*) say_bad "${review_line#FAIL: }" ;;
+    "WARN: "*) say_warn "${review_line#WARN: }" ;;
+    "ERROR: "*) say_bad "review gate: ${review_line#ERROR: }" ;;
+    *)         say_warn "review gate: $review_line" ;;
+  esac
+done <<< "$review_output"
+if [ "$review_exit" -gt 1 ]; then
+  say_bad "review gate could not evaluate the PR"
 fi
 
-# 5c. A review that carries a **From:** marker but no line-anchored **Verdict:**
-# (or 2+ conflicting ones) is silently excluded above rather than counted — say
-# so, so a reviewer who wrote an inline verdict finds out from the gate instead
-# of a "no acceptance" message that looks identical to never having reviewed (#359).
-malformed_agents=$(printf '%s' "$latest_reviews" | jq -r --arg author "$author_agent" \
-  '[.[] | select(.agent != $author and .verdict == "") | .agent] | unique | join("\n")' \
-  2>/dev/null)
-if [ -n "$malformed_agents" ]; then
-  while IFS= read -r agent; do
-    [ -n "$agent" ] || continue
-    say_warn "a review marker from $agent was seen at ${REVIEWED:0:8} but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"
-  done <<< "$malformed_agents"
+# Keep the comment-stream diagnostic below focused on the case where a review
+# was not already accepted. Comments are informational only and never count.
+accepted_agents=""
+if grep -q '^PASS: independent exact-head acceptance' <<< "$review_output"; then
+  accepted_agents="present"
+elif ! grep -q '^FAIL:' <<< "$review_output"; then
+  # A malformed or partially shipped delegate must not turn the review
+  # dimension into silence. Gate success requires affirmative acceptance.
+  say_bad "review gate did not report an independent exact-head acceptance"
 fi
 
 # 5d. gh pr review --approve is refused on our own PRs (shared account), and
