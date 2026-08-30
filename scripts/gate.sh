@@ -144,9 +144,11 @@ fi
 runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null \
   | jq -sc '[.[].check_runs[]]')
 
-# The first pull request may have no historical PR head. Keep the failure
-# explicit rather than falling back to the default branch, whose push/schedule
-# runs are exactly the source of the false expectation this check prevents.
+# The first pull request may have no historical PR head. Do not fall back to
+# the default branch, whose push/schedule runs are exactly the source of the
+# false expectation this check prevents. Instead, the first PR bootstraps from
+# every check that actually reported on its reviewed SHA, with a visible WARN
+# that this is weaker evidence than the normal observed baseline.
 merged_head=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
   --json headRefOid,mergedAt \
   --jq 'map(select(.mergedAt != null)) | max_by(.mergedAt).headRefOid // empty' \
@@ -175,17 +177,18 @@ missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
 bad=$(printf '%s' "$latest" | jq -r \
       '[.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))]|length' \
       2>/dev/null || echo 1)
-if [ "${expected_n:-0}" -lt 1 ]; then
-  say_bad "cannot observe expected checks on origin/$BASE from the last merged pull request"
-elif [ "${n:-0}" -lt 1 ]; then
+if [ "${n:-0}" -lt 1 ]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"
-elif [ "${missing_n:-0}" -gt 0 ]; then
-  say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 elif [ "${bad:-1}" != "0" ]; then
   say_bad "checks on ${REVIEWED:0:8}: $n distinct, $bad not passing"
   printf '%s' "$latest" | jq -r \
     '.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
+elif [ "${expected_n:-0}" -lt 1 ]; then
+  say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
+  say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
+elif [ "${missing_n:-0}" -gt 0 ]; then
+  say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 else
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing"
 fi

@@ -34,7 +34,7 @@ GH_STUB = textwrap.dedent(
           '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels}'
         ;;
       "pr list")
-        printf '%s\\n' "${GATE_TEST_MERGED_HEAD:-$GATE_TEST_MAIN_SHA}"
+        printf '%s\\n' "$GATE_TEST_MERGED_HEAD"
         ;;
       "api repos/$GATE_TEST_CANONICAL/commits/$GATE_TEST_MERGED_HEAD/check-runs")
         printf '%s\\n' "$GATE_TEST_BASELINE_CHECK_RUNS"
@@ -219,7 +219,7 @@ class GateMechanismTest(unittest.TestCase):
         if baseline_check_runs is None:
             baseline_check_runs = main_check_runs
         env["GATE_TEST_MAIN_CHECK_RUNS"] = json.dumps({"check_runs": main_check_runs})
-        env["GATE_TEST_MERGED_HEAD"] = merged_head or self.main_sha
+        env["GATE_TEST_MERGED_HEAD"] = self.main_sha if merged_head is None else merged_head
         env["GATE_TEST_BASELINE_CHECK_RUNS"] = json.dumps({"check_runs": baseline_check_runs})
 
         args = ["bash", str(SCRIPT), "1"]
@@ -427,14 +427,28 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
         self.assertIn("2 distinct checks", result.stdout)
 
-    def test_unobservable_main_check_baseline_blocks_closed(self):
+    def test_first_pull_request_bootstraps_from_passing_reviewed_sha(self):
         result = self.run_gate(
             origin=CANONICAL_HTTPS,
             reviewed=self.head_sha,
             main_check_runs=[],
+            merged_head="",
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("no merged pull request baseline is available", result.stdout)
+        self.assertIn("bootstrap", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_first_pull_request_without_checks_still_blocks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[],
+            main_check_runs=[],
+            merged_head="",
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("cannot observe expected checks on origin/main", result.stdout)
+        self.assertIn("no checks reported yet", result.stdout)
 
     def test_missing_independent_review_fails_the_gate(self):
         result = self.run_gate(
