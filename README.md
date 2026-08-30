@@ -25,6 +25,21 @@ git subtree add --prefix=docs/ai-team \
   https://github.com/BelimbingApp/ai-team.git main --squash
 ```
 
+At the same mount-time change, copy the adopter-owned workflow templates into
+the host repository. They are intentionally outside the subtree so each
+adopter controls its own triggers and permissions:
+
+```bash
+mkdir -p .github/workflows
+cp docs/ai-team/templates/mechanisms.yml .github/workflows/ai-team-mechanisms.yml
+cp docs/ai-team/templates/blocked-by-sweep.yml .github/workflows/ai-team-blocked-by-sweep.yml
+```
+
+The mechanism workflow runs the mounted suite on every pull request and on
+pushes to `main`; if the adopter uses another default branch, change that one
+branch in the copied template. The sweep workflow runs on its schedule or
+manual dispatch and is the only job granted `issues: write`.
+
 Its intended permanent home is `.agents/skills/ai-team/`, where compatible
 agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
 loads skills from that standard location; that future move is a path change, not

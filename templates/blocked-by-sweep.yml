@@ -1,0 +1,34 @@
+name: AI Team blocked-by sweep
+
+# Copy this adopter-owned workflow to .github/workflows/. The mechanism suite
+# already runs on every pull request; keeping this workflow schedule-only
+# prevents an optional sweep check from becoming a path-dependent gate check.
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-team-blocked-by-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Unblock resolved tasks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out the adopter
+        uses: actions/checkout@v5
+
+      - name: Run the Blocked-By sweep
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 docs/ai-team/scripts/blocked_by_sweep.py

@@ -1,0 +1,41 @@
+name: AI Team mechanisms
+
+# Copy this adopter-owned workflow to .github/workflows/. It deliberately
+# runs the complete mounted package suite on every pull request: path filters
+# would make its check name conditional and let a later gate baseline lie.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-team-mechanisms-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  tests:
+    name: Mechanism tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the adopter
+        uses: actions/checkout@v5
+
+      - name: Run the mounted mechanism suite
+        run: python3 -m unittest discover -s docs/ai-team/scripts -p 'test_*.py'
+
+  shell:
+    name: Shell lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the adopter
+        uses: actions/checkout@v5
+
+      - name: Run shellcheck over the mounted mechanisms
+        run: shellcheck --severity=error docs/ai-team/scripts/*.sh
