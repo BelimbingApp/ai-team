@@ -16,8 +16,13 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             self.assertIn("pull_request_target:", workflow)
             self.assertIn("pull_request_review:", workflow)
             self.assertNotIn("  pull_request:\n", workflow)
-            self.assertIn("actions/checkout@v5", workflow)
-            self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+            self.assertNotIn("actions/checkout@", workflow)
+            self.assertIn("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", workflow)
+            self.assertIn("gh api \"repos/${GITHUB_REPOSITORY}/contents/", workflow)
+            self.assertIn("?ref=${DEFAULT_BRANCH}", workflow)
+            self.assertIn("base64 --decode", workflow)
+            self.assertIn("RUNNER_TEMP/review_gate.sh", workflow)
+            self.assertIn('grep -q "HTTP 404" "$error"', workflow)
             self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
             self.assertIn("github.event.pull_request.number", workflow)
             self.assertIn("github.event.pull_request.head.sha", workflow)
@@ -27,10 +32,10 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             self.assertIn('echo "present=true" >> "$GITHUB_OUTPUT"', workflow)
             self.assertIn('echo "present=false" >> "$GITHUB_OUTPUT"', workflow)
 
-        self.assertIn('run: scripts/review_gate.sh', package)
-        self.assertIn('run: docs/ai-team/scripts/review_gate.sh', adopter)
-        self.assertIn("if [ -x scripts/review_gate.sh ]; then", package)
-        self.assertIn("if [ -x docs/ai-team/scripts/review_gate.sh ]; then", adopter)
+        self.assertIn("contents/scripts/review_gate.sh?ref=${DEFAULT_BRANCH}", package)
+        self.assertIn("contents/docs/ai-team/scripts/review_gate.sh?ref=${DEFAULT_BRANCH}", adopter)
+        self.assertIn("run: \"$RUNNER_TEMP/review_gate.sh\"", package)
+        self.assertIn("run: \"$RUNNER_TEMP/review_gate.sh\"", adopter)
 
 
 if __name__ == "__main__":

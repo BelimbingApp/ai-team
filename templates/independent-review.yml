@@ -1,7 +1,8 @@
 name: independent review
 
-# Copy this file into an adopting repository at .github/workflows/. It checks
-# out the trusted default-branch grammar, not the untrusted pull-request copy.
+# Copy this file into an adopting repository at .github/workflows/. It reads
+# the trusted default-branch grammar through the GitHub Contents API and never
+# checks out a pull-request ref in this privileged workflow.
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled]
@@ -19,27 +20,45 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Check out trusted review grammar
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-
-      # The first PR that installs this workflow also installs its grammar.
-      # The trusted default branch cannot evaluate it until that first PR lands.
       - name: Resolve trusted review grammar
         id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          if [ -x docs/ai-team/scripts/review_gate.sh ]; then
+          set -euo pipefail
+          response="$RUNNER_TEMP/review_gate.json"
+          error="$RUNNER_TEMP/review_gate.error"
+          set +e
+          gh api "repos/${GITHUB_REPOSITORY}/contents/docs/ai-team/scripts/review_gate.sh?ref=${DEFAULT_BRANCH}" >"$response" 2>"$error"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            if grep -q "HTTP 404" "$error"; then
+              echo "present=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            cat "$error" >&2
+            exit "$status"
+          fi
+          if ! jq -e '.encoding == "base64" and (.content | type == "string")' "$response" >/dev/null; then
+            echo "unexpected review grammar response" >&2
+            exit 1
+          fi
+          jq -r '.content' "$response" | tr -d '\n' | base64 --decode > "$RUNNER_TEMP/review_gate.sh"
+          chmod +x "$RUNNER_TEMP/review_gate.sh"
+          if [ -x "$RUNNER_TEMP/review_gate.sh" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "review grammar was not materialized" >&2
+            exit 1
           fi
 
       - name: Verify independent review of this exact head
         if: steps.resolve.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: docs/ai-team/scripts/review_gate.sh "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
+        run: "$RUNNER_TEMP/review_gate.sh" "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
 
       - name: Grammar not yet on the default branch
         if: steps.resolve.outputs.present == 'false'
