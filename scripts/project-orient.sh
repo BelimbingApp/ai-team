@@ -37,10 +37,12 @@ fi
 
 echo
 echo "== ai-team project: what ships from origin/$BASE =="
-git ls-tree --name-only "origin/$BASE" -- scripts 2>/dev/null | wc -l \
-  | awk '{print "  scripts/  " $1 " tracked file(s)"}'
-git ls-tree --name-only "origin/$BASE" -- scripts 2>/dev/null | grep -c '^scripts/test_' \
-  | awk '{print "  tests     " $1 " test module(s)"}'
+# -r, or ls-tree reports the `scripts` tree entry itself rather than its
+# contents: the first count is then always 1 and the second always 0, which is
+# what this hook printed to every agent that ran orient.sh (#10).
+shipped=$(git ls-tree -r --name-only "origin/$BASE" -- scripts 2>/dev/null)
+printf '  scripts/  %s tracked file(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^scripts/')"
+printf '  tests     %s test module(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^scripts/test_')"
 
 cat <<'TXT'
 
