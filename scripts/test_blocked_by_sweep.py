@@ -6,6 +6,7 @@ from blocked_by_sweep import (
     BLOCKED_LABEL,
     READY_LABEL,
     comment_marker,
+    sweep_slug,
     parse_blockers,
     transition_for,
 )
@@ -19,11 +20,50 @@ class BlockedBySweepTest(unittest.TestCase):
         self.assertEqual(parse_blockers("blocked on #131"), ())
         self.assertEqual(parse_blockers("Blocked-By: #131 and #132"), ())
 
-    def test_uses_a_belimbing_specific_idempotency_marker(self):
+    def test_derives_the_marker_from_the_repository_name(self):
+        # #2: no adopter ships another repository's name in its comments.
         self.assertEqual(
-            comment_marker((131, 132)),
+            comment_marker((131, 132), "BelimbingApp/ai-team"),
+            "<!-- ai-team-blocked-by-sweep:131,132 -->",
+        )
+        self.assertEqual(
+            comment_marker((131, 132), "Org/Belimbing"),
             "<!-- belimbing-blocked-by-sweep:131,132 -->",
         )
+
+    def test_the_slug_sanitizes_and_degrades_rather_than_crashing(self):
+        self.assertEqual(sweep_slug("Org/My_Repo.Name"), "my-repo-name")
+        self.assertEqual(sweep_slug(None), "ai-team")
+        self.assertEqual(sweep_slug("Org/___"), "ai-team")
+
+    def test_a_marker_under_a_foreign_prefix_still_counts_as_already_posted(self):
+        # #2's migration trap: adopting this package (or renaming the
+        # repository) changes the marker's prefix; the sweep must keep
+        # matching comments written under the old name, or it re-posts a
+        # duplicate on every issue it has ever swept.
+        blockers = (131, 132)
+        issue = {"labels": ["task:blocked"], "body": "Blocked-By: #131, #132"}
+        transition = transition_for(
+            issue,
+            {131: "closed", 132: "closed"},
+            ["previous result <!-- bilimbi-blocked-by-sweep:131,132 -->"],
+            "BelimbingApp/ai-team",
+        )
+        self.assertIsNotNone(transition)
+        self.assertIsNone(transition.comment)
+        self.assertIn("task:ready", transition.labels)
+
+    def test_a_foreign_marker_for_different_blockers_does_not_suppress_the_comment(self):
+        issue = {"labels": ["task:blocked"], "body": "Blocked-By: #131"}
+        transition = transition_for(
+            issue,
+            {131: "closed"},
+            ["<!-- bilimbi-blocked-by-sweep:7,8 -->"],
+            "BelimbingApp/ai-team",
+        )
+        self.assertIsNotNone(transition)
+        self.assertIsNotNone(transition.comment)
+        self.assertIn("ai-team-blocked-by-sweep:131", transition.comment)
 
     def test_leaves_open_blockers_untouched(self):
         issue = {"body": "Blocked-By: #131", "labels": [{"name": BLOCKED_LABEL}]}
@@ -58,6 +98,7 @@ class BlockedBySweepTest(unittest.TestCase):
         from blocked_by_sweep import sweep
 
         class FakeAPI:
+            repository = "Example/ai-team"
             def open_blocked_issues(self):
                 return [{"number": 201, "pull_request": {}, "labels": []}]
 
@@ -67,6 +108,7 @@ class BlockedBySweepTest(unittest.TestCase):
         from blocked_by_sweep import sweep
 
         class FakeAPI:
+            repository = "Example/ai-team"
             def __init__(self):
                 self.issue = {
                     "number": 199,
@@ -101,6 +143,7 @@ class BlockedBySweepTest(unittest.TestCase):
         from blocked_by_sweep import sweep
 
         class FakeAPI:
+            repository = "Example/ai-team"
             def __init__(self):
                 self.issue = {
                     "number": 345,
