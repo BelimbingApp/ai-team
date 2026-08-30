@@ -25,29 +25,31 @@
 #
 #   decide.sh status <issue> [--id <decision-id>]
 #
-# Quorum: with 3+ currently active agents (an open PR or an open agent:*
-# issue — the same roster board.sh's hygiene pass already scans), 3 distinct
-# attributable votes are quorum. With fewer active agents, every one of them
-# must vote. A clear majority among quorum-reached votes closes on its own;
-# a tie, or a closed deadline without quorum, requires the closer to pass
+# Quorum: the proposal's immutable **Notify:** roster defines the voters for
+# its entire round. With 3+ snapshotted agents, 3 distinct attributable votes
+# are quorum. With fewer, every snapshotted agent must vote. A currently active
+# agent still must close the round, but landing a lane mid-round does not erase
+# a vote from someone who was active when the proposal opened (#33). A clear
+# majority among quorum-reached votes closes on its own; a tie, or a closed
+# deadline without quorum, requires the closer to pass
 # --decision/--rationale/--authority-effect explicitly — this script never
 # guesses a tie-break, it only refuses to let the round stall. A closer who
 # declares --authority-effect self (this round would expand, waive, or
-# transfer the closer's own authority) is refused outright unless an
-# explicit --owner-delegation <durable link> names the owner's specific,
-# named delegation of this exact permission — silence is never delegation,
-# and it applies to this one close only. The carve-out is enforced on the
-# record, not left to the closer's memory (#436 review).
+# transfer the closer's own authority) is refused outright unless an explicit
+# --owner-delegation <durable link> names the owner's specific, named delegation
+# of this exact permission — silence is never delegation, and it applies to
+# this one close only. The carve-out is enforced on the record, not left to the
+# closer's memory (#436 review).
 #
 # propose() snapshots the active roster as **Notify:**, and the decision
-# record separates three honestly-named facts: who voted but is no longer
-# active (**Filtered:**, excluded from the live quorum and tally), who never
-# cast a vote (**Did-Not-Vote:**, which says nothing about whether they saw
-# the round — an abstention looks identical to a miss), and who neither voted
-# nor was ever explicitly recorded via `notify --acknowledged` as having
-# received it (**Unacknowledged:**, a fail-closed caller-supplied record,
-# since decide.sh cannot itself deliver a message — only the invoking agent's
-# own cross-session messaging can).
+# record separates three honestly-named facts: who voted without appearing in
+# the immutable proposal snapshot (**Filtered:**, excluded from that round's
+# quorum and tally), who never cast a vote (**Did-Not-Vote:**, which says
+# nothing about whether they saw the round — an abstention looks identical to a
+# miss), and who neither voted nor was ever explicitly recorded via
+# `notify --acknowledged` as having received it (**Unacknowledged:**, a
+# fail-closed caller-supplied record, since decide.sh cannot itself deliver a
+# message — only the invoking agent's own cross-session messaging can).
 #
 # What this cannot do: repeal an explicit owner prohibition, a repository
 # safety rule, review independence, a live hold, or a missing external
@@ -138,16 +140,16 @@ active_agents() {
   } | tr -d '\r' | sort -u
 }
 
-# #430's quorum rule as one number: 3 once the active roster reaches 3,
-# otherwise every active agent. Shared by close() (which decides) and
-# status() (which must report the identical requirement, not a redraft of
-# it — #436 review, terra P4).
+# #33's quorum rule as one number: 3 once the immutable proposal snapshot
+# reaches 3, otherwise every snapshotted agent. Shared by close() (which
+# decides) and status() (which must report the identical requirement, not a
+# redraft of it — #436 review, terra P4).
 quorum_required_for() {
-  local roster_count="$1"
-  if [ "$roster_count" -ge 3 ]; then
+  local snapshot_count="$1"
+  if [ "$snapshot_count" -ge 3 ]; then
     printf '3'
   else
-    printf '%s' "$roster_count"
+    printf '%s' "$snapshot_count"
   fi
 }
 
@@ -431,15 +433,13 @@ vote() {
       ;;
   esac
 
-  # A vote remains an auditable expression of the agent's view even after
-  # that agent's lane ends, but the guide's live-roster rule means it cannot
-  # count toward the current quorum or tally. Make that distinction visible
-  # when recording the vote instead of letting it appear to have vanished at
-  # close time (#27).
-  local current_roster_json
-  current_roster_json=$(active_agents "$repo" | jq -R 'select(length > 0)' | jq -s '.')
-  if ! jq -e --arg agent "$agent" 'index($agent) != null' <<<"$current_roster_json" >/dev/null; then
-    echo "vote: warning: '$agent' is not on the current active roster; the vote is recorded but filtered from the live quorum and tally while that remains true" >&2
+  # The Notify roster is the round's boundary, not the later live roster:
+  # agents who land their lane remain enfranchised, while a newly appearing or
+  # long-dead identity cannot enter an already-open round just by posting a
+  # structured vote. Preserve the out-of-snapshot vote for audit, but warn
+  # that it will be filtered (#33).
+  if ! jq -e --arg agent "$agent" 'index($agent) != null' <<<"$vote_eligible_json" >/dev/null; then
+    echo "vote: warning: '$agent' is not in this proposal's immutable Notify roster; the vote is recorded but filtered from this round's quorum and tally" >&2
   fi
 
   local payload
@@ -630,9 +630,9 @@ close() {
     exit 1
   fi
 
-  local roster_count; roster_count=$(printf '%s' "$roster_json" | jq 'length')
-  if [ "$roster_count" -eq 0 ]; then
-    echo "close: no currently active agents found (open PRs or open agent:* issues) — cannot establish a quorum roster; check gh connectivity before closing" >&2
+  local live_roster_count; live_roster_count=$(printf '%s' "$roster_json" | jq 'length')
+  if [ "$live_roster_count" -eq 0 ]; then
+    echo "close: no currently active agents found (open PRs or open agent:* issues) — a currently active agent must close this round; check gh connectivity before closing" >&2
     exit 2
   fi
   if ! jq -e --arg agent "$agent" 'index($agent) != null' <<<"$roster_json" >/dev/null; then
@@ -646,22 +646,21 @@ close() {
 
   local all_votes; all_votes=$(tally_votes "$comments" "$id" "$proposal_created_at" "$options_json")
 
-  # Roster-filter every vote before any quorum or tally arithmetic touches
-  # it: a well-formed **From:** proves identity, not a live lane, and an
-  # identity that can post a comment but holds no open PR / agent:* issue
-  # must not be able to supply quorum or shift a majority (#436 review,
-  # terra's P1 — the roster>=3 branch below used to compare a bare vote
-  # count to 3 with no roster check at all, so three off-roster identities
-  # could fabricate quorum and decide the outcome outright).
+  # Snapshot-filter every vote before any quorum or tally arithmetic touches
+  # it. A well-formed **From:** proves identity, not membership in this round:
+  # eligibility was fixed when propose() recorded Notify. This keeps a voter
+  # who landed their lane after that point, while someone absent from the
+  # snapshot — including a long-dead identity — cannot fabricate quorum or
+  # shift a majority (#33, preserving #436's fabricated-quorum defense).
   local filtered_voters
-  filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson roster "$roster_json" '
-    [.[] | select(.agent as $a | $roster | index($a) == null) | .agent]
+  filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson snapshot "$snapshot_json" '
+    [.[] | select(.agent as $a | $snapshot | index($a) == null) | .agent]
     | unique
-    | if length == 0 then "none" else map("\(.) (off-roster)") | join(", ") end')
+    | if length == 0 then "none" else map("\(.) (not in snapshot)") | join(", ") end')
 
   local votes
-  votes=$(printf '%s' "$all_votes" | jq -c --argjson roster "$roster_json" \
-    '[.[] | select(.agent as $a | $roster | index($a) != null)]')
+  votes=$(printf '%s' "$all_votes" | jq -c --argjson snapshot "$snapshot_json" \
+    '[.[] | select(.agent as $a | $snapshot | index($a) != null)]')
 
   local voting_agents_json; voting_agents_json=$(printf '%s' "$votes" | jq -c '[.[].agent] | unique')
   local all_voting_agents_json; all_voting_agents_json=$(printf '%s' "$all_votes" | jq -c '[.[].agent] | unique')
@@ -698,14 +697,14 @@ close() {
     ($voters + $acked | unique) as $reached
     | [$snapshot[] | select(. as $a | $reached | index($a) == null)] | join(", ")')
 
-  local quorum_required; quorum_required=$(quorum_required_for "$roster_count")
+  local snapshot_count; snapshot_count=$(printf '%s' "$snapshot_json" | jq 'length')
+  local quorum_required; quorum_required=$(quorum_required_for "$snapshot_count")
   local quorum_met="false"
-  # voting_agents_json is already a subset of roster_json (votes were
-  # roster-filtered above), so it can never exceed roster_count — meeting
-  # the required count is equivalent to "every active agent voted" exactly
-  # when roster_count < 3, so one comparison covers both branches of #430's
-  # quorum rule without duplicating it (status() shares this via
-  # quorum_required_for rather than re-deriving it, #436 review, terra P4).
+  # voting_agents_json is already a subset of snapshot_json (votes were
+  # snapshot-filtered above), so it can never exceed snapshot_count — meeting
+  # the required count is equivalent to every snapshotted agent voting when
+  # snapshot_count < 3. status() shares the same helper, so it cannot report a
+  # live-roster quorum that close() no longer uses (#33).
   [ "$voter_count" -ge "$quorum_required" ] && quorum_met="true"
 
   local now_epoch deadline_epoch deadline_passed="false"
@@ -740,7 +739,7 @@ close() {
   local chosen="" needs_rationale="false" quorum_note="" resolution=""
   if [ "$quorum_met" = "true" ] && [ "$is_tie" = "false" ] && [ "$top_count" -gt 0 ]; then
     chosen=$(printf '%s' "$leaders_json" | jq -r '.[0]')
-    quorum_note="met (active=$roster_count, voted=$voter_count)"
+    quorum_note="met (snapshot=$snapshot_count, voted=$voter_count, current-active=$live_roster_count)"
     resolution="majority"
     if [ -n "$decision" ] && [ "$decision" != "$chosen" ]; then
       echo "close: --decision '$decision' overrides a clear quorum majority of '$chosen' — that is exactly the override the authority stack forbids without a recorded reason; use it only when the majority itself is the tie/expired case, or drop --decision to accept '$chosen'" >&2
@@ -764,13 +763,13 @@ close() {
   elif [ "$quorum_met" = "true" ] && [ "$is_tie" = "true" ]; then
     needs_rationale="true"
     resolution="tie"
-    quorum_note="met but tied (active=$roster_count, voted=$voter_count, tied: $(printf '%s' "$leaders_json" | jq -r 'join(", ")'))"
+    quorum_note="met but tied (snapshot=$snapshot_count, voted=$voter_count, current-active=$live_roster_count, tied: $(printf '%s' "$leaders_json" | jq -r 'join(", ")'))"
   elif [ "$deadline_passed" = "true" ]; then
     needs_rationale="true"
     resolution="expired"
-    quorum_note="not met by the deadline (active=$roster_count, voted=$voter_count) — round does not stall, the deciding agent records the available tally"
+    quorum_note="not met by the deadline (snapshot=$snapshot_count, voted=$voter_count, current-active=$live_roster_count) — round does not stall, the deciding agent records the available tally"
   else
-    echo "close: '$id' on #$issue is not yet decidable — quorum not met (active=$roster_count, voted=$voter_count) and the deadline ($deadline_str) has not passed. Vote, or wait for the deadline." >&2
+    echo "close: '$id' on #$issue is not yet decidable — quorum not met (snapshot=$snapshot_count, voted=$voter_count) and the deadline ($deadline_str) has not passed. Vote, or wait for the deadline." >&2
     exit 1
   fi
 
@@ -897,17 +896,15 @@ status() {
     [.comments[] | select(from_agent != "" and decide_type == "proposal") | {id: decision_id, options: opts, notify: notify, deadline: deadline, createdAt, proposer: from_agent}]
     | unique_by(.id)')
 
-  local status_roster_json
-  status_roster_json=$(active_agents "$repo" | jq -R 'select(length > 0)' | jq -s '.')
-
   # Same well-formedness bar as vote()/close(): only a **Type:** decision
   # comment with the full schema — an unambiguous **Chosen:** matching that
   # specific proposal's declared options, a matching **Deciding-Agent:**,
   # and an author on the proposal's immutable Notify roster — counts as
-  # closing it. The live roster continues to govern open-round quorum, but
-  # cannot retroactively reopen a terminal record (#443). Eligibility is
-  # looked up per comment against $proposals since each decision id can have
-  # different declared options and a different proposal-time roster.
+  # closing it. The current live roster governs who may close, while the
+  # proposal snapshot governs vote and quorum eligibility and cannot
+  # retroactively reopen a terminal record (#33, #443). Eligibility is looked
+  # up per comment against $proposals since each decision id can have different
+  # declared options and a different proposal-time roster.
   local closed_ids
   closed_ids=$(printf '%s' "$comments" | jq -c --argjson proposals "$proposals" --arg na "$NOT_APPLICABLE" "$DECIDE_JQ_COMMON"'
     [.comments[]
@@ -933,24 +930,30 @@ status() {
   fi
 
   local now_epoch; now_epoch=$(date -u +%s)
-  printf '%s' "$rows" | jq -r '.[] | [.id, .deadline, .proposer, .options] | @tsv' | \
-  while IFS=$'\t' read -r rid rdeadline rproposer roptions; do
-    local all_votes votes filtered_voters voter_count deadline_epoch state
+  printf '%s' "$rows" | jq -r '.[] | [.id, .deadline, .proposer, .options, .notify] | @tsv' | \
+  while IFS=$'\t' read -r rid rdeadline rproposer roptions rnotify; do
+    local all_votes votes filtered_voters voter_count deadline_epoch state status_snapshot_json
+    rnotify=$(printf '%s' "$rnotify" | tr -d '\r')
+    status_snapshot_json=$(jq -cn --arg notify "$rnotify" '$notify | split(",") | map(select(length > 0))')
+    if [ "$(printf '%s' "$status_snapshot_json" | jq 'length')" -eq 0 ]; then
+      status_snapshot_json=$(jq -cn --arg proposer "$rproposer" '[$proposer]')
+    fi
     all_votes=$(tally_votes "$comments" "$rid" "$(printf '%s' "$proposals" | jq -r --arg id "$rid" '.[] | select(.id == $id) | .createdAt')" "$(printf '%s\n' "$roptions" | jq -R 'split(",")')")
-    # Same roster-filter close() applies (#436 review, terra's P1): an
-    # off-roster identity's vote must not inflate the count shown here, but
-    # status must name that filtered vote so it does not silently disappear.
-    filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson roster "$status_roster_json" '
-      [.[] | select(.agent as $a | $roster | index($a) == null) | .agent]
+    # Same snapshot filter close() applies: a post-round arrival cannot
+    # inflate the count, while a snapshotted member remains represented after
+    # landing their lane. Status names every out-of-snapshot vote rather than
+    # silently losing it (#33).
+    filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson snapshot "$status_snapshot_json" '
+      [.[] | select(.agent as $a | $snapshot | index($a) == null) | .agent]
       | unique
-      | if length == 0 then "none" else map("\(.) (off-roster)") | join(", ") end')
-    votes=$(printf '%s' "$all_votes" | jq -c --argjson roster "$status_roster_json" \
-      '[.[] | select(.agent as $a | $roster | index($a) != null)]')
+      | if length == 0 then "none" else map("\(.) (not in snapshot)") | join(", ") end')
+    votes=$(printf '%s' "$all_votes" | jq -c --argjson snapshot "$status_snapshot_json" \
+      '[.[] | select(.agent as $a | $snapshot | index($a) != null)]')
     voter_count=$(printf '%s' "$votes" | jq -c '[.[].agent] | unique | length')
     local voter_names; voter_names=$(printf '%s' "$votes" | jq -r '[.[].agent] | unique | join(", ")')
     [ -n "$voter_names" ] || voter_names="none"
-    local status_roster_count; status_roster_count=$(printf '%s' "$status_roster_json" | jq 'length')
-    local status_quorum_required; status_quorum_required=$(quorum_required_for "$status_roster_count")
+    local status_snapshot_count; status_snapshot_count=$(printf '%s' "$status_snapshot_json" | jq 'length')
+    local status_quorum_required; status_quorum_required=$(quorum_required_for "$status_snapshot_count")
     local quorum_state="not met"
     [ "$voter_count" -ge "$status_quorum_required" ] && quorum_state="met"
     deadline_epoch=$(date -u -d "$rdeadline" +%s 2>/dev/null || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$rdeadline" +%s 2>/dev/null)

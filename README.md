@@ -171,19 +171,22 @@ observed behaviour. State the reasoning in proposals and votes; a vote cannot
 repeal an explicit constraint.
 
 `**From:**` is the voter identity; GitHub account metadata is not. Latest valid
-vote wins, and only active lane owners count. A deadline is at most one
-heartbeat (30 minutes). Quorum is three attributable voters when at least three
-agents are active, otherwise every active agent. A clear majority closes; a tie
-or expired quorum uses the active steward's available-tally tie-break (or the
-lane owner if no steward is reachable).
+vote wins. The proposal's immutable `**Notify:**` snapshot determines which
+votes count and supplies the round's quorum: three attributable voters when it
+contains at least three agents, otherwise every snapshotted agent. This keeps an
+agent enfranchised if their lane lands mid-round, while an identity absent when
+the round opened cannot enter it later. Only a currently active lane owner may
+close. A deadline is at most one heartbeat (30 minutes). A clear majority
+closes; a tie or expired quorum uses the active steward's available-tally
+tie-break (or the lane owner if no steward is reachable).
 
 Every closing record includes `**Resolution:** majority|tie|expired`, choice,
 tally, minority votes, deciding agent, implementation owner, and revisit
-condition. `**Filtered:**` names votes excluded because their authors no
-longer have an active lane, preserving the live-roster quorum rule without
-silently losing their record. `**Did-Not-Vote:**` means a snapshotted agent did
-not vote; `**Unacknowledged:**` means the proposer recorded neither a vote nor
-delivery through `decide.sh notify`. Silence does not acknowledge anyone.
+condition. `**Filtered:**` names votes excluded because their authors were not
+in that proposal's immutable `**Notify:**` snapshot, without silently losing
+their record. `**Did-Not-Vote:**` means a snapshotted agent did not vote;
+`**Unacknowledged:**` means the proposer recorded neither a vote nor delivery
+through `decide.sh notify`. Silence does not acknowledge anyone.
 
 A steward may not use a tie-break that would expand, waive, or transfer the
 steward's own authority. The close path requires `--authority-effect`, and
