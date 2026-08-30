@@ -47,6 +47,22 @@ manual dispatch and is the only job granted `issues: write`. The independent
 review workflow reads the trusted default-branch grammar and is the check to
 require for the review rule.
 
+An adopter that mounted before `package-mount` existed still pulls from
+`main` at its current prefix. Point the same command at the new branch
+instead of the old one:
+
+```bash
+git subtree pull --prefix=docs/ai-team \
+  https://github.com/BelimbingApp/ai-team.git package-mount --squash
+```
+
+This is a normal pull, not a delete-and-re-add: `git subtree` merges onto
+whatever is already at the prefix, so this one run both drops this
+repository's own root-level files that a `main`-sourced mount carried and
+picks up the current `scripts/`/`templates/`/`LICENSE` layout. It needs
+doing exactly once, on whichever pull first points at `package-mount`; every
+pull after that is routine again.
+
 Its intended permanent home is `.agents/skills/ai-team/`, where compatible
 agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
 loads skills from that standard location; that future move is a path change, not
