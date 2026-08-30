@@ -58,16 +58,16 @@ class ClaimHalfClaimTest(unittest.TestCase):
                   "repo view") printf 'example/canonical\\n' ;;
                   "issue view")
                     if printf '%s' "$*" | grep -q -- '--json labels'; then
-                      [ "${CLAIM_TEST_READBACK_FAILS:-0}" = "1" ] && exit 1
+                      [ "${CLAIM_TEST_ISSUE_READBACK_FAILS:-0}" = "1" ] && exit 1
                       printf '%s\\n' "${CLAIM_TEST_ISSUE_READBACK:-}"
                     else
                       printf '%s\\n' "$CLAIM_TEST_ISSUE_JSON"
                     fi
                     ;;
                   "pr view")
-                    [ "${CLAIM_TEST_READBACK_FAILS:-0}" = "1" ] && exit 1
-                      printf '%s\\n' "${CLAIM_TEST_PR_READBACK:-}"
-                      ;;
+                    [ "${CLAIM_TEST_PR_READBACK_FAILS:-0}" = "1" ] && exit 1
+                    printf '%s\\n' "${CLAIM_TEST_PR_READBACK:-}"
+                    ;;
                   "pr list") printf '%s\\n' "${CLAIM_TEST_PR_LIST:-[]}" ;;
                   "label list") printf '[{"name":"agent:fable"},{"name":"agent:opus-5"}]\\n' ;;
                   "pr create") printf 'https://example/pull/99\\n' ;;
@@ -91,7 +91,8 @@ class ClaimHalfClaimTest(unittest.TestCase):
         return env
 
     def run_claim(self, *, agent="opus-5", pr_list="[]", issue_labels=("task:ready",),
-                  pr_readback="", issue_readback="", readback_fails=False):
+                  pr_readback="", issue_readback="",
+                  pr_readback_fails=False, issue_readback_fails=False):
         env = self.git_env()
         env["CLAIM_AGENT"] = agent
         env["CLAIM_TEST_ISSUE_JSON"] = json.dumps({
@@ -104,7 +105,11 @@ class ClaimHalfClaimTest(unittest.TestCase):
         env["CLAIM_TEST_PR_READBACK"] = pr_readback
         env["CLAIM_TEST_ISSUE_READBACK"] = issue_readback
         env["CLAIM_TEST_EDITS"] = str(self.edits)
-        env["CLAIM_TEST_READBACK_FAILS"] = "1" if readback_fails else "0"
+        # Independent switches: the mixed state — one lookup failing while the
+        # other succeeds and is empty — is the invariant the split branch
+        # exists for, and a single switch could not express it (#18 review).
+        env["CLAIM_TEST_PR_READBACK_FAILS"] = "1" if pr_readback_fails else "0"
+        env["CLAIM_TEST_ISSUE_READBACK_FAILS"] = "1" if issue_readback_fails else "0"
         return run_with_bash_path(
             ["bash", str(SCRIPT), "42"],
             stub_directory=self.bin,
@@ -180,7 +185,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
         # gh unavailable is not evidence that a label is missing; the claim
         # succeeded and the agent is told how to check it. Only a non-zero
         # exit means "could not read".
-        result = self.run_claim(readback_fails=True)
+        result = self.run_claim(pr_readback_fails=True, issue_readback_fails=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not read back the labels", result.stderr)
@@ -201,12 +206,28 @@ class ClaimHalfClaimTest(unittest.TestCase):
         self.assertNotIn("could not read back", result.stderr)
 
     def test_one_unreadable_side_does_not_hide_a_missing_label_on_the_other(self):
-        # Only the PR lookup fails; the issue answers with an empty label set.
-        # The proven-missing side must still fail the claim.
-        result = self.run_claim(pr_readback="agent:opus-5,task:active", issue_readback="")
+        # The PR lookup genuinely FAILS while the issue lookup succeeds and
+        # answers empty. The proven-missing side must still fail the claim,
+        # and the unreadable side must be reported as unread rather than as
+        # missing. Before the fixture split this test set neither switch, so
+        # both reads succeeded and it silently duplicated the empty-readback
+        # case while claiming to cover the mixed one (#18 review).
+        result = self.run_claim(pr_readback_fails=True, issue_readback="")
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("issue #42 agent:opus-5", result.stderr)
+        self.assertIn("issue #42 task:active", result.stderr)
+        self.assertNotIn("PR #99 agent:opus-5", result.stderr)
+        self.assertIn("could not read back the labels for PR #99", result.stderr)
+
+    def test_the_reverse_mixed_state_is_also_judged_on_its_own(self):
+        # Mirror image: the issue lookup fails, the PR answers empty.
+        result = self.run_claim(issue_readback_fails=True, pr_readback="")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("PR #99 agent:opus-5", result.stderr)
+        self.assertNotIn("issue #42 agent:opus-5", result.stderr)
+        self.assertIn("could not read back the labels for issue #42", result.stderr)
 
 
 if __name__ == "__main__":

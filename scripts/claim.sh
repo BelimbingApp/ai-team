@@ -145,6 +145,10 @@ finish_claim_labels() {
   fi
 
   echo "HALF-CLAIM: PR #$pr exists but the labels did not land — $missing" >&2
+  # An unreadable side is reported here too. Naming only what was proven
+  # missing would tell someone to fix the issue and stop, while the PR they
+  # could not check stays unlabelled and the lane stays invisible.
+  [[ -n "$unread" ]] && echo "warning: could not read back the labels for $unread" >&2
   echo "The board still reads #$issue as unclaimed, so another agent can collide." >&2
   echo "Finish it by re-running this script, or by hand:" >&2
   echo "  gh pr edit $pr --repo $repo --add-label agent:$agent --add-label task:active" >&2
