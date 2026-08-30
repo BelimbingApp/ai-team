@@ -60,46 +60,67 @@ def safe_lines(body: str) -> list[str]:
 
     for line in body.split("\n"):
         raw_line = line.replace("\r", "")
-        trimmed = raw_line.strip()
 
         if fence is not None:
-            # Checked before the closer, and against the raw line: Markdown
-            # reads an indented ``` as code, not as the end of the block, so a
-            # parser that closes here treats the rest of the body as prose.
-            if INDENTED_CODE_RE.match(raw_line):
-                continue
-
-            closing = CLOSING_FENCE_RE.match(trimmed)
-            if closing and _closes_fence(closing.group(1), fence):
-                fence = None
+            fence = _fence_after(raw_line, fence)
             continue
 
         if in_comment:
-            # Comment state is entered only outside fences, and everything up
-            # to the closer is invisible text — including any indentation or
-            # fence marker it carries — so only the closer matters here.
-            _, closed, rest = raw_line.partition("-->")
-            if not closed:
+            trimmed = _visible_after_comment(raw_line)
+            if trimmed is None:
                 continue
-            trimmed = rest.strip()
             in_comment = False
-        elif INDENTED_CODE_RE.match(raw_line) or trimmed.startswith(">"):
-            continue
+        else:
+            trimmed = raw_line.strip()
+            if INDENTED_CODE_RE.match(raw_line) or trimmed.startswith(">"):
+                continue
 
         opening = OPENING_FENCE_RE.match(trimmed)
         if opening:
             fence = opening.group(1)
             continue
 
-        trimmed = INLINE_COMMENT_RE.sub(" ", trimmed)
-        before, opener, _ = trimmed.partition("<!--")
-        if opener:
-            in_comment = True
-            trimmed = before
-
-        lines.append(trimmed.strip())
+        trimmed, in_comment = _without_comments(trimmed)
+        lines.append(trimmed)
 
     return lines
+
+
+def _fence_after(raw_line: str, fence: str) -> str | None:
+    """The fence still open after a line inside a fenced block.
+
+    Checked against the raw line: Markdown reads an indented ``` as code, not
+    as the end of the block, so a parser that closes there treats the rest of
+    the body as prose.
+    """
+
+    if INDENTED_CODE_RE.match(raw_line):
+        return fence
+
+    closing = CLOSING_FENCE_RE.match(raw_line.strip())
+    if closing and _closes_fence(closing.group(1), fence):
+        return None
+    return fence
+
+
+def _visible_after_comment(raw_line: str) -> str | None:
+    """Text after the comment closer, or None while still inside.
+
+    Comment state is entered only outside fences, and everything up to the
+    closer is invisible — including any indentation or fence marker it
+    carries — so only the closer matters here.
+    """
+
+    _, closed, rest = raw_line.partition("-->")
+    return rest.strip() if closed else None
+
+
+def _without_comments(text: str) -> tuple[str, bool]:
+    """The line with comment spans removed, and whether one stays open."""
+
+    text = INLINE_COMMENT_RE.sub(" ", text)
+    before, opener, _ = text.partition("<!--")
+    return (before if opener else text).strip(), bool(opener)
 
 
 def _closes_fence(closing: str, opening: str) -> bool:
