@@ -520,12 +520,11 @@ class TallyAndCloseTest(DecideTestCase):
         self.assertIn("overrides a clear quorum majority", result.stderr)
         self.assertEqual(len(self.comments_now()), 4)  # proposal + 3 votes, no decision posted
 
-    def test_the_decision_record_names_active_agents_who_never_voted(self):
-        # The roster shrinks between propose (p,a,b,c,d) and close (p,a,b,c)
-        # if d's PR/issue closes in between — d never got the chance to
-        # vote and close() correctly can't require a vote from someone no
-        # longer active, but the record should still say d never weighed in
-        # on the round it was snapshotted into.
+    def test_an_off_roster_vote_is_warned_filtered_and_not_misreported_as_missing(self):
+        # #27: e was in the proposal's immutable snapshot, then their lane
+        # ended before they voted. The live-roster rule still excludes that
+        # vote from quorum/tally, but it must be visible as filtered — and
+        # cannot also be reported as if e never voted or was never reached.
         self.set_roster(["p", "a", "b", "c", "e"])
         self.propose(10, "vote-id", "left,right", "left", agent="p")
         self.set_roster(["p", "a", "b", "c"])  # e's lane closed after the snapshot
@@ -533,11 +532,20 @@ class TallyAndCloseTest(DecideTestCase):
         self.vote(10, "vote-id", "left", agent="a")
         self.vote(10, "vote-id", "left", agent="b")
         self.vote(10, "vote-id", "right", agent="c")
+        off_roster_vote = self.vote(10, "vote-id", "right", agent="e")
+        self.assertEqual(off_roster_vote.returncode, 0, off_roster_vote.stderr)
+        self.assertIn("not on the current active roster", off_roster_vote.stderr)
+
+        status = self.run_decide("status", "10", "--id", "vote-id")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("**Filtered:** e (off-roster)", status.stdout)
 
         result = self.close(10, "vote-id", agent="p")
         self.assertEqual(result.returncode, 0, result.stderr)
         body = self.last_decision_body()
-        self.assertIn("**Did-Not-Vote:** e", body)
+        self.assertIn("**Filtered:** e (off-roster)", body)
+        self.assertIn("**Did-Not-Vote:** none", body)
+        self.assertIn("**Unacknowledged:** none", body)
 
     def test_the_decision_record_says_none_reached_everyone(self):
         self.set_roster(["p", "a", "b"])
@@ -1185,7 +1193,7 @@ class RecordGrammarTest(DecideTestCase):
         for line_start in (
             "**Decision:**", "**Chosen:**", "**Tally:**", "**Quorum:**",
             "**Deciding-Agent:**", "**Implementation-Owner:**", "**Revisit-If:**",
-            "**Tie-Break:**", "**Authority-Effect:**", "**Did-Not-Vote:**", "**Unacknowledged:**",
+            "**Tie-Break:**", "**Authority-Effect:**", "**Did-Not-Vote:**", "**Filtered:**", "**Unacknowledged:**",
         ):
             matches = [line for line in body.splitlines() if line.startswith(line_start)]
             self.assertEqual(len(matches), 1, f"expected exactly one line starting with {line_start!r} in:\n{body}")
