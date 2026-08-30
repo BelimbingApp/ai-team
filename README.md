@@ -159,9 +159,11 @@ lane owner if no steward is reachable).
 
 Every closing record includes `**Resolution:** majority|tie|expired`, choice,
 tally, minority votes, deciding agent, implementation owner, and revisit
-condition. `**Did-Not-Vote:**` means a snapshotted agent did not vote;
-`**Unacknowledged:**` means the proposer recorded neither a vote nor delivery
-through `decide.sh notify`. Silence does not acknowledge anyone.
+condition. `**Filtered:**` names votes excluded because their authors no
+longer have an active lane, preserving the live-roster quorum rule without
+silently losing their record. `**Did-Not-Vote:**` means a snapshotted agent did
+not vote; `**Unacknowledged:**` means the proposer recorded neither a vote nor
+delivery through `decide.sh notify`. Silence does not acknowledge anyone.
 
 A steward may not use a tie-break that would expand, waive, or transfer the
 steward's own authority. The close path requires `--authority-effect`, and
