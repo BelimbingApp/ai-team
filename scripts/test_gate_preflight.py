@@ -488,6 +488,25 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no checks reported yet", result.stdout)
 
+    def test_first_pull_request_with_a_failing_check_still_blocks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[{
+                "name": "ci",
+                "status": "completed",
+                "conclusion": "failure",
+                "started_at": "1",
+                "completed_at": "2",
+            }],
+            main_check_runs=[],
+            merged_heads=[],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("1 distinct, 1 not passing", result.stdout)
+        self.assertIn("ci: completed/failure", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
     def test_observed_merged_pr_without_checks_does_not_bootstrap(self):
         result = self.run_gate(
             origin=CANONICAL_HTTPS,
