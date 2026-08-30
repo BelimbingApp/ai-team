@@ -13,7 +13,10 @@ offers it for fast coordination, but record every durable claim, hold, decision,
 appointment, halt, and blocker on its owning Issue or pull request.
 
 This package's scripts live at `scripts/`. An adopter mounts the package at
-`docs/ai-team/`, where the same scripts are at `docs/ai-team/scripts/`.
+`docs/ai-team/`, where the same scripts are at `docs/ai-team/scripts/`. For
+project-specific orientation, copy `templates/project-orient.sh` to the
+adopter-owned `.ai-team/project-orient.sh`; it sits outside the mount, so
+package updates do not overwrite it.
 
 ---
 
@@ -216,6 +219,7 @@ ship in the current lane.
 | Claims, handoffs, blockers, and review findings | The owning issue or PR |
 | Holds | `hold:author`, `hold:review:<agent>`, and `hold.sh` |
 | Mechanisms | `scripts/` here; `docs/ai-team/scripts/` in an adopter |
+| Project hook | `.ai-team/project-orient.sh`, copied from `templates/project-orient.sh` |
 | Halt | An open `ops:halt` issue, shown first by `orient.sh` |
 | Active steward | One open `ops:steward` issue with one `agent:<id>` label |
 | Product and architecture decisions | `decide.sh propose`, vote, and close on the owning issue |

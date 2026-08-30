@@ -9,6 +9,7 @@ from _test_support import run_with_bash_path
 
 
 SCRIPTS = Path(__file__).parent
+TEMPLATES = SCRIPTS.parent / "templates"
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -51,9 +52,15 @@ class ProjectOrientCountsTest(unittest.TestCase):
         # A path outside scripts/ must not be counted.
         (self.checkout / "README.md").write_text("", encoding="utf-8")
 
-        for name in ("project-orient.sh", "_default_branch.sh"):
-            (scripts / name).write_bytes((SCRIPTS / name).read_bytes())
-            (scripts / name).chmod(0o755)
+        # Placed outside scripts/, matching the real mechanism (#8): the hook
+        # lives at .ai-team/ in the adopting repository's own root, copied
+        # from templates/project-orient.sh, never inside the mounted package.
+        dot_ai_team = self.checkout / ".ai-team"
+        dot_ai_team.mkdir()
+        hook = dot_ai_team / "project-orient.sh"
+        hook.write_bytes((TEMPLATES / "project-orient.sh").read_bytes())
+        hook.chmod(0o755)
+        self.hook = hook
 
         git(self.checkout, "add", "-A")
         git(
@@ -68,13 +75,16 @@ class ProjectOrientCountsTest(unittest.TestCase):
 
     def run_hook(self) -> str:
         environment = os.environ.copy()
-        # No network and no gh: the resolver honours this override verbatim.
-        environment["AI_TEAM_BASE_BRANCH"] = "main"
+        # orient.sh resolves the branch once and exports it; the hook no
+        # longer sources _default_branch.sh itself (it has no relative path
+        # back to scripts/ once copied out to .ai-team/), so this is what a
+        # real invocation via orient.sh supplies.
+        environment["AI_TEAM_DEFAULT_BRANCH"] = "main"
         stubs = Path(self.workspace.name) / "stubs"
         stubs.mkdir(exist_ok=True)
 
         result = run_with_bash_path(
-            [str(self.checkout / "scripts" / "project-orient.sh")],
+            [str(self.hook)],
             stub_directory=stubs,
             env=environment,
             cwd=str(self.checkout),
