@@ -12,13 +12,14 @@ this mount entirely — at `.ai-team/project-orient.sh` in the adopting
 repository's own root, copied from `../templates/project-orient.sh` — so it is
 never part of what `git subtree pull` touches.
 
-The package ships `templates/mechanisms.yml` and
-`templates/blocked-by-sweep.yml` for adopters to copy into their own
-`.github/workflows/` directory at mount time. GitHub owns the triggers and
-permissions there: the mechanism workflow runs the mounted suite unfiltered
-on pull requests, while the schedule-only sweep is the only job granted
-`issues: write`. The implementation and its tests live here, with the board
-contract they enforce.
+The package ships `templates/mechanisms.yml`,
+`templates/blocked-by-sweep.yml`, and `templates/independent-review.yml` for
+adopters to copy into their own `.github/workflows/` directory at mount time.
+GitHub owns the triggers and permissions there: the mechanism workflow runs
+the mounted suite unfiltered on pull requests, the schedule-only sweep is the
+only job granted `issues: write`, and the independent-review workflow reads
+the trusted default-branch grammar. The implementation and its tests live
+here, with the board contract they enforce.
 
 `blocked_by_sweep.py` is a Python entry point, not a shell command. Run it as
 `python3 docs/ai-team/scripts/blocked_by_sweep.py` (the workflow supplies the
