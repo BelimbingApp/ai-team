@@ -58,7 +58,8 @@ jobs:
         if: steps.resolve.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: "$RUNNER_TEMP/review_gate.sh" "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
+        run: |
+          "$RUNNER_TEMP/review_gate.sh" "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
 
       - name: Grammar not yet on the default branch
         if: steps.resolve.outputs.present == 'false'

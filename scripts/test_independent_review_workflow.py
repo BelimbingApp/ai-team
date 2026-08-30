@@ -34,8 +34,8 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
 
         self.assertIn("contents/scripts/review_gate.sh?ref=${DEFAULT_BRANCH}", package)
         self.assertIn("contents/docs/ai-team/scripts/review_gate.sh?ref=${DEFAULT_BRANCH}", adopter)
-        self.assertIn("run: \"$RUNNER_TEMP/review_gate.sh\"", package)
-        self.assertIn("run: \"$RUNNER_TEMP/review_gate.sh\"", adopter)
+        self.assertIn('"$RUNNER_TEMP/review_gate.sh"', package)
+        self.assertIn('"$RUNNER_TEMP/review_gate.sh"', adopter)
 
 
 if __name__ == "__main__":
