@@ -22,6 +22,9 @@ class ReadmeOnboardingTest(unittest.TestCase):
         self.assertIn("`docs/ai-team/scripts/`", document)
         self.assertIn("`.ai-team/project-orient.sh`", document)
         self.assertIn("`templates/project-orient.sh`", document)
+        self.assertIn("git subtree add --prefix=docs/ai-team", document)
+        self.assertIn("`.agents/skills/ai-team/`", document)
+        self.assertIn("Claude Code", document)
 
 
 if __name__ == "__main__":

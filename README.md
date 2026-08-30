@@ -18,6 +18,18 @@ project-specific orientation, copy `templates/project-orient.sh` to the
 adopter-owned `.ai-team/project-orient.sh`; it sits outside the mount, so
 package updates do not overwrite it.
 
+Mount the package with:
+
+```bash
+git subtree add --prefix=docs/ai-team \
+  https://github.com/BelimbingApp/ai-team.git main --squash
+```
+
+Its intended permanent home is `.agents/skills/ai-team/`, where compatible
+agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
+loads skills from that standard location; that future move is a path change, not
+a redesign.
+
 ---
 
 ## Start work
