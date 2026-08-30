@@ -23,6 +23,9 @@ for tool in bash python3 git gh jq; do
       git)     version=$(git --version) ;;
       gh)      version=$(gh --version | head -1) ;;
       jq)      version=$(jq --version) ;;
+      # The loop list and these arms are maintained together; a tool added to
+      # one without the other still prints its name instead of a blank.
+      *)       version=$tool ;;
     esac
     echo "  ok      $version"
   else

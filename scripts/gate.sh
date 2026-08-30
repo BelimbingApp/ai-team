@@ -23,7 +23,7 @@
 set -u
 
 PR="${1:-}"
-if [ -z "$PR" ]; then
+if [[ -z "$PR" ]]; then
   echo "usage: gate.sh <pr-number> [<reviewed-sha>]" >&2
   exit 2
 fi
@@ -41,7 +41,7 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not a git checkout"
 cd "$ROOT" || exit 2
 
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
-[ -n "$REPO" ] || { echo "cannot resolve the repository from gh" >&2; exit 2; }
+[[ -n "$REPO" ]] || { echo "cannot resolve the repository from gh" >&2; exit 2; }
 
 # The gate fetches and proves branch containment against *origin*, while gh
 # resolves $REPO independently. If origin is a fork, PR lookup can succeed
@@ -54,7 +54,7 @@ REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
 # weakening this invariant.
 origin_url=$(git remote get-url origin 2>/dev/null)
 origin_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')
-[ "$origin_repo" = "$REPO" ] || {
+[[ "$origin_repo" = "$REPO" ]] || {
   echo "origin is '$origin_url' but gh resolves the repository as '$REPO'." >&2
   echo "The gate proves containment against origin/$BASE, so origin must be the" >&2
   echo "canonical repository. Run from a clone whose origin is $REPO." >&2
@@ -64,25 +64,25 @@ origin_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https://github\.com/|git@g
 # One fetch of PR state; every check below reads from it.
 pr=$(gh pr view "$PR" --repo "$REPO" \
        --json headRefOid,headRefName,title,body,isDraft,state,mergeable,labels 2>/dev/null)
-[ -n "$pr" ] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
+[[ -n "$pr" ]] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
 
 remote_head=$(printf '%s' "$pr" | jq -r .headRefOid)
 
 REVIEWED="${2:-}"
-if [ -z "$REVIEWED" ]; then
+if [[ -z "$REVIEWED" ]]; then
   REVIEWED="$remote_head"
   echo "note: no reviewed SHA given — gating the current head $REVIEWED."
   echo "      Pass the SHA you actually reviewed, so a push after your review fails this gate."
-elif [ "${#REVIEWED}" -lt 40 ]; then
+elif [[ "${#REVIEWED}" -lt 40 ]]; then
   # An abbreviation is only usable once the canonical repository resolves it
   # to exactly one commit; every later comparison and check-run query then
   # uses that full SHA, so the merged-is-verified contract stays exact.
-  if [ "${#REVIEWED}" -lt 12 ]; then
+  if [[ "${#REVIEWED}" -lt 12 ]]; then
     echo "reviewed SHA '$REVIEWED' is too short (<12 chars) to identify a commit safely — pass at least 12, ideally all 40." >&2
     exit 2
   fi
   resolved=$(gh api "repos/$REPO/commits/$REVIEWED" --jq .sha 2>/dev/null)
-  if [ "${#resolved}" -ne 40 ] || printf '%s' "$resolved" | grep -q '[^0-9a-f]'; then
+  if [[ "${#resolved}" -ne 40 ]] || printf '%s' "$resolved" | grep -q '[^0-9a-f]'; then
     echo "reviewed SHA '$REVIEWED' does not resolve to a single commit in $REPO (unknown or ambiguous)." >&2
     exit 2
   fi
@@ -112,12 +112,12 @@ echo "gate: $REPO #$PR at ${REVIEWED:0:8}"
 # 1. Open, and not a draft. A draft is somebody's claim, not a deliverable.
 state=$(printf '%s' "$pr" | jq -r .state)
 draft=$(printf '%s' "$pr" | jq -r .isDraft)
-[ "$state" = "OPEN" ] && say_ok "state is OPEN" || say_bad "state is $state"
-[ "$draft" = "false" ] && say_ok "not a draft" || say_bad "PR is a DRAFT — never merge someone's claim"
+[[ "$state" = "OPEN" ]] && say_ok "state is OPEN" || say_bad "state is $state"
+[[ "$draft" = "false" ]] && say_ok "not a draft" || say_bad "PR is a DRAFT — never merge someone's claim"
 
 # 2. Up to date with main. CI green on a tree that never existed on main is not
 #    evidence about main. #326 landed red exactly this way.
-if [ "$reviewed_object_available" != "1" ]; then
+if [[ "$reviewed_object_available" != "1" ]]; then
   say_bad "reviewed SHA $REVIEWED is unavailable after fetching PR #$PR — its history may have been rewritten; re-review the current head"
 elif git merge-base --is-ancestor "origin/$BASE" "$REVIEWED" 2>/dev/null; then
   say_ok "contains origin/$BASE ($(git rev-parse --short "origin/$BASE"))"
@@ -164,7 +164,7 @@ baseline_count=0
 baseline_fetch_failed=0
 expected_names='[]'
 while IFS= read -r merged_head; do
-  [ -n "$merged_head" ] || continue
+  [[ -n "$merged_head" ]] || continue
   baseline_count=$((baseline_count + 1))
   baseline_payload=$(gh api "repos/$REPO/commits/$merged_head/check-runs" --paginate 2>/dev/null) || {
     baseline_fetch_failed=1
@@ -174,7 +174,7 @@ while IFS= read -r merged_head; do
     baseline_fetch_failed=1
     break
   }
-  if [ "$baseline_count" -eq 1 ]; then
+  if [[ "$baseline_count" -eq 1 ]]; then
     expected_names="$head_names"
   else
     expected_names=$(jq -nc --argjson left "$expected_names" --argjson right "$head_names" \
@@ -195,21 +195,21 @@ expected_n=$(printf '%s' "$expected_names" | jq -r 'length' 2>/dev/null || echo 
 missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
   '$expected - $present' 2>/dev/null || echo '[]')
 missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
-if [ "${n:-0}" -lt 1 ]; then
+if [[ "${n:-0}" -lt 1 ]]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"
-elif [ "${bad:-1}" != "0" ]; then
+elif [[ "${bad:-1}" != "0" ]]; then
   say_bad "checks on ${REVIEWED:0:8}: $n distinct, $bad not passing"
   printf '%s' "$latest" | jq -r \
     '.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
-elif [ "${baseline_fetch_failed:-0}" = "1" ]; then
+elif [[ "${baseline_fetch_failed:-0}" = "1" ]]; then
   say_bad "cannot observe check runs for the merged pull-request baseline"
-elif [ "${baseline_count:-0}" -lt 1 ]; then
+elif [[ "${baseline_count:-0}" -lt 1 ]]; then
   say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
-elif [ "${expected_n:-0}" -lt 1 ]; then
+elif [[ "${expected_n:-0}" -lt 1 ]]; then
   say_bad "cannot observe a common expected check name across the last $baseline_count merged pull requests"
-elif [ "${missing_n:-0}" -gt 0 ]; then
+elif [[ "${missing_n:-0}" -gt 0 ]]; then
   say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 else
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing"
@@ -236,7 +236,7 @@ esac
 
 review_holders=$(printf '%s' "$pr" | jq -r \
   '[.labels[].name | select(startswith("hold:review:")) | ltrimstr("hold:review:")] | join(",")')
-if [ -n "$review_holders" ]; then
+if [[ -n "$review_holders" ]]; then
   say_bad "hold:review held by $review_holders — each holder clears their own (hold.sh review clear), not you"
 else
   say_ok "no named hold:review:<agent>"
@@ -261,7 +261,7 @@ author_agents=$(printf '%s' "$pr" | jq -c \
   2>/dev/null || echo '[]')
 author_count=$(printf '%s' "$author_agents" | jq -r 'length' 2>/dev/null || echo 0)
 author_agent=$(printf '%s' "$author_agents" | jq -r '.[0] // ""' 2>/dev/null)
-if [ "$author_count" = "1" ]; then
+if [[ "$author_count" = "1" ]]; then
   say_ok "author lane is agent:$author_agent"
 else
   say_bad "expected exactly one agent:<id> author lane, found $author_count"
@@ -298,7 +298,7 @@ esac
 review_exit=0
 review_output=$("$here/review_gate.sh" "$PR" "$REVIEWED" 2>&1) || review_exit=$?
 while IFS= read -r review_line; do
-  [ -n "$review_line" ] || continue
+  [[ -n "$review_line" ]] || continue
   case "$review_line" in
     "PASS: "*) say_ok "${review_line#PASS: }" ;;
     "FAIL: "*) say_bad "${review_line#FAIL: }" ;;
@@ -307,7 +307,7 @@ while IFS= read -r review_line; do
     *)         say_warn "review gate: $review_line" ;;
   esac
 done <<< "$review_output"
-if [ "$review_exit" -gt 1 ]; then
+if [[ "$review_exit" -gt 1 ]]; then
   say_bad "review gate could not evaluate the PR"
 fi
 
@@ -329,7 +329,7 @@ fi
 # has already accepted: otherwise the acceptance hides the warning (#392).
 issue_comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate 2>/dev/null \
   | jq -s 'add // []' 2>/dev/null)
-[ -n "$issue_comments" ] || issue_comments='[]'
+[[ -n "$issue_comments" ]] || issue_comments='[]'
 
 stray_blocking_agents=$(printf '%s' "$issue_comments" | jq -r --arg author "$author_agent" '
   def from_agent:
@@ -343,14 +343,14 @@ stray_blocking_agents=$(printf '%s' "$issue_comments" | jq -r --arg author "$aut
   | unique | join("\n")
 ' 2>/dev/null)
 
-if [ -n "$stray_blocking_agents" ]; then
+if [[ -n "$stray_blocking_agents" ]]; then
   while IFS= read -r agent; do
-    [ -n "$agent" ] || continue
+    [[ -n "$agent" ]] || continue
     say_warn "found a blocking verdict marker from $agent in the comment stream; gate reads reviews only — repost with 'gh pr review --comment'"
   done <<< "$stray_blocking_agents"
 fi
 
-if [ -z "$accepted_agents" ]; then
+if [[ -z "$accepted_agents" ]]; then
   stray_accept_agents=$(printf '%s' "$issue_comments" | jq -r --arg author "$author_agent" '
     def from_agent:
       ([((.body // "") | split("\n")[]
@@ -371,9 +371,9 @@ if [ -z "$accepted_agents" ]; then
     | unique | join("\n")
   ' 2>/dev/null)
 
-  if [ -n "$stray_accept_agents" ]; then
+  if [[ -n "$stray_accept_agents" ]]; then
     while IFS= read -r agent; do
-      [ -n "$agent" ] || continue
+      [[ -n "$agent" ]] || continue
       say_warn "found a verdict marker from $agent in the comment stream; gate reads reviews only — repost with 'gh pr review --comment'"
     done <<< "$stray_accept_agents"
   fi
@@ -381,7 +381,7 @@ fi
 
 # 6. The head has not moved since the review. GitHub's PR head also lags a push
 #    by minutes, so compare the branch ref too.
-if [ "$remote_head" = "$REVIEWED" ]; then
+if [[ "$remote_head" = "$REVIEWED" ]]; then
   say_ok "PR head is the reviewed SHA"
 else
   # Abbreviations were resolved to a full SHA up front, so this comparison is
@@ -390,12 +390,12 @@ else
 fi
 # Only meaningful while the PR is open: the branch is normally deleted on merge,
 # and that 404 means "merged", not "diverged".
-if [ "$state" = "OPEN" ]; then
+if [[ "$state" = "OPEN" ]]; then
   branch=$(printf '%s' "$pr" | jq -r .headRefName)
   ref=$(gh api "repos/$REPO/git/refs/heads/$branch" --jq .object.sha 2>/dev/null)
   case "$ref" in
     [0-9a-f][0-9a-f]*)
-      [ "$ref" = "$remote_head" ] \
+      [[ "$ref" = "$remote_head" ]] \
         || say_bad "branch $branch is at ${ref:0:8} but the PR head says ${remote_head:0:8} — a push has not propagated yet" ;;
     *) echo "  note: no branch ref for $branch (deleted, or a fork)" ;;
   esac
@@ -410,7 +410,7 @@ fi
 # healthy PR of being an empty claim (#598). END{print s+0} also yields 0 rather
 # than nothing on no input, so the check below stands on its own.
 files=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq 'length' 2>/dev/null | awk '{s+=$1} END{print s+0}')
-if [ "${files:-0}" -eq 0 ] 2>/dev/null; then
+if [[ "${files:-0}" -eq 0 ]] 2>/dev/null; then
   say_bad "no changed files — an empty PR is a claim, not a deliverable"
 else
   say_ok "$files changed file(s)"
@@ -419,7 +419,7 @@ fi
 # 8. Conflicts. mergeStateStatus is permanently BLOCKED for us and carries no
 #    information; mergeable does.
 mergeable=$(printf '%s' "$pr" | jq -r .mergeable)
-[ "$mergeable" = "CONFLICTING" ] && say_bad "CONFLICTING with the base branch" || say_ok "mergeable: $mergeable"
+[[ "$mergeable" = "CONFLICTING" ]] && say_bad "CONFLICTING with the base branch" || say_ok "mergeable: $mergeable"
 
 # 9. Not a check — the last word on the PR, so a hold written as prose by
 #    somebody who did not know about the label is still in front of you.
@@ -427,7 +427,7 @@ echo "  --- last 3 comments ---"
 gh pr view "$PR" --repo "$REPO" --json comments \
   --jq '.comments[-3:][]|"            \(.createdAt) \(.author.login): \(.body[0:100]|gsub("\n";" "))"' 2>/dev/null
 
-if [ "$fail" = "0" ]; then
+if [[ "$fail" = "0" ]]; then
   echo "GATE: PASS"
 else
   echo "GATE: FAIL"
