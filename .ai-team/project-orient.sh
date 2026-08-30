@@ -6,13 +6,13 @@
 #
 # This copy is the home repository's own, where the project *is* the package.
 
-PROJECT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
-# shellcheck source=scripts/_default_branch.sh
-# shellcheck disable=SC1091
-source "$PROJECT_DIR/_default_branch.sh"
-BASE=$(ai_team_default_branch)
-
+# orient.sh exports AI_TEAM_DEFAULT_BRANCH before invoking this hook — copied
+# out to .ai-team/ at the repository root (#8), this file has no relative path
+# back to scripts/_default_branch.sh, so it cannot resolve the branch itself.
+# The fallback covers a direct run of this hook outside orient.sh.
 set -u
+BASE="${AI_TEAM_DEFAULT_BRANCH:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
+BASE="${BASE:-main}"
 
 echo "== ai-team project: toolchain the mechanisms need =="
 for tool in bash python3 git gh jq; do

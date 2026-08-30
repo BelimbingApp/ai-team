@@ -6,9 +6,11 @@ These scripts enforce the reusable operating guide beside them in
 this directory lives, and why" in the guide.
 
 Most scripts are repository-independent and resolve the current GitHub
-repository through `gh`. `project-orient.sh` is the deliberate exception: it is
-the local hook for source pins, assembly checks, and project commands. Replace
-it in every adopting repository.
+repository through `gh`. The project hook is the deliberate exception: it is
+local source pins, assembly checks, and project commands, and it lives outside
+this mount entirely — at `.ai-team/project-orient.sh` in the adopting
+repository's own root, copied from `../templates/project-orient.sh` — so it is
+never part of what `git subtree pull` touches.
 
 `blocked_by_sweep.py` needs a scheduled workflow to run it, and that workflow
 belongs to the adopting repository under its own `.github/workflows/` because
