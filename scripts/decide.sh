@@ -40,13 +40,14 @@
 # record, not left to the closer's memory (#436 review).
 #
 # propose() snapshots the active roster as **Notify:**, and the decision
-# record separates two honestly-named, non-overlapping facts: who never
+# record separates three honestly-named facts: who voted but is no longer
+# active (**Filtered:**, excluded from the live quorum and tally), who never
 # cast a vote (**Did-Not-Vote:**, which says nothing about whether they saw
-# the round — an abstention looks identical to a miss), and who neither
-# voted nor was ever explicitly recorded via `notify --acknowledged` as
-# having received it (**Unacknowledged:**, a fail-closed caller-supplied
-# record, since decide.sh cannot itself deliver a message — only the
-# invoking agent's own cross-session messaging can).
+# the round — an abstention looks identical to a miss), and who neither voted
+# nor was ever explicitly recorded via `notify --acknowledged` as having
+# received it (**Unacknowledged:**, a fail-closed caller-supplied record,
+# since decide.sh cannot itself deliver a message — only the invoking agent's
+# own cross-session messaging can).
 #
 # What this cannot do: repeal an explicit owner prohibition, a repository
 # safety rule, review independence, a live hold, or a missing external
@@ -430,6 +431,17 @@ vote() {
       ;;
   esac
 
+  # A vote remains an auditable expression of the agent's view even after
+  # that agent's lane ends, but the guide's live-roster rule means it cannot
+  # count toward the current quorum or tally. Make that distinction visible
+  # when recording the vote instead of letting it appear to have vanished at
+  # close time (#27).
+  local current_roster_json
+  current_roster_json=$(active_agents "$repo" | jq -R 'select(length > 0)' | jq -s '.')
+  if ! jq -e --arg agent "$agent" 'index($agent) != null' <<<"$current_roster_json" >/dev/null; then
+    echo "vote: warning: '$agent' is not on the current active roster; the vote is recorded but filtered from the live quorum and tally while that remains true" >&2
+  fi
+
   local payload
   payload=$(printf '**Decision:** %s\n**Option:** %s\n\n%s' "$id" "$option" "$body")
 
@@ -632,7 +644,7 @@ close() {
     exit 2
   fi
 
-  local votes; votes=$(tally_votes "$comments" "$id" "$proposal_created_at" "$options_json")
+  local all_votes; all_votes=$(tally_votes "$comments" "$id" "$proposal_created_at" "$options_json")
 
   # Roster-filter every vote before any quorum or tally arithmetic touches
   # it: a well-formed **From:** proves identity, not a live lane, and an
@@ -641,10 +653,18 @@ close() {
   # terra's P1 — the roster>=3 branch below used to compare a bare vote
   # count to 3 with no roster check at all, so three off-roster identities
   # could fabricate quorum and decide the outcome outright).
-  votes=$(printf '%s' "$votes" | jq -c --argjson roster "$roster_json" \
+  local filtered_voters
+  filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson roster "$roster_json" '
+    [.[] | select(.agent as $a | $roster | index($a) == null) | .agent]
+    | unique
+    | if length == 0 then "none" else map("\(.) (off-roster)") | join(", ") end')
+
+  local votes
+  votes=$(printf '%s' "$all_votes" | jq -c --argjson roster "$roster_json" \
     '[.[] | select(.agent as $a | $roster | index($a) != null)]')
 
   local voting_agents_json; voting_agents_json=$(printf '%s' "$votes" | jq -c '[.[].agent] | unique')
+  local all_voting_agents_json; all_voting_agents_json=$(printf '%s' "$all_votes" | jq -c '[.[].agent] | unique')
   local voter_count; voter_count=$(printf '%s' "$voting_agents_json" | jq 'length')
 
   # The roster propose() saw when the round opened, diffed against who
@@ -657,7 +677,7 @@ close() {
   # Notify field from a malformed or pre-this-fix proposal: the diff is
   # simply empty then, never a reason to refuse the close.
   local not_reached
-  not_reached=$(jq -rn --argjson snapshot "$snapshot_json" --argjson voters "$voting_agents_json" '
+  not_reached=$(jq -rn --argjson snapshot "$snapshot_json" --argjson voters "$all_voting_agents_json" '
     [$snapshot[] | select(. as $a | $voters | index($a) == null)] | join(", ")')
 
   # A caller-supplied, fail-closed delivery record, distinct from voting:
@@ -674,7 +694,7 @@ close() {
     [.comments[] | select(structured($id) and decide_type == "acknowledgement") | acked]
     | map(split(",") | .[]) | map(select(length > 0)) | unique')
   local unacknowledged
-  unacknowledged=$(jq -rn --argjson snapshot "$snapshot_json" --argjson voters "$voting_agents_json" --argjson acked "$acknowledged_json" '
+  unacknowledged=$(jq -rn --argjson snapshot "$snapshot_json" --argjson voters "$all_voting_agents_json" --argjson acked "$acknowledged_json" '
     ($voters + $acked | unique) as $reached
     | [$snapshot[] | select(. as $a | $reached | index($a) == null)] | join(", ")')
 
@@ -821,7 +841,9 @@ close() {
   # silently unchecked on the path where they matter most. Making the
   # write side unconditional removes the second list to maintain: there is
   # only ever one record shape, so "every field present" is the whole
-  # requirement, not a set someone has to keep re-deriving by hand).
+  # requirement, not a set someone has to keep re-deriving by hand). Filtered
+  # is intentionally informational and optional to the reader, so decisions
+  # written before #27 remain terminal.
   #
   # Authority-Effect keeps a two-value vocabulary (none|self) rather than a
   # third "not asked" token: with Resolution on the record, "Authority-
@@ -836,10 +858,10 @@ close() {
   # earlier version of this comment repeated the mistake this PR had
   # already corrected once).
   local payload
-  payload=$(printf '**Decision:** %s\n**Resolution:** %s\n**Chosen:** %s\n**Tally:** %s\n**Quorum:** %s\n**Deciding-Agent:** %s\n**Implementation-Owner:** %s\n**Revisit-If:** %s\n**Tie-Break:** %s\n**Authority-Effect:** %s\n**Owner-Delegation:** %s\n**Did-Not-Vote:** %s\n**Unacknowledged:** %s' \
+  payload=$(printf '**Decision:** %s\n**Resolution:** %s\n**Chosen:** %s\n**Tally:** %s\n**Quorum:** %s\n**Deciding-Agent:** %s\n**Implementation-Owner:** %s\n**Revisit-If:** %s\n**Tie-Break:** %s\n**Authority-Effect:** %s\n**Owner-Delegation:** %s\n**Did-Not-Vote:** %s\n**Filtered:** %s\n**Unacknowledged:** %s' \
     "$id" "$resolution" "$chosen" "$tally_summary" "$quorum_note" "$agent" "$owner" "$revisit" \
     "${rationale:-$NOT_APPLICABLE}" "${authority_effect:-none}" "${owner_delegation:-none}" \
-    "${not_reached:-none}" "${unacknowledged:-none}")
+    "${not_reached:-none}" "${filtered_voters:-none}" "${unacknowledged:-none}")
   payload="${payload}
 
 Minority votes:
@@ -913,11 +935,16 @@ status() {
   local now_epoch; now_epoch=$(date -u +%s)
   printf '%s' "$rows" | jq -r '.[] | [.id, .deadline, .proposer, .options] | @tsv' | \
   while IFS=$'\t' read -r rid rdeadline rproposer roptions; do
-    local votes voter_count deadline_epoch state
-    votes=$(tally_votes "$comments" "$rid" "$(printf '%s' "$proposals" | jq -r --arg id "$rid" '.[] | select(.id == $id) | .createdAt')" "$(printf '%s\n' "$roptions" | jq -R 'split(",")')")
+    local all_votes votes filtered_voters voter_count deadline_epoch state
+    all_votes=$(tally_votes "$comments" "$rid" "$(printf '%s' "$proposals" | jq -r --arg id "$rid" '.[] | select(.id == $id) | .createdAt')" "$(printf '%s\n' "$roptions" | jq -R 'split(",")')")
     # Same roster-filter close() applies (#436 review, terra's P1): an
-    # off-roster identity's vote must not inflate the count shown here.
-    votes=$(printf '%s' "$votes" | jq -c --argjson roster "$status_roster_json" \
+    # off-roster identity's vote must not inflate the count shown here, but
+    # status must name that filtered vote so it does not silently disappear.
+    filtered_voters=$(printf '%s' "$all_votes" | jq -r --argjson roster "$status_roster_json" '
+      [.[] | select(.agent as $a | $roster | index($a) == null) | .agent]
+      | unique
+      | if length == 0 then "none" else map("\(.) (off-roster)") | join(", ") end')
+    votes=$(printf '%s' "$all_votes" | jq -c --argjson roster "$status_roster_json" \
       '[.[] | select(.agent as $a | $roster | index($a) != null)]')
     voter_count=$(printf '%s' "$votes" | jq -c '[.[].agent] | unique | length')
     local voter_names; voter_names=$(printf '%s' "$votes" | jq -r '[.[].agent] | unique | join(", ")')
@@ -932,6 +959,7 @@ status() {
       state="deadline passed — ready to close"
     fi
     echo "  #$issue '$rid' (by $rproposer, options: $roptions) — $voter_count/$status_quorum_required vote(s) (quorum $quorum_state), voters: $voter_names, deadline $rdeadline ($state)"
+    echo "      **Filtered:** $filtered_voters"
   done
 }
 
