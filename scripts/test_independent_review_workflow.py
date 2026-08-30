@@ -21,9 +21,16 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
             self.assertIn("github.event.pull_request.number", workflow)
             self.assertIn("github.event.pull_request.head.sha", workflow)
+            self.assertIn("id: resolve", workflow)
+            self.assertIn("steps.resolve.outputs.present == 'true'", workflow)
+            self.assertIn("steps.resolve.outputs.present == 'false'", workflow)
+            self.assertIn('echo "present=true" >> "$GITHUB_OUTPUT"', workflow)
+            self.assertIn('echo "present=false" >> "$GITHUB_OUTPUT"', workflow)
 
         self.assertIn('run: scripts/review_gate.sh', package)
         self.assertIn('run: docs/ai-team/scripts/review_gate.sh', adopter)
+        self.assertIn("if [ -x scripts/review_gate.sh ]; then", package)
+        self.assertIn("if [ -x docs/ai-team/scripts/review_gate.sh ]; then", adopter)
 
 
 if __name__ == "__main__":

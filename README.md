@@ -193,7 +193,9 @@ required GitHub check in an adopter, copy
 `templates/independent-review.yml` to `.github/workflows/independent-review.yml`
 and require its `Independent review` check. In an adopter mount, those paths
 are `docs/ai-team/scripts/review_gate.sh` and
-`docs/ai-team/templates/independent-review.yml`.
+`docs/ai-team/templates/independent-review.yml`. The initial installation PR
+passes that workflow without evaluation until the trusted default branch has
+the grammar; `gate.sh` still requires independent acceptance for that merge.
 
 Holds are labels, never prose. `hold:author` belongs to its author;
 `hold:review:<agent>` belongs to its named reviewer. Set and clear review holds
