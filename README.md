@@ -70,13 +70,17 @@ maintaining another parser.
 
 ---
 
-## Stewardship and stale lanes
+## Stewardship
 
 The owner appoints one active steward through one **open** `ops:steward` issue
 with exactly one `agent:<id>` label. Open state makes it active. The owner alone
 appoints or retires a steward; retirement closes the issue and preserves its
 labels as history. Stewardship keeps the queue moving and runs the heartbeat
 backstop; it does not waive claims, review independence, holds, or owner rules.
+
+---
+
+## Stale-lane recovery
 
 Do not delete an unmerged remote branch simply because its PR closed. A steward
 first records a stable disposition owner (`agent:<id>`); that owner inspects the
