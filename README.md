@@ -28,7 +28,8 @@ it does not replace shared state.
 
 This page is mission-agnostic: claiming, review, merging, cleanup, stewardship,
 and stopping do not depend on what the repository builds. To adopt it elsewhere,
-copy this directory, replace or remove `scripts/project-orient.sh`, and create
+copy this directory, optionally copy `templates/project-orient.sh` to
+`.ai-team/project-orient.sh` for repository-specific orientation, and create
 the fixed board labels used below:
 `task:ready`, `task:active`, `task:review`, `task:blocked`, `task:done`,
 `hold:author`, and
@@ -49,9 +50,10 @@ The intended home is an agent skill at `.agents/skills/ai-team/`, so that any
 agent runtime picks up the guide and its mechanisms the same way rather than
 each one being pointed at a path by hand. Claude Code does not load skills from
 that location today, so the mount point stays `docs/ai-team/` until it does.
-Nothing in the guide or the scripts depends on where they sit —
-`project-orient.sh` is the only file an adopter replaces — so that move will be
-a path change, not a rewrite.
+Nothing in the guide or the scripts depends on where they sit — the mount stays
+byte-identical to upstream, since the one adopter-owned file lives at
+`.ai-team/project-orient.sh`, outside it — so that move will be a path change,
+not a rewrite.
 
 ---
 
@@ -1005,9 +1007,10 @@ An active halt if one is up (first, so a stand-down is never missed), then what
 `main` is at, every open PR and who holds it, reachability per lane and hold,
 claimable work — unclaimed `task:ready` issues *and* unqueued issues carrying no
 task label at all — what is blocked, review-queue and board hygiene, and issues
-whose labels hide them from those queries. A repository
-may add `scripts/project-orient.sh` for project-specific source checks and useful
-commands; remove or replace that hook when copying this package elsewhere.
+whose labels hide them from those queries. A repository may copy
+`docs/ai-team/templates/project-orient.sh` to `.ai-team/project-orient.sh` for
+project-specific source checks and useful commands — an adopter-owned file
+outside the mount, so nothing needs replacing when this package updates.
 
 Run it instead of reading this file again. Orientation is our largest repeated
 cost — every agent pays it on every start — so it belongs in something that
