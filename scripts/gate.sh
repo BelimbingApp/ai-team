@@ -125,14 +125,16 @@ else
   say_bad "BEHIND origin/$BASE ($(git rev-parse --short "origin/$BASE")) — merge $BASE into the branch first"
 fi
 
-# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The head of
-#    the latest merged pull request supplies the expected check names. A
+# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The heads of
+#    the last five merged pull requests supply the expected check names: only
+#    names present on every head are universal enough to require. A
 #    default-branch tip also carries push- and schedule-only checks, which a
 #    pull request can never produce; using that tip as the baseline made those
-#    checks permanently missing from ordinary pull requests (#1).
+#    checks permanently missing from ordinary pull requests (#1). Sampling one
+#    merged PR had the same failure for path-filtered jobs (#22).
 #
 #    This is observed repository state, not a count copied into the script; when
-#    CI adds or removes a job, the gate follows the latest merged PR. A passing
+#    CI adds or removes a job, the gate follows the recent merged PRs. A passing
 #    early check can therefore never authorize a merge while another expected
 #    check has not reported on the reviewed SHA.
 # Judge the LATEST run of each check NAME, not every run on the SHA. A
@@ -149,34 +151,50 @@ runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null 
 # false expectation this check prevents. Instead, the first PR bootstraps from
 # every check that actually reported on its reviewed SHA, with a visible WARN
 # that this is weaker evidence than the normal observed baseline.
-merged_head=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
+#
+# For later PRs, intersect the names observed on the five most recent merged
+# PR heads. A path-filtered job absent from any one of those heads drops out,
+# while a universal job remains expected. If a merged head cannot be read, do
+# not silently turn that observation failure into first-PR bootstrap evidence.
+merged_heads=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
   --json headRefOid,mergedAt \
-  --jq 'map(select(.mergedAt != null)) | max_by(.mergedAt).headRefOid // empty' \
+  --jq 'map(select(.mergedAt != null)) | sort_by(.mergedAt) | reverse | .[0:5] | .[].headRefOid // empty' \
   2>/dev/null || true)
-baseline_runs='[]'
-if [ -n "$merged_head" ]; then
-  baseline_runs=$(gh api "repos/$REPO/commits/$merged_head/check-runs" --paginate 2>/dev/null \
-    | jq -sc '[.[].check_runs[]]')
-fi
+baseline_count=0
+baseline_fetch_failed=0
+expected_names='[]'
+while IFS= read -r merged_head; do
+  [ -n "$merged_head" ] || continue
+  baseline_count=$((baseline_count + 1))
+  baseline_payload=$(gh api "repos/$REPO/commits/$merged_head/check-runs" --paginate 2>/dev/null) || {
+    baseline_fetch_failed=1
+    break
+  }
+  head_names=$(printf '%s' "$baseline_payload" | jq -sc '[.[].check_runs[].name] | unique' 2>/dev/null) || {
+    baseline_fetch_failed=1
+    break
+  }
+  if [ "$baseline_count" -eq 1 ]; then
+    expected_names="$head_names"
+  else
+    expected_names=$(jq -nc --argjson left "$expected_names" --argjson right "$head_names" \
+      '$left as $left | $right as $right | [$left[] | . as $name | select($right | index($name))]')
+  fi
+done <<< "$merged_heads"
 
 latest=$(printf '%s' "$runs" | jq -c '
   group_by(.name)
   | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
 
-expected_latest=$(printf '%s' "$baseline_runs" | jq -c '
-  group_by(.name)
-  | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
-
 n=$(printf '%s' "$latest" | jq -r 'length' 2>/dev/null || echo 0)
-expected_n=$(printf '%s' "$expected_latest" | jq -r 'length' 2>/dev/null || echo 0)
 present_names=$(printf '%s' "$latest" | jq -c '[.[].name] | unique' 2>/dev/null || echo '[]')
-expected_names=$(printf '%s' "$expected_latest" | jq -c '[.[].name] | unique' 2>/dev/null || echo '[]')
-missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
-  '$expected - $present' 2>/dev/null || echo '[]')
-missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
 bad=$(printf '%s' "$latest" | jq -r \
       '[.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))]|length' \
       2>/dev/null || echo 1)
+expected_n=$(printf '%s' "$expected_names" | jq -r 'length' 2>/dev/null || echo 0)
+missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
+  '$expected - $present' 2>/dev/null || echo '[]')
+missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
 if [ "${n:-0}" -lt 1 ]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"
 elif [ "${bad:-1}" != "0" ]; then
@@ -184,9 +202,13 @@ elif [ "${bad:-1}" != "0" ]; then
   printf '%s' "$latest" | jq -r \
     '.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
-elif [ "${expected_n:-0}" -lt 1 ]; then
+elif [ "${baseline_fetch_failed:-0}" = "1" ]; then
+  say_bad "cannot observe check runs for the merged pull-request baseline"
+elif [ "${baseline_count:-0}" -lt 1 ]; then
   say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
+elif [ "${expected_n:-0}" -lt 1 ]; then
+  say_bad "cannot observe a common expected check name across the last $baseline_count merged pull requests"
 elif [ "${missing_n:-0}" -gt 0 ]; then
   say_bad "checks not yet reported on ${REVIEWED:0:8}: $(printf '%s' "$missing" | jq -r 'join(", ")')"
 else

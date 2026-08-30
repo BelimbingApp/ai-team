@@ -34,16 +34,18 @@ GH_STUB = textwrap.dedent(
           '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels}'
         ;;
       "pr list")
-        printf '%s\\n' "$GATE_TEST_MERGED_HEAD"
-        ;;
-      "api repos/$GATE_TEST_CANONICAL/commits/$GATE_TEST_MERGED_HEAD/check-runs")
-        printf '%s\\n' "$GATE_TEST_BASELINE_CHECK_RUNS"
-        ;;
-      "api repos/$GATE_TEST_CANONICAL/commits/$GATE_TEST_MAIN_SHA/check-runs")
-        printf '%s\\n' "$GATE_TEST_MAIN_CHECK_RUNS"
+        printf '%s\\n' "$GATE_TEST_MERGED_HEADS"
         ;;
       "api repos/$GATE_TEST_CANONICAL/commits/"*check-runs*)
-        if [ -n "${GATE_TEST_CHECK_RUNS:-}" ]; then
+        head="${2#repos/$GATE_TEST_CANONICAL/commits/}"
+        head="${head%/check-runs}"
+        if [ "$head" = "$GATE_TEST_HEAD" ]; then
+          printf '%s\\n' "$GATE_TEST_CHECK_RUNS"
+        elif [ "$head" = "$GATE_TEST_MAIN_SHA" ]; then
+          printf '%s\\n' "$GATE_TEST_MAIN_CHECK_RUNS"
+        elif [ -n "${GATE_TEST_BASELINE_CHECK_RUNS:-}" ]; then
+          jq -c --arg head "$head" '.[$head] // {check_runs:[]}' <<<"$GATE_TEST_BASELINE_CHECK_RUNS"
+        elif [ -n "${GATE_TEST_CHECK_RUNS:-}" ]; then
           printf '%s\\n' "$GATE_TEST_CHECK_RUNS"
         else
           printf '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","started_at":"1","completed_at":"2"}]}\\n'
@@ -149,6 +151,8 @@ class GateMechanismTest(unittest.TestCase):
         main_check_runs: list[dict[str, object]] | None = None,
         merged_head: str | None = None,
         baseline_check_runs: list[dict[str, object]] | None = None,
+        merged_heads: list[str] | None = None,
+        baseline_check_runs_by_head: dict[str, list[dict[str, object]]] | None = None,
         body: str | None = None,
         branch: str | None = None,
         title: str | None = None,
@@ -219,8 +223,15 @@ class GateMechanismTest(unittest.TestCase):
         if baseline_check_runs is None:
             baseline_check_runs = main_check_runs
         env["GATE_TEST_MAIN_CHECK_RUNS"] = json.dumps({"check_runs": main_check_runs})
-        env["GATE_TEST_MERGED_HEAD"] = self.main_sha if merged_head is None else merged_head
-        env["GATE_TEST_BASELINE_CHECK_RUNS"] = json.dumps({"check_runs": baseline_check_runs})
+        if merged_heads is None:
+            merged_heads = [self.main_sha] if merged_head is None else ([merged_head] if merged_head else [])
+        if baseline_check_runs_by_head is None:
+            baseline = main_check_runs if baseline_check_runs is None else baseline_check_runs
+            baseline_check_runs_by_head = {head: baseline for head in merged_heads}
+        env["GATE_TEST_MERGED_HEADS"] = "\n".join(merged_heads)
+        env["GATE_TEST_BASELINE_CHECK_RUNS"] = json.dumps({
+            head: {"check_runs": runs} for head, runs in baseline_check_runs_by_head.items()
+        })
 
         args = ["bash", str(SCRIPT), "1"]
         if reviewed is not None:
@@ -427,6 +438,33 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
         self.assertIn("2 distinct checks", result.stdout)
 
+    def test_expected_check_names_intersect_recent_merged_pr_heads(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[{
+                "name": "ci",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "1",
+                "completed_at": "2",
+            }],
+            merged_heads=["merged-pr-head-1", "merged-pr-head-2"],
+            baseline_check_runs_by_head={
+                "merged-pr-head-1": [
+                    {"name": "ci", "status": "completed", "conclusion": "success"},
+                    {"name": "path-filtered", "status": "completed", "conclusion": "success"},
+                ],
+                "merged-pr-head-2": [
+                    {"name": "ci", "status": "completed", "conclusion": "success"},
+                ],
+            },
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("1 distinct checks", result.stdout)
+        self.assertNotIn("path-filtered", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
     def test_first_pull_request_bootstraps_from_passing_reviewed_sha(self):
         result = self.run_gate(
             origin=CANONICAL_HTTPS,
@@ -449,6 +487,55 @@ class GateMechanismTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("no checks reported yet", result.stdout)
+
+    def test_first_pull_request_with_a_failing_check_still_blocks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[{
+                "name": "ci",
+                "status": "completed",
+                "conclusion": "failure",
+                "started_at": "1",
+                "completed_at": "2",
+            }],
+            main_check_runs=[],
+            merged_heads=[],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("1 distinct, 1 not passing", result.stdout)
+        self.assertIn("ci: completed/failure", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_first_pull_request_with_a_pending_check_still_blocks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[{
+                "name": "ci",
+                "status": "in_progress",
+                "conclusion": None,
+                "started_at": "1",
+                "completed_at": None,
+            }],
+            main_check_runs=[],
+            merged_heads=[],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("1 distinct, 1 not passing", result.stdout)
+        self.assertIn("ci: in_progress/pending", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_observed_merged_pr_without_checks_does_not_bootstrap(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            main_check_runs=[],
+            merged_head="merged-pr-head",
+            baseline_check_runs=[],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot observe a common expected check name", result.stdout)
 
     def test_missing_independent_review_fails_the_gate(self):
         result = self.run_gate(
