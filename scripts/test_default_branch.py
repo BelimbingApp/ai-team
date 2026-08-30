@@ -255,7 +255,16 @@ class NestedRepositoryLanePlacementTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
-                  "issue view") printf '%s\\n' '{"state":"OPEN","labels":[],"title":"t","url":"u"}' ;;
+                  "issue view")
+                    # claim.sh reads the labels back after writing them (#15);
+                    # this fixture models a claim whose labels landed.
+                    if printf '%s' "$*" | grep -q -- '--json labels'; then
+                      printf 'agent:%s,task:active\\n' "${CLAIM_AGENT:-}"
+                    else
+                      printf '%s\\n' '{"state":"OPEN","labels":[],"title":"t","url":"u"}'
+                    fi
+                    ;;
+                  "pr view") printf 'agent:%s,task:active\\n' "${CLAIM_AGENT:-}" ;;
                   "pr list") printf '[]\\n' ;;
                   "label list") printf '[]\\n' ;;
                   "label create") exit 0 ;;
