@@ -96,6 +96,66 @@ if [[ "$ready" != "true" && $own_label -eq 0 ]]; then
   echo "claiming unqueued #$issue: no task labels — the open-PR registry below is the collision guard"
 fi
 
+# The labels ARE the claim: gate.sh reads agent:<id> off the PR and orient.sh
+# reads task:* off the issue. #15 happened because these three writes were an
+# unchecked sequence — one of them not running left a lane nobody could see.
+# Apply, then read back and say exactly what is missing. A failed *readback* is
+# not the same as a missing label (gh may be unavailable, or stubbed): that
+# warns and leaves the claim standing, while a successful readback showing an
+# absent label is an error with the commands to finish it.
+finish_claim_labels() {
+  local pr="$1"
+  local pr_labels="" issue_labels="" missing=""
+
+  gh pr edit "$pr" --repo "$repo" --add-label "agent:$agent" --add-label task:active || true
+  gh issue edit "$issue" --repo "$repo" --add-label "agent:$agent" --add-label task:active || true
+  # Tolerant removal: an own-label follow-up may never have carried task:ready.
+  gh issue edit "$issue" --repo "$repo" --remove-label task:ready >/dev/null 2>&1 || true
+
+  # The exit status, never the output, decides whether the readback happened.
+  # An unlabelled resource answers with an EMPTY string and exits zero — and
+  # that is precisely the half-claim this function exists to catch, so
+  # treating empty as "could not read" would send the one case that matters
+  # down the warning path and exit zero on it (#18 review, codex-gpt-5).
+  local pr_read=1 issue_read=1 unread=""
+  pr_labels=$(gh pr view "$pr" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || pr_read=0
+  issue_labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null) || issue_read=0
+
+  # Each side is judged on its own: one unreadable lookup must not hide a
+  # missing label proven on the other.
+  if [[ $pr_read -eq 1 ]]; then
+    case ",$pr_labels," in *",agent:$agent,"*) ;; *) missing+="PR #$pr agent:$agent; " ;; esac
+    case ",$pr_labels," in *",task:active,"*) ;; *) missing+="PR #$pr task:active; " ;; esac
+  else
+    unread+="PR #$pr; "
+  fi
+  if [[ $issue_read -eq 1 ]]; then
+    case ",$issue_labels," in *",agent:$agent,"*) ;; *) missing+="issue #$issue agent:$agent; " ;; esac
+    case ",$issue_labels," in *",task:active,"*) ;; *) missing+="issue #$issue task:active; " ;; esac
+  else
+    unread+="issue #$issue; "
+  fi
+
+  if [[ -z "$missing" ]]; then
+    if [[ -n "$unread" ]]; then
+      echo "warning: could not read back the labels for $unread" >&2
+      echo "         The claim stands, but verify it: gh pr view $pr --json labels" >&2
+    fi
+    return 0
+  fi
+
+  echo "HALF-CLAIM: PR #$pr exists but the labels did not land — $missing" >&2
+  # An unreadable side is reported here too. Naming only what was proven
+  # missing would tell someone to fix the issue and stop, while the PR they
+  # could not check stays unlabelled and the lane stays invisible.
+  [[ -n "$unread" ]] && echo "warning: could not read back the labels for $unread" >&2
+  echo "The board still reads #$issue as unclaimed, so another agent can collide." >&2
+  echo "Finish it by re-running this script, or by hand:" >&2
+  echo "  gh pr edit $pr --repo $repo --add-label agent:$agent --add-label task:active" >&2
+  echo "  gh issue edit $issue --repo $repo --add-label agent:$agent --add-label task:active --remove-label task:ready" >&2
+  return 1
+}
+
 prs=$(gh pr list --repo "$repo" --state open --limit 100 \
   --json number,title,body,headRefName,labels,url 2>/dev/null) || {
   echo "cannot read open pull requests from $repo" >&2
@@ -110,15 +170,52 @@ matches=$(jq -c --argjson issue "$issue" '
   def issue_reference: "(#" + ($issue | tostring) + ")";
   def claim_branch:
     .headRefName | test("(^|[-_/])issue-?" + ($issue | tostring) + "($|[-_/])");
+  def from_marker:
+    ([((.body // "") | split("\n")[]
+       | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
+       | ascii_downcase)]) as $ids
+    | if ($ids | length) > 0 then $ids[0] else "" end;
   [.[]
    | select(((((.title // "") + "\\n" + (.body // "")) | contains(issue_reference))
              or ((agent_labels | length) > 0 and claim_branch)))
-   | {number, title, url, holders: agent_labels}]
+   | {number, title, url, holders: agent_labels, marker: from_marker}]
 ' <<<"$prs")
+
+# A match carrying no agent:* label is a HALF-CLAIM: claim.sh created the PR
+# and stopped before the labels landed (#15). That state is worse than no
+# claim at all — the issue still reads task:ready, so the next agent claims it
+# and collides, while the PR cannot pass gate.sh's "exactly one agent lane".
+# The body's **From:** marker is the only identity that survived, and it
+# decides what happens: your own half-claim is finished here, because re-running
+# claim.sh is what an agent actually tries; anyone else's is still refused, but
+# named, with the commands to repair it instead of a bare "already holds it".
+mine=$(jq -c --arg agent "$agent" \
+  '[.[] | select((.holders | length) == 0 and .marker == $agent)]' <<<"$matches")
+blocking=$(jq -c --arg agent "$agent" \
+  '[.[] | select((.holders | length) > 0 or .marker != $agent)]' <<<"$matches")
+
+if [[ $(jq length <<<"$blocking") -eq 0 && $(jq length <<<"$mine") -eq 1 ]]; then
+  repair_pr=$(jq -r '.[0].number' <<<"$mine")
+  echo "repairing #$issue: PR #$repair_pr is your own half-claim — its labels never landed"
+  finish_claim_labels "$repair_pr" || exit 1
+  echo "repaired #$issue: PR #$repair_pr is agent:$agent / task:active"
+  exit 0
+fi
 
 if [[ $(jq length <<<"$matches") -gt 0 ]]; then
   echo "refusing #$issue: an open PR already holds it:" >&2
-  jq -r '.[] | "  #\(.number) [\(.holders | join(", "))] \(.title) — \(.url)"' <<<"$matches" >&2
+  jq -r --arg agent "$agent" '.[]
+    | if (.holders | length) == 0
+      then "  #\(.number) [HALF-CLAIM by \(if .marker == "" then "an unnamed agent" else .marker end)] \(.title) — \(.url)"
+      else "  #\(.number) [\(.holders | join(", "))] \(.title) — \(.url)" end' <<<"$matches" >&2
+  if [[ $(jq '[.[] | select((.holders | length) == 0)] | length' <<<"$matches") -gt 0 ]]; then
+    echo "" >&2
+    echo "A HALF-CLAIM has a lane but no labels, so this issue still looks free to everyone else." >&2
+    echo "Its owner finishes it by re-running claim.sh. Anyone may repair it by hand:" >&2
+    jq -r --arg issue "$issue" '.[] | select((.holders | length) == 0)
+      | "  gh pr edit \(.number) --add-label agent:\(if .marker == "" then "<owner>" else .marker end) --add-label task:active",
+        "  gh issue edit \($issue) --add-label agent:\(if .marker == "" then "<owner>" else .marker end) --add-label task:active --remove-label task:ready"' <<<"$matches" >&2
+  fi
   exit 1
 fi
 
@@ -319,11 +416,13 @@ fi
 
 pr=${pr_url##*/}
 
-gh pr edit "$pr" --repo "$repo" --add-label "agent:$agent" --add-label task:active
-# Tolerant removal: an own-label follow-up may never have carried task:ready,
-# and failing here would abort after the PR already exists.
-gh issue edit "$issue" --repo "$repo" --add-label "agent:$agent" --add-label task:active
-gh issue edit "$issue" --repo "$repo" --remove-label task:ready 2>/dev/null || true
+# Never rolled back from here: the PR exists and may already carry work, so a
+# labelling failure is reported loudly rather than undone silently.
+if ! finish_claim_labels "$pr"; then
+  echo "worktree: $worktree" >&2
+  restore_root_off_claim
+  exit 1
+fi
 
 restore_root_off_claim
 
