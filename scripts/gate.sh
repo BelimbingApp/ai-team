@@ -311,6 +311,50 @@ if [[ "$review_exit" -gt 1 ]]; then
   say_bad "review gate could not evaluate the PR"
 fi
 
+# Native GitHub approvals are an adopter's external repository protection, not
+# a second identity format the shared AI Team account can honestly manufacture.
+# They do not change this gate's verdict about AI Team evidence, but the gate
+# can make an unmet native requirement visible before land.sh reaches a refused
+# merge endpoint (#35). A failed inspection remains a warning: this preflight
+# must not turn an unavailable GitHub rules endpoint into a false AI Team block.
+branch_rules=""
+if branch_rules=$(gh api "repos/$REPO/rules/branches/$BASE" --paginate 2>/dev/null); then
+  required_native_approvals=$(printf '%s' "$branch_rules" | jq -s \
+    '[.[][]? | select(.type == "pull_request") | (.parameters.required_approving_review_count? // 0)] | max // 0' \
+    2>/dev/null)
+  case "$required_native_approvals" in
+    ''|*[!0-9]*)
+      say_warn "cannot parse GitHub native approval rules for $BASE; a passing AI Team gate does not predict external merge permission"
+      ;;
+    0)
+      say_ok "no GitHub native approval requirement reported for $BASE"
+      ;;
+    *)
+      native_reviews=""
+      if native_reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null); then
+        native_approved=$(printf '%s' "$native_reviews" | jq -s \
+          '[.[][]? | select(.state == "APPROVED")] | length' 2>/dev/null)
+        case "$native_approved" in
+          ''|*[!0-9]*)
+            say_warn "cannot parse native GitHub reviews; a passing AI Team gate does not predict external merge permission"
+            ;;
+          *)
+            if [[ "$native_approved" -lt "$required_native_approvals" ]]; then
+              say_warn "GitHub requires $required_native_approvals native approval(s) on $BASE, but only $native_approved APPROVED review(s) are visible — a separate eligible native reviewer or automation is still required before merge"
+            else
+              say_ok "GitHub native approval preflight: requires $required_native_approvals, $native_approved APPROVED review(s) visible"
+            fi
+            ;;
+        esac
+      else
+        say_warn "cannot inspect native GitHub reviews; a passing AI Team gate does not predict external merge permission"
+      fi
+      ;;
+  esac
+else
+  say_warn "cannot inspect GitHub native approval rules for $BASE; a passing AI Team gate does not predict external merge permission"
+fi
+
 # Keep the comment-stream diagnostic below focused on the case where a review
 # was not already accepted. Comments are informational only and never count.
 accepted_agents=""
