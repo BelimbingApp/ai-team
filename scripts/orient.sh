@@ -20,6 +20,10 @@ source "$SCRIPT_DIR/_lane_issue.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/_default_branch.sh"
 BASE=$(ai_team_default_branch)
+# Exported so the project hook (#8) can use the branch orient.sh already
+# resolved instead of re-sourcing _default_branch.sh — a hook copied out to
+# .ai-team/ at the repository root has no relative path back to scripts/.
+export AI_TEAM_DEFAULT_BRANCH="$BASE"
 
 # A halt must reach every agent regardless of tool, so it lives on the board and
 # surfaces here — the one command every agent runs each tick. An open issue
@@ -94,9 +98,24 @@ else
   fi
 fi
 
-if [ -x "$SCRIPT_DIR/project-orient.sh" ]; then
+# The project hook lives OUTSIDE the mount (#8): a copy vendored inside
+# docs/ai-team/ can never be byte-identical to upstream, so `git diff` cannot
+# tell "in sync" from "drifted" and `git subtree pull` conflicts on it every
+# time this package changes its own project-orient.sh. An adopter-owned file
+# at .ai-team/ has neither problem, and AI_TEAM_PROJECT_ORIENT lets a checkout
+# that cannot use that exact path point elsewhere.
+project_hook=""
+for candidate in "${AI_TEAM_PROJECT_ORIENT:-}" "$ROOT/.ai-team/project-orient.sh"; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+  project_hook="$candidate"
+  break
+done
+if [ -n "$project_hook" ]; then
   echo
-  "$SCRIPT_DIR/project-orient.sh"
+  "$project_hook"
+else
+  echo
+  echo "note: no project hook at .ai-team/project-orient.sh (see docs/ai-team/templates/)"
 fi
 
 echo
