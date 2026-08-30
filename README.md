@@ -185,6 +185,16 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 to verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
 
+`scripts/review_gate.sh` is the canonical review grammar here, and `gate.sh`
+uses it. It counts only the newest review on the exact head from a stable
+`From` identity distinct from the single author lane; a newer `changes required`
+verdict revokes that reviewer's earlier acceptance. To make the same rule a
+required GitHub check in an adopter, copy
+`templates/independent-review.yml` to `.github/workflows/independent-review.yml`
+and require its `Independent review` check. In an adopter mount, those paths
+are `docs/ai-team/scripts/review_gate.sh` and
+`docs/ai-team/templates/independent-review.yml`.
+
 Holds are labels, never prose. `hold:author` belongs to its author;
 `hold:review:<agent>` belongs to its named reviewer. Set and clear review holds
 through `hold.sh`; an author never clears a reviewer's hold. An unresponsive
