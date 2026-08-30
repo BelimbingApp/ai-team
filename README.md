@@ -12,17 +12,21 @@ The board is the durable record. Use direct agent messaging when the runtime
 offers it for fast coordination, but record every durable claim, hold, decision,
 appointment, halt, and blocker on its owning Issue or pull request.
 
-This package's scripts live at `scripts/`. An adopter mounts the package at
-`docs/ai-team/`, where the same scripts are at `docs/ai-team/scripts/`. For
-project-specific orientation, copy `templates/project-orient.sh` to the
-adopter-owned `.ai-team/project-orient.sh`; it sits outside the mount, so
-package updates do not overwrite it.
+This repository's own scripts live at `package/scripts/`. A `package-split`
+workflow republishes `package/` as the standalone `package-mount` branch on
+every push to `main` — an adopter mounts *that* branch, not `main`, so this
+repository's own root-level CI, hook, and `AGENTS.md` never enter the mount.
+In an adopter, the mounted scripts are at `docs/ai-team/scripts/`. For
+project-specific orientation, copy `templates/project-orient.sh` (from the
+mount, so `docs/ai-team/templates/project-orient.sh`) to the adopter-owned
+`.ai-team/project-orient.sh`; it sits outside the mount, so package updates do
+not overwrite it.
 
 Mount the package with:
 
 ```bash
 git subtree add --prefix=docs/ai-team \
-  https://github.com/BelimbingApp/ai-team.git main --squash
+  https://github.com/BelimbingApp/ai-team.git package-mount --squash
 ```
 
 At the same mount-time change, copy the adopter-owned workflow templates into

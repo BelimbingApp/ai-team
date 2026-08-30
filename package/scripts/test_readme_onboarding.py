@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-README = Path(__file__).parents[1] / "README.md"
+README = Path(__file__).parents[2] / "README.md"
 
 
 class ReadmeOnboardingTest(unittest.TestCase):
@@ -18,7 +18,7 @@ class ReadmeOnboardingTest(unittest.TestCase):
     def test_readme_distinguishes_package_and_adopter_script_paths(self):
         document = README.read_text(encoding="utf-8")
 
-        self.assertIn("`scripts/`", document)
+        self.assertIn("`package/scripts/`", document)
         self.assertIn("`docs/ai-team/scripts/`", document)
         self.assertIn("`.ai-team/project-orient.sh`", document)
         self.assertIn("`templates/project-orient.sh`", document)

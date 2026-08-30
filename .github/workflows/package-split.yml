@@ -1,0 +1,39 @@
+name: package split
+
+# #26: an adopter mounts only the package, not this repository's own root-level
+# CI, hook, and onboarding doc. `git subtree add` copies the whole tree at the
+# ref it is given, so the package's own repository history is kept under
+# `package/`, and this job republishes that subtree as a standalone branch
+# (`package-mount`) whose root *is* `package/`'s contents. Adopters mount that
+# branch, never `main`.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-split-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  split:
+    name: Publish package-mount
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Split package/ onto package-mount
+        run: |
+          git config user.name "ai-team-package-split"
+          git config user.email "ai-team-package-split@users.noreply.github.com"
+          split_sha=$(git subtree split --prefix=package HEAD)
+          git push origin "$split_sha:refs/heads/package-mount" --force
