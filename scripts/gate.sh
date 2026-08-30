@@ -294,6 +294,10 @@ fi
 accepted_agents=""
 if grep -q '^PASS: independent exact-head acceptance' <<< "$review_output"; then
   accepted_agents="present"
+elif ! grep -q '^FAIL:' <<< "$review_output"; then
+  # A malformed or partially shipped delegate must not turn the review
+  # dimension into silence. Gate success requires affirmative acceptance.
+  say_bad "review gate did not report an independent exact-head acceptance"
 fi
 
 # 5d. gh pr review --approve is refused on our own PRs (shared account), and
