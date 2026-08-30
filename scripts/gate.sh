@@ -125,11 +125,16 @@ else
   say_bad "BEHIND origin/$BASE ($(git rev-parse --short "origin/$BASE")) — merge $BASE into the branch first"
 fi
 
-# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The current
-#    main tip supplies the expected check names. This is observed repository
-#    state, not a count copied into the script; when CI adds or removes a job,
-#    the gate follows main. A passing early check can therefore never authorize
-#    a merge while another expected check has not reported on the reviewed SHA.
+# 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The head of
+#    the latest merged pull request supplies the expected check names. A
+#    default-branch tip also carries push- and schedule-only checks, which a
+#    pull request can never produce; using that tip as the baseline made those
+#    checks permanently missing from ordinary pull requests (#1).
+#
+#    This is observed repository state, not a count copied into the script; when
+#    CI adds or removes a job, the gate follows the latest merged PR. A passing
+#    early check can therefore never authorize a merge while another expected
+#    check has not reported on the reviewed SHA.
 # Judge the LATEST run of each check NAME, not every run on the SHA. A
 # superseded run stays on the commit forever: `concurrency: cancel-in-progress`
 # leaves a `cancelled` entry behind whenever a PR is force-pushed or pushed
@@ -139,15 +144,24 @@ fi
 runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null \
   | jq -sc '[.[].check_runs[]]')
 
-main_sha=$(git rev-parse "origin/$BASE")
-main_runs=$(gh api "repos/$REPO/commits/$main_sha/check-runs" --paginate 2>/dev/null \
-  | jq -sc '[.[].check_runs[]]')
+# The first pull request may have no historical PR head. Keep the failure
+# explicit rather than falling back to the default branch, whose push/schedule
+# runs are exactly the source of the false expectation this check prevents.
+merged_head=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
+  --json headRefOid,mergedAt \
+  --jq 'map(select(.mergedAt != null)) | max_by(.mergedAt).headRefOid // empty' \
+  2>/dev/null || true)
+baseline_runs='[]'
+if [ -n "$merged_head" ]; then
+  baseline_runs=$(gh api "repos/$REPO/commits/$merged_head/check-runs" --paginate 2>/dev/null \
+    | jq -sc '[.[].check_runs[]]')
+fi
 
 latest=$(printf '%s' "$runs" | jq -c '
   group_by(.name)
   | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
 
-expected_latest=$(printf '%s' "$main_runs" | jq -c '
+expected_latest=$(printf '%s' "$baseline_runs" | jq -c '
   group_by(.name)
   | map(sort_by(.started_at, .completed_at) | last)' 2>/dev/null)
 
@@ -162,7 +176,7 @@ bad=$(printf '%s' "$latest" | jq -r \
       '[.[]|select(.status!="completed" or (.conclusion|IN("success","skipped","neutral")|not))]|length' \
       2>/dev/null || echo 1)
 if [ "${expected_n:-0}" -lt 1 ]; then
-  say_bad "cannot observe expected checks on origin/$BASE ${main_sha:0:8}"
+  say_bad "cannot observe expected checks on origin/$BASE from the last merged pull request"
 elif [ "${n:-0}" -lt 1 ]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"
 elif [ "${missing_n:-0}" -gt 0 ]; then

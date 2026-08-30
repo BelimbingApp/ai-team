@@ -1,9 +1,9 @@
 name: mechanisms
 
 # The package gates itself with the mechanisms it ships. gate.sh derives the
-# checks it expects from the checks observed on the default branch, so every
-# job here must run on `push` to main and on `pull_request` alike — a job that
-# runs on only one of them makes the gate either blind or permanently red.
+# checks it expects from the latest merged pull-request head, so any job intended
+# to gate pull requests must run on `pull_request`; a job that runs only on the
+# default branch cannot be required of a pull request by the gate.
 
 on:
   push:
