@@ -159,6 +159,40 @@ class OrientHalfClaimTest(unittest.TestCase):
         self.assertIn("ask on the lane before labelling it", section)
         self.assertNotIn("--add-label agent:", section)
 
+    def test_two_distinct_markers_are_not_resolved_to_the_first_one(self):
+        # The identity grammar is gate.sh's: collect, unique, and require
+        # exactly one. Taking the first match would hand the lane to whichever
+        # marker appeared earliest in a concatenated or forged body — the
+        # ownership guess this section exists to refuse.
+        result = self.run_orient(
+            unlabelled="1",
+            detail={
+                "title": "a task (#1)",
+                "body": "**From:** gpt-5\n\nquoted from elsewhere:\n\n**From:** claude-opus-5\n",
+                "headRefName": "agent/gpt-5-issue-1",
+            },
+        )
+
+        section = self.section(result.stdout)
+        self.assertIn("#1 holds #1", section)
+        self.assertIn("ask on the lane before labelling it", section)
+        self.assertNotIn("--add-label agent:", section)
+
+    def test_a_repeated_identical_marker_is_still_one_identity(self):
+        # unique, not count: the same agent quoting their own claim line does
+        # not make the owner ambiguous.
+        result = self.run_orient(
+            unlabelled="1",
+            detail={
+                "title": "a task (#1)",
+                "body": "**From:** gpt-5\n\n**From:** gpt-5\n",
+                "headRefName": "agent/gpt-5-issue-1",
+            },
+        )
+
+        section = self.section(result.stdout)
+        self.assertIn("gh pr edit 1 --add-label agent:gpt-5", section)
+
     def test_a_clean_board_says_none(self):
         self.assertIn("none", self.section(self.run_orient().stdout))
 

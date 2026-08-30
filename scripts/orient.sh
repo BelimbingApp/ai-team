@@ -156,10 +156,15 @@ for half_pr in $unlabelled; do
     --jq '[.labels[].name|select(startswith("task:"))]|join(" ")' 2>/dev/null)
   # Same **From:** idiom gate.sh reads verdicts with, so one marker grammar
   # serves the whole package rather than a second one drifting here.
+  # `unique`, then require exactly one — the same shape gate.sh's from_agent
+  # uses, and the reason it is written that way. Taking .[0] would let a body
+  # carrying two distinct markers hand the lane to whichever appeared first,
+  # which is precisely the ownership guess this section exists to refuse.
   half_marker=$(printf '%s' "$half_detail" | jq -r '
-    [((.body // "") | split("\n")[]
-      | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
-      | ascii_downcase)] | .[0] // ""' 2>/dev/null)
+    ([((.body // "") | split("\n")[]
+       | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
+       | ascii_downcase)] | unique) as $ids
+    | if ($ids | length) == 1 then $ids[0] else "" end' 2>/dev/null)
   half_claims=$((half_claims + 1))
   printf '  #%s holds #%s, which still reads %s\n' \
     "$half_pr" "$half_issue" "${half_state:-no task label}"
