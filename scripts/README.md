@@ -74,18 +74,18 @@ thread without hiding anything that can bind you.
 ## Running the mechanism tests
 
 Run them from the repository root. In this repository the scripts sit at
-`scripts/`; in an adopting repository they sit at `docs/ai-team/scripts/`.
+`package/scripts/`; in an adopting repository they sit at `docs/ai-team/scripts/`.
 
 ```bash
 # Linux / macOS — here
-python3 -m unittest discover -s scripts -p 'test_*.py'
+python3 -m unittest discover -s package/scripts -p 'test_*.py'
 
 # Linux / macOS — in an adopting repository
 python3 -m unittest discover -s docs/ai-team/scripts -p 'test_*.py'
 
 # Windows (PowerShell or Git Bash — the harness resolves Git for Windows' Bash;
 # use `python` because `python3` may be the Store alias that exits immediately)
-python -m unittest discover -s scripts -p 'test_*.py'
+python -m unittest discover -s package/scripts -p 'test_*.py'
 ```
 
 They are hermetic — stubbed `gh`, a `git` shim for the origin-identity answer,
