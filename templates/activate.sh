@@ -13,6 +13,7 @@ CONFIG=.ai-team/package-refresh.conf
 MUTEX_REF="refs/heads/$MUTEX_BRANCH"
 MUTEX_SHA=
 MUTEX_HELD=0
+MUTEX_EMPTY_RETRY_COUNT=0
 TEMP_PARENT=
 TEMP_WORKTREE=
 TEMP_SUITE_REPO=
@@ -117,6 +118,7 @@ EOF
           }
         fi
         printf 'activation: recovered exact stale generated mutex %s after owner verification\n' "$mutex_observed" >&2
+        MUTEX_EMPTY_RETRY_COUNT=0
         acquire_activation_mutex
         return $?
       fi
@@ -133,6 +135,7 @@ EOF
         waited_observed=$(printf '%s\n' "$waited_lines" | awk 'NF { print $1; exit }')
         if [ -z "$waited_observed" ]; then
           printf 'activation: the short mutex cleared after %s second(s); observing the durable lane\n' "$mutex_waited" >&2
+          MUTEX_EMPTY_RETRY_COUNT=0
           acquire_activation_mutex
           return $?
         fi
@@ -165,10 +168,18 @@ EOF
       printf 'activation: if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=%s; activation never steals it\n' "$mutex_observed" >&2
       return 1
     else
+      if [ "$MUTEX_EMPTY_RETRY_COUNT" -lt 3 ]; then
+        MUTEX_EMPTY_RETRY_COUNT=$((MUTEX_EMPTY_RETRY_COUNT + 1))
+        printf 'activation: mutex CAS failed but the ref is now empty; retrying with a fresh nonce (%s/3)\n' \
+          "$MUTEX_EMPTY_RETRY_COUNT" >&2
+        acquire_activation_mutex
+        return $?
+      fi
       printf 'activation: cannot acquire origin/%s (check push permission or protection)\n' "$MUTEX_BRANCH" >&2
       return 2
     fi
   fi
+  MUTEX_EMPTY_RETRY_COUNT=0
   MUTEX_HELD=1
 }
 
@@ -470,10 +481,8 @@ cleanup_proven_merged_refresh() {
   lingering_package_tree=$(git rev-parse "$lingering_revision^{tree}" 2>/dev/null) || \
     fail "the package revision recorded by closed origin/$UPDATE_BRANCH has no tree"
   lingering_tree=$(git rev-parse "$lingering_sha:$PREFIX" 2>/dev/null || true)
-  default_tree=$(git rev-parse "origin/$BASE:$PREFIX" 2>/dev/null || true)
-  [ -n "$lingering_tree" ] && [ "$lingering_tree" = "$lingering_package_tree" ] && \
-    [ "$lingering_tree" = "$default_tree" ] || \
-    fail "closed origin/$UPDATE_BRANCH is not the package tree on origin/$BASE; refusing to delete it"
+  [ -n "$lingering_tree" ] && [ "$lingering_tree" = "$lingering_package_tree" ] || \
+    fail "closed origin/$UPDATE_BRANCH does not contain its exact recorded package tree"
 
   merged_rows=$(gh pr list --repo "$REPO" --state merged \
     --head "$UPDATE_BRANCH" --limit 1000 \
@@ -494,6 +503,9 @@ cleanup_proven_merged_refresh() {
   [ "$merged_count" -ne 0 ] || return 0
   [ "$merged_count" -eq 1 ] || \
     fail "closed origin/$UPDATE_BRANCH has multiple matching merged PRs; refusing to delete it"
+  default_tree=$(git rev-parse "origin/$BASE:$PREFIX" 2>/dev/null || true)
+  [ "$lingering_tree" = "$default_tree" ] || \
+    fail "closed origin/$UPDATE_BRANCH is not the package tree on origin/$BASE; refusing to delete it"
   IFS=$'\t' read -r merged_number merged_head merged_commit merged_repo merged_cross \
     merged_base merged_branch merged_agents merged_owner merged_issueless <<EOF
 $merged_info
