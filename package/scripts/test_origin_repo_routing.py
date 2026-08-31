@@ -33,7 +33,13 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
         (self.work / "tracked.txt").write_text("tracked\n", encoding="utf-8")
         self.git("add", "tracked.txt")
         self.git("commit", "-q", "-m", "fixture")
+        self.push_origin = self.base / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "-b", "main", str(self.push_origin)],
+            check=True,
+        )
         self.git("remote", "add", "origin", "https://github.com/example/origin.git")
+        self.git("remote", "set-url", "--push", "origin", str(self.push_origin))
 
         # This is the configuration that makes bare `gh repo view` resolve an
         # ambient repository instead of the repository named by origin. Keep a
@@ -56,6 +62,19 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                 # orient.sh refreshes origin before printing the board. The
                 # fixture already has origin/main; suppress a real GitHub fetch.
                 if [ "${1:-}" = "fetch" ]; then exit 0; fi
+                # claim.sh now takes the real shared mutex before its first
+                # GitHub read. Keep the canonical origin URL for routing, but
+                # perform mutex readback against the local same-repository push
+                # target so this fixture never contacts GitHub.
+                if [ "${1:-}" = "ls-remote" ]; then
+                  shift
+                  rewritten=()
+                  for argument in "$@"; do
+                    [ "$argument" != "origin" ] || argument="$ORIGIN_ROUTING_PUSH_ORIGIN"
+                    rewritten+=("$argument")
+                  done
+                  exec "$ORIGIN_ROUTING_REAL_GIT" ls-remote "${rewritten[@]}"
+                fi
                 exec "$ORIGIN_ROUTING_REAL_GIT" "$@"
                 """
             ),
@@ -110,6 +129,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
         self.env.pop("AI_TEAM_BASE_BRANCH", None)
         self.env.pop("REVIEW_GATE_INPUT", None)
         self.env["ORIGIN_ROUTING_REAL_GIT"] = bash_path(Path(real_git))
+        self.env["ORIGIN_ROUTING_PUSH_ORIGIN"] = bash_path(self.push_origin)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -151,6 +171,20 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
 
     def test_claim_scopes_github_to_origin(self):
         self.assert_script_scopes_github_to_origin("claim.sh")
+        mutex = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.push_origin),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/ai-team/activation-mutex",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(mutex.returncode, 0)
 
     def test_hold_scopes_github_to_origin(self):
         self.assert_script_scopes_github_to_origin("hold.sh")

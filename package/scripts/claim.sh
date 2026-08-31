@@ -56,6 +56,7 @@ ACTIVATION_MUTEX_REF="refs/heads/$ACTIVATION_MUTEX_BRANCH"
 AI_TEAM_ACTIVATION_MUTEX_PROTOCOL=1
 activation_mutex_sha=
 activation_mutex_held=0
+activation_mutex_empty_retry_count=0
 body=
 
 # Activation and ordinary claims both cross the same short, atomic remote-ref
@@ -125,6 +126,7 @@ acquire_activation_mutex() {
           }
         fi
         echo "recovered exact stale generated mutex $observed after owner verification" >&2
+        activation_mutex_empty_retry_count=0
         acquire_activation_mutex
         return $?
       fi
@@ -132,10 +134,17 @@ acquire_activation_mutex() {
       echo "if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=$observed; this script never steals it" >&2
       return 1
     else
+      if [[ $activation_mutex_empty_retry_count -lt 3 ]]; then
+        activation_mutex_empty_retry_count=$((activation_mutex_empty_retry_count + 1))
+        echo "claim: activation mutex CAS failed but the ref is now empty; retrying with a fresh nonce ($activation_mutex_empty_retry_count/3)" >&2
+        acquire_activation_mutex
+        return $?
+      fi
       echo "cannot acquire origin/$ACTIVATION_MUTEX_BRANCH (check push permission or protection)" >&2
       return 2
     fi
   fi
+  activation_mutex_empty_retry_count=0
   activation_mutex_held=1
 }
 

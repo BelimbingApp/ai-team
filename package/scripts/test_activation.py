@@ -510,15 +510,69 @@ class ActivationRefreshTest(unittest.TestCase):
                   printf 'https://github.com/%s.git\\n' "$AI_TEAM_TEST_ORIGIN_REPO"
                   exit 0
                 fi
+                arguments=("$@")
+                command_index=0
+                while [ "$command_index" -lt "${#arguments[@]}" ]; do
+                  case "${arguments[$command_index]}" in
+                    -c|-C|--git-dir|--work-tree|--namespace)
+                      command_index=$((command_index + 2))
+                      ;;
+                    --git-dir=*|--work-tree=*|--namespace=*|--no-pager|--literal-pathspecs|--no-literal-pathspecs)
+                      command_index=$((command_index + 1))
+                      ;;
+                    *)
+                      break
+                      ;;
+                  esac
+                done
+                git_command="${arguments[$command_index]:-}"
                 mutex_create=false
-                if [ "${1:-}" = "push" ]; then
+                mutex_source=''
+                if [ "$git_command" = "push" ]; then
                   for argument in "$@"; do
                     case "$argument" in
                       [0-9a-fA-F]*:refs/heads/ai-team/activation-mutex)
                         mutex_create=true
+                        mutex_source="${argument%%:*}"
                         ;;
                     esac
                   done
+                fi
+                mutex_ref_argument=false
+                for argument in "$@"; do
+                  [ "$argument" != "refs/heads/ai-team/activation-mutex" ] || \
+                    mutex_ref_argument=true
+                done
+                if [ "$git_command" = "ls-remote" ] && \
+                   [ "$mutex_ref_argument" = true ] && \
+                   [ "${ACTIVATION_TEST_MUTEX_TRANSITION:-}" = "wait-clear" ] && \
+                   [ -f "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE.transition-installed" ]; then
+                  if [ -f "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE.transition-read" ]; then
+                    "$ACTIVATION_TEST_REAL_GIT" --git-dir="$ACTIVATION_TEST_ORIGIN" \
+                      update-ref -d refs/heads/ai-team/activation-mutex
+                    exit 0
+                  fi
+                  : > "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE.transition-read"
+                fi
+                if [ "$mutex_create" = true ] && [ -n "${ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE:-}" ]; then
+                  printf '%s\\n' "$mutex_source" >> "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE"
+                  mutex_attempt=$(wc -l < "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE")
+                  mutex_attempt=${mutex_attempt//[[:space:]]/}
+                  if [ "$mutex_attempt" -le "${ACTIVATION_TEST_EMPTY_MUTEX_FAILURES:-0}" ]; then
+                    if [ "$mutex_attempt" -eq 2 ] && \
+                       [ -n "${ACTIVATION_TEST_MUTEX_TRANSITION:-}" ]; then
+                      transition_sha="$mutex_source"
+                      if [ "$ACTIVATION_TEST_MUTEX_TRANSITION" = "wait-clear" ] || \
+                         [ "$ACTIVATION_TEST_MUTEX_TRANSITION" = "exact-recovery" ]; then
+                        transition_sha="$ACTIVATION_TEST_MUTEX_TRANSITION_SHA"
+                      fi
+                      "$ACTIVATION_TEST_REAL_GIT" --git-dir="$ACTIVATION_TEST_ORIGIN" \
+                        update-ref refs/heads/ai-team/activation-mutex "$transition_sha"
+                      : > "$ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE.transition-installed"
+                    fi
+                    printf 'simulated empty mutex CAS failure %s\\n' "$mutex_attempt" >&2
+                    exit 91
+                  fi
                 fi
                 if [ "$mutex_create" = true ] && [ -n "${ACTIVATION_TEST_RACE_BARRIER:-}" ]; then
                   : > "$ACTIVATION_TEST_RACE_BARRIER/$ACTIVATION_TEST_RACE_RUNNER"
@@ -561,6 +615,10 @@ class ActivationRefreshTest(unittest.TestCase):
         mutex_winner_delay: int | None = None,
         suite_mutation: str | None = None,
         git_dir: Path | None = None,
+        mutex_empty_failures: int | None = None,
+        mutex_attempts_file: Path | None = None,
+        mutex_transition: str | None = None,
+        mutex_transition_sha: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         checkout = checkout or self.checkout
         environment = self.git_env()
@@ -596,6 +654,18 @@ class ActivationRefreshTest(unittest.TestCase):
             environment["ACTIVATION_TEST_SUITE_MUTATION"] = suite_mutation
         if git_dir is not None:
             environment["GIT_DIR"] = str(git_dir)
+        if mutex_empty_failures is not None:
+            environment["ACTIVATION_TEST_EMPTY_MUTEX_FAILURES"] = str(
+                mutex_empty_failures
+            )
+        if mutex_attempts_file is not None:
+            environment["ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE"] = bash_path(
+                mutex_attempts_file
+            )
+        if mutex_transition is not None:
+            environment["ACTIVATION_TEST_MUTEX_TRANSITION"] = mutex_transition
+        if mutex_transition_sha is not None:
+            environment["ACTIVATION_TEST_MUTEX_TRANSITION_SHA"] = mutex_transition_sha
         return run_with_bash_path(
             ["bash", str(checkout / ".ai-team" / "activate.sh")],
             stub_directory=self.bin,
@@ -612,6 +682,11 @@ class ActivationRefreshTest(unittest.TestCase):
         checkout: Path | None = None,
         race_barrier: Path | None = None,
         race_runner: str | None = None,
+        mutex_empty_failures: int | None = None,
+        mutex_attempts_file: Path | None = None,
+        mutex_transition: str | None = None,
+        mutex_transition_sha: str | None = None,
+        recover_mutex_sha: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         checkout = checkout or self.checkout
         environment = self.git_env()
@@ -629,6 +704,20 @@ class ActivationRefreshTest(unittest.TestCase):
         if race_barrier is not None:
             environment["ACTIVATION_TEST_RACE_BARRIER"] = bash_path(race_barrier)
             environment["ACTIVATION_TEST_RACE_RUNNER"] = race_runner or "claim"
+        if mutex_empty_failures is not None:
+            environment["ACTIVATION_TEST_EMPTY_MUTEX_FAILURES"] = str(
+                mutex_empty_failures
+            )
+        if mutex_attempts_file is not None:
+            environment["ACTIVATION_TEST_MUTEX_ATTEMPTS_FILE"] = bash_path(
+                mutex_attempts_file
+            )
+        if mutex_transition is not None:
+            environment["ACTIVATION_TEST_MUTEX_TRANSITION"] = mutex_transition
+        if mutex_transition_sha is not None:
+            environment["ACTIVATION_TEST_MUTEX_TRANSITION_SHA"] = mutex_transition_sha
+        if recover_mutex_sha is not None:
+            environment["AI_TEAM_RECOVER_MUTEX_SHA"] = recover_mutex_sha
         return run_with_bash_path(
             ["bash", bash_path(CLAIM_SCRIPT), "77"],
             stub_directory=self.bin,
@@ -656,6 +745,29 @@ class ActivationRefreshTest(unittest.TestCase):
             capture_output=True,
         )
         return result.stdout.strip() if result.returncode == 0 else None
+
+    def mutex_attempt_shas(self, attempts_file: Path) -> list[str]:
+        return attempts_file.read_text(encoding="utf-8").splitlines()
+
+    def assert_fresh_mutex_attempts(
+        self, attempts_file: Path, expected_count: int
+    ) -> list[str]:
+        attempts = self.mutex_attempt_shas(attempts_file)
+        self.assertEqual(len(attempts), expected_count, attempts)
+        self.assertEqual(len(set(attempts)), expected_count, attempts)
+        nonces = []
+        for attempt in attempts:
+            message = self.git_output("show", "-s", "--format=%B", attempt)
+            nonce_lines = [
+                line.removeprefix("AI-Team-Activation-Mutex-Nonce: ")
+                for line in message.splitlines()
+                if line.startswith("AI-Team-Activation-Mutex-Nonce: ")
+            ]
+            self.assertEqual(len(nonce_lines), 1, message)
+            self.assertRegex(nonce_lines[0], r"^[0-9a-fA-F]{32}$")
+            nonces.append(nonce_lines[0].lower())
+        self.assertEqual(len(set(nonces)), expected_count, nonces)
+        return attempts
 
     def create_stale_generated_mutex(self) -> str:
         parent = self.git_output("rev-parse", "HEAD")
@@ -973,6 +1085,209 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertEqual(self.git_output("status", "--porcelain"), "")
         self.assertEqual(sorted(path.name for path in race_barrier.iterdir()), ["activation", "claim"])
 
+    def test_activation_retries_an_empty_mutex_cas_with_a_fresh_nonce(self):
+        self.install_git_race_shim()
+        attempts_file = self.root / "activation-mutex-attempts"
+
+        result = self.run_activation(
+            fixed_commit_time=True,
+            exclusive_first_refresh=True,
+            mutex_empty_failures=1,
+            mutex_attempts_file=attempts_file,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 3, output)
+        self.assertIn(
+            "mutex CAS failed but the ref is now empty; retrying with a fresh nonce (1/3)",
+            output,
+        )
+        self.assert_fresh_mutex_attempts(attempts_file, 2)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertTrue((self.state / "ready").is_file())
+
+    def test_activation_empty_mutex_cas_retry_budget_is_bounded(self):
+        self.install_git_race_shim()
+        attempts_file = self.root / "activation-mutex-denials"
+
+        result = self.run_activation(
+            fixed_commit_time=True,
+            exclusive_first_refresh=True,
+            mutex_empty_failures=4,
+            mutex_attempts_file=attempts_file,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn("check push permission or protection", output)
+        self.assert_fresh_mutex_attempts(attempts_file, 4)
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertFalse((self.state / "pr-number").exists())
+
+    def test_activation_waited_clear_starts_a_fresh_empty_cas_budget(self):
+        self.install_git_race_shim()
+        stale_mutex = self.create_stale_generated_mutex()
+        self.git("push", "-q", "origin", "--delete", MUTEX_BRANCH)
+        attempts_file = self.root / "activation-mutex-wait-reset"
+
+        result = self.run_activation(
+            fixed_commit_time=True,
+            exclusive_first_refresh=True,
+            mutex_empty_failures=5,
+            mutex_attempts_file=attempts_file,
+            mutex_transition="wait-clear",
+            mutex_transition_sha=stale_mutex,
+            mutex_wait_seconds=2,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 3, output)
+        self.assertIn("the short mutex cleared after 1 second(s)", output)
+        self.assertEqual(output.count("fresh nonce (1/3)"), 2, output)
+        self.assertEqual(output.count("fresh nonce (2/3)"), 1, output)
+        self.assertEqual(output.count("fresh nonce (3/3)"), 1, output)
+        self.assert_fresh_mutex_attempts(attempts_file, 6)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+
+    def test_activation_exact_recovery_starts_a_fresh_empty_cas_budget(self):
+        self.install_git_race_shim()
+        stale_mutex = self.create_stale_generated_mutex()
+        self.git("push", "-q", "origin", "--delete", MUTEX_BRANCH)
+        attempts_file = self.root / "activation-mutex-recovery-reset"
+
+        result = self.run_activation(
+            fixed_commit_time=True,
+            exclusive_first_refresh=True,
+            recover_mutex_sha=stale_mutex,
+            mutex_empty_failures=5,
+            mutex_attempts_file=attempts_file,
+            mutex_transition="exact-recovery",
+            mutex_transition_sha=stale_mutex,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 3, output)
+        self.assertIn(
+            f"recovered exact stale generated mutex {stale_mutex}", output
+        )
+        self.assertEqual(output.count("fresh nonce (1/3)"), 2, output)
+        self.assertEqual(output.count("fresh nonce (2/3)"), 1, output)
+        self.assertEqual(output.count("fresh nonce (3/3)"), 1, output)
+        self.assert_fresh_mutex_attempts(attempts_file, 6)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+
+    def test_claim_retries_an_empty_mutex_cas_with_a_fresh_nonce(self):
+        self.install_git_race_shim()
+        attempts_file = self.root / "claim-mutex-attempts"
+
+        result = self.run_claim(
+            mutex_empty_failures=1,
+            mutex_attempts_file=attempts_file,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(
+            "mutex CAS failed but the ref is now empty; retrying with a fresh nonce (1/3)",
+            output,
+        )
+        self.assert_fresh_mutex_attempts(attempts_file, 2)
+        self.assertTrue((self.state / "claim-pr-visible").is_file())
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        claimed = self.origin_output(
+            "show-ref", "--verify", "--hash", "refs/heads/agent/race-claimant-issue-77"
+        )
+        self.assertRegex(claimed, r"^[0-9a-f]{40,64}$")
+
+    def test_claim_empty_mutex_cas_retry_budget_is_bounded(self):
+        self.install_git_race_shim()
+        attempts_file = self.root / "claim-mutex-denials"
+
+        result = self.run_claim(
+            mutex_empty_failures=4,
+            mutex_attempts_file=attempts_file,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn("check push permission or protection", output)
+        self.assert_fresh_mutex_attempts(attempts_file, 4)
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertFalse((self.state / "claim-pr-visible").exists())
+        missing_claim = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/agent/race-claimant-issue-77",
+            ],
+            env=self.git_env(),
+            check=False,
+        )
+        self.assertNotEqual(missing_claim.returncode, 0)
+
+    def test_claim_exact_recovery_starts_a_fresh_empty_cas_budget(self):
+        self.install_git_race_shim()
+        stale_mutex = self.create_stale_generated_mutex()
+        self.git("push", "-q", "origin", "--delete", MUTEX_BRANCH)
+        attempts_file = self.root / "claim-mutex-recovery-reset"
+
+        result = self.run_claim(
+            mutex_empty_failures=5,
+            mutex_attempts_file=attempts_file,
+            mutex_transition="exact-recovery",
+            mutex_transition_sha=stale_mutex,
+            recover_mutex_sha=stale_mutex,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn(
+            f"recovered exact stale generated mutex {stale_mutex}", output
+        )
+        self.assertEqual(output.count("fresh nonce (1/3)"), 2, output)
+        self.assertEqual(output.count("fresh nonce (2/3)"), 1, output)
+        self.assertEqual(output.count("fresh nonce (3/3)"), 1, output)
+        self.assert_fresh_mutex_attempts(attempts_file, 6)
+        self.assertTrue((self.state / "claim-pr-visible").is_file())
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+
+    def test_mutex_retry_budget_resets_for_new_ownership_transitions(self):
+        activation_source = TEMPLATE.read_text(encoding="utf-8")
+        claim_source = CLAIM_SCRIPT.read_text(encoding="utf-8")
+
+        activation_recovery_reset = (
+            "printf 'activation: recovered exact stale generated mutex %s after owner "
+            "verification\\n' \"$mutex_observed\" >&2\n"
+            "        MUTEX_EMPTY_RETRY_COUNT=0\n"
+            "        acquire_activation_mutex"
+        )
+        activation_wait_reset = (
+            "printf 'activation: the short mutex cleared after %s second(s); observing "
+            "the durable lane\\n' \"$mutex_waited\" >&2\n"
+            "          MUTEX_EMPTY_RETRY_COUNT=0\n"
+            "          acquire_activation_mutex"
+        )
+        claim_recovery_reset = (
+            "echo \"recovered exact stale generated mutex $observed after owner "
+            "verification\" >&2\n"
+            "        activation_mutex_empty_retry_count=0\n"
+            "        acquire_activation_mutex"
+        )
+        self.assertIn(activation_recovery_reset, activation_source)
+        self.assertIn(activation_wait_reset, activation_source)
+        self.assertIn(claim_recovery_reset, claim_source)
+
     def test_slow_concurrent_activation_reports_the_exact_in_progress_revision(self):
         self.install_git_race_shim()
         second_checkout = self.root / "checkout-slow-two"
@@ -997,8 +1312,12 @@ class ActivationRefreshTest(unittest.TestCase):
 
         self.assertEqual([result.returncode for result in results], [3, 3])
         combined = "".join(result.stdout + result.stderr for result in results)
-        self.assertIn(f"package revision {self.package_sha} is in progress", combined)
-        self.assertIn("under exact activation mutex", combined)
+        observed_mutex = (
+            f"package revision {self.package_sha} is in progress" in combined
+            and "under exact activation mutex" in combined
+        )
+        observed_ready_lane = "package refresh PR #51 is ready" in combined
+        self.assertTrue(observed_mutex or observed_ready_lane, combined)
         self.assertIn("PR #51", combined)
         self.assertEqual(
             self.suite_marker.read_text(encoding="utf-8").splitlines(),
@@ -1536,9 +1855,10 @@ class ActivationRefreshTest(unittest.TestCase):
         )
         self.assertEqual(
             stale_refusal.returncode,
-            1,
+            3,
             stale_refusal.stdout + stale_refusal.stderr,
         )
+        self.assertIn("under exact activation mutex", stale_refusal.stderr)
         self.assertEqual(self.remote_mutex_sha(), stale_mutex)
 
         created = self.run_activation(
@@ -1625,7 +1945,7 @@ class ActivationRefreshTest(unittest.TestCase):
         retried = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(retried.returncode, 3, retried.stdout + retried.stderr)
-        self.assertIn("resuming recoverable failed refresh state", retried.stderr)
+        self.assertIn("resuming exact generated failure marker", retried.stderr)
         self.assertNotEqual(self.remote_update_sha(), claim_sha)
         self.assertTrue((self.state / "ready").is_file())
         self.assertIsNone(self.remote_mutex_sha())
@@ -2139,12 +2459,16 @@ class ActivationRefreshTest(unittest.TestCase):
             "pr-create-success",
         ):
             (self.state / state_name).unlink(missing_ok=True)
+        self.gh_log.write_text("", encoding="utf-8")
 
         refused = self.run_activation(exclusive_first_refresh=True)
         self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
         self.assertIn("has no open or matching merged PR", refused.stderr)
         self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={verified_sha}", refused.stderr)
         self.assertEqual(self.remote_update_sha(), verified_sha)
+        refused_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit", refused_log)
+        self.assertNotIn("label create", refused_log)
 
         recovered = self.run_activation(
             recover_refresh_sha=verified_sha, exclusive_first_refresh=True
