@@ -43,7 +43,14 @@ class ReviewGateTest(unittest.TestCase):
             "submitted_at": at,
         }
 
-    def run_live_gate_with_argv_guard(self, review_body_size=50_000, jq_arg_limit=4_096):
+    def run_live_gate_with_argv_guard(
+        self,
+        review_body_size=50_000,
+        jq_arg_limit=4_096,
+        *,
+        malformed_reviews=False,
+        interrupt_on_review_parse=False,
+    ):
         """Exercise the live GitHub path while a jq shim rejects large argv.
 
         Windows rejects a large review payload before jq starts. The shim gives
@@ -62,6 +69,10 @@ set -euo pipefail
 if [ "${{1:-}} ${{2:-}}" = "pr view" ]; then
   printf '%s\n' '{{"headRefOid":"{SHA}","labels":[{{"name":"agent:author"}}]}}'
 elif [ "${{1:-}}" = "api" ]; then
+  if [ "${{MALFORMED_REVIEWS:-0}}" = 1 ]; then
+    printf '{{'
+    exit 0
+  fi
   padding=$(printf '%*s' "${{REVIEW_BODY_SIZE:?}}" '')
   padding=${{padding// /x}}
   printf '%s\n' '[{{"id":1,"state":"COMMENTED","body":"**From:** reviewer\\n\\n**Verdict:** accept\\n'"$padding"'","commit_id":"{SHA}","submitted_at":"2026-01-01T00:00:00Z"}}]'
@@ -85,6 +96,10 @@ for arg in "$@"; do
     exit 91
   fi
 done
+if [ "${PAUSE_ON_SLURP:-0}" = 1 ] && [ "${1:-}" = -s ]; then
+  : > "$SIGNAL_MARKER"
+  sleep 2
+fi
 exec "$REAL_JQ" "$@"
 """,
                 encoding="utf-8",
@@ -101,9 +116,53 @@ exec "$REAL_JQ" "$@"
                 self.fail("jq is required to exercise the review gate")
             env["REAL_JQ"] = bash_path(Path(real_jq))
             env["REVIEW_BODY_SIZE"] = str(review_body_size)
+            env["MALFORMED_REVIEWS"] = "1" if malformed_reviews else "0"
             env["TMPDIR"] = str(temp_files)
+            signal_marker = root / "review-parse-started"
+            env["PAUSE_ON_SLURP"] = "1" if interrupt_on_review_parse else "0"
+            env["SIGNAL_MARKER"] = bash_path(signal_marker)
+
+            command = ["bash", bash_path(SCRIPT), "7", SHA]
+            if interrupt_on_review_parse:
+                signal_driver = """set -euo pipefail
+target=$1
+shift
+bash "$target" "$@" &
+pid=$!
+ready=false
+for _ in $(seq 1 100); do
+  if [ -f "$SIGNAL_MARKER" ]; then
+    ready=true
+    break
+  fi
+  sleep 0.05
+done
+if [ "$ready" != true ]; then
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  echo "review parser did not reach the signal barrier" >&2
+  exit 98
+fi
+kill -TERM "$pid"
+set +e
+wait "$pid"
+rc=$?
+set -e
+printf 'signal-exit=%s\n' "$rc"
+[ "$rc" -eq 143 ]
+"""
+                command = [
+                    "bash",
+                    "-c",
+                    signal_driver,
+                    "review-gate-signal-test",
+                    bash_path(SCRIPT),
+                    "7",
+                    SHA,
+                ]
+
             result = run_with_bash_path(
-                ["bash", bash_path(SCRIPT), "7", SHA],
+                command,
                 stub_directory=root,
                 env=env,
                 text=True,
@@ -126,6 +185,20 @@ exec "$REAL_JQ" "$@"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
         self.assertEqual(leftovers, [], f"temporary review files leaked: {leftovers}")
+
+    def test_live_review_parse_failure_cleans_temporary_files(self):
+        result, leftovers = self.run_live_gate_with_argv_guard(malformed_reviews=True)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("cannot read reviews", result.stderr)
+        self.assertEqual(leftovers, [], f"temporary review files leaked after failure: {leftovers}")
+
+    def test_signal_during_live_review_parse_cleans_temporary_files(self):
+        result, leftovers = self.run_live_gate_with_argv_guard(interrupt_on_review_parse=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("signal-exit=143", result.stdout)
+        self.assertEqual(leftovers, [], f"temporary review files leaked after TERM: {leftovers}")
 
     def test_native_approval_still_requires_a_from_marker(self):
         result = self.run_gate([
