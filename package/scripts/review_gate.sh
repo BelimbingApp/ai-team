@@ -18,8 +18,25 @@
 
 set -euo pipefail
 
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=docs/ai-team/scripts/_default_branch.sh
+# shellcheck disable=SC1091
+source "$here/_default_branch.sh"
+
 input="${REVIEW_GATE_INPUT:-}"
-cleanup_input=""
+cleanup_paths=()
+
+cleanup() {
+  local path
+  for path in "${cleanup_paths[@]}"; do
+    [[ -n "$path" ]] && rm -f -- "$path"
+  done
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ -z "$input" ]]; then
   pr="${1:-}"
@@ -29,33 +46,48 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
-  repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
-    echo "ERROR: cannot resolve this repository through gh" >&2
+  repo=$(ai_team_origin_repo) || {
+    echo "ERROR: cannot resolve this repository from origin" >&2
     exit 2
   }
-  pr_json=$(gh pr view "$pr" --repo "$repo" --json headRefOid,labels 2>/dev/null) || {
+  [[ -n "$repo" ]] || { echo "ERROR: cannot resolve this repository from origin" >&2; exit 2; }
+  pr_json_file=$(mktemp) || {
+    echo "ERROR: cannot create temporary review input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$pr_json_file")
+  if ! gh pr view "$pr" --repo "$repo" --json headRefOid,labels >"$pr_json_file" 2>/dev/null; then
     echo "ERROR: cannot read PR #$pr from $repo" >&2
     exit 2
-  }
+  fi
   if [[ -z "$reviewed" ]]; then
-    reviewed=$(jq -r '.headRefOid // ""' <<<"$pr_json")
+    reviewed=$(jq -r '.headRefOid // ""' "$pr_json_file")
   fi
   if [[ ! "$reviewed" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: reviewed SHA must be a full 40-character lowercase SHA" >&2
     exit 2
   fi
-  reviews=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate 2>/dev/null \
-    | jq -s 'add // []' 2>/dev/null) || {
-    echo "ERROR: cannot read reviews for PR #$pr from $repo" >&2
+
+  reviews_file=$(mktemp) || {
+    echo "ERROR: cannot create temporary review input" >&2
     exit 2
   }
-  input=$(mktemp)
-  cleanup_input="$input"
-  trap 'rm -f "$cleanup_input"' EXIT
+  cleanup_paths+=("$reviews_file")
+  if ! gh api "repos/$repo/pulls/$pr/reviews" --paginate 2>/dev/null \
+    | jq -s 'add // []' >"$reviews_file" 2>/dev/null; then
+    echo "ERROR: cannot read reviews for PR #$pr from $repo" >&2
+    exit 2
+  fi
+
+  input=$(mktemp) || {
+    echo "ERROR: cannot create temporary review input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$input")
   jq -n --arg reviewed "$reviewed" \
-    --argjson labels "$(jq -c '.labels // []' <<<"$pr_json")" \
-    --argjson reviews "$reviews" \
-    '{reviewed: $reviewed, labels: $labels, reviews: $reviews}' >"$input"
+    --slurpfile pr "$pr_json_file" \
+    --slurpfile reviews "$reviews_file" \
+    '{reviewed: $reviewed, labels: ($pr[0].labels // []), reviews: ($reviews[0] // [])}' >"$input"
 fi
 
 result=$(jq -r '

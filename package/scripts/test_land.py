@@ -12,6 +12,7 @@ from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("land.sh")
 LANE = Path(__file__).with_name("_lane_issue.sh")
+DEFAULT_BRANCH = Path(__file__).with_name("_default_branch.sh")
 HYGIENE = Path(__file__).with_name("label_hygiene.sh")
 
 
@@ -23,7 +24,7 @@ class LandMechanismTest(unittest.TestCase):
         base = Path(self.dir.name)
         self.scripts = base / "scripts"
         self.scripts.mkdir()
-        for path in (SCRIPT, LANE):
+        for path in (SCRIPT, LANE, DEFAULT_BRANCH):
             destination = self.scripts / path.name
             destination.write_bytes(path.read_bytes())
             destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
@@ -64,6 +65,14 @@ class LandMechanismTest(unittest.TestCase):
                     ;;
                   "api -X")
                     if [ "${3:-}" = "PUT" ]; then
+                      if [ "${LAND_TEST_MERGE_REQUEST_STATUS:-0}" != "0" ]; then
+                        printf '%s\\n' "${LAND_TEST_MERGE_FAILURE:-gh: merge endpoint rejected the request (HTTP 405)}" >&2
+                        exit "${LAND_TEST_MERGE_REQUEST_STATUS}"
+                      fi
+                      if [ -n "${LAND_TEST_MERGE_MESSAGE:-}" ]; then
+                        jq -n --arg message "$LAND_TEST_MERGE_MESSAGE" '{merged:false,message:$message}'
+                        exit 0
+                      fi
                       printf '{"merged":true,"sha":"%s"}\\n' "${LAND_TEST_MERGE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
                     fi
                     ;;
@@ -84,7 +93,16 @@ class LandMechanismTest(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
-    def run_land(self, *, gate_status: str = "0", state: str = "OPEN", attributed: bool = False):
+    def run_land(
+        self,
+        *,
+        gate_status: str = "0",
+        state: str = "OPEN",
+        attributed: bool = False,
+        merge_request_status: str = "0",
+        merge_failure: str = "",
+        merge_message: str = "",
+    ):
         env = os.environ.copy()
         env.update(
             LAND_AGENT="kiat-luna",
@@ -93,6 +111,10 @@ class LandMechanismTest(unittest.TestCase):
             LAND_TEST_GATE_STATUS=gate_status,
             LAND_TEST_STATE=state,
             LAND_TEST_MERGE_SHA="b" * 40,
+            LAND_TEST_MERGE_REQUEST_STATUS=merge_request_status,
+            LAND_TEST_MERGE_FAILURE=merge_failure,
+            LAND_TEST_MERGE_MESSAGE=merge_message,
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             PATH=f"{self.cwd / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         )
         if attributed:
@@ -100,7 +122,7 @@ class LandMechanismTest(unittest.TestCase):
         else:
             env.pop("LAND_TEST_ATTRIBUTION", None)
         return run_with_bash_path(
-            ["bash", str(self.scripts / "land.sh"), "42", "a" * 40],
+            ["bash", bash_path(self.scripts / "land.sh"), "42", "a" * 40],
             stub_directory=self.cwd / "bin",
             cwd=self.cwd,
             env=env,
@@ -114,6 +136,32 @@ class LandMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         gh_log = self.gh_log.read_text(encoding="utf-8")
         self.assertNotIn("-X PUT", gh_log)
+        self.assertNotIn("issue edit", gh_log)
+        self.assertNotIn("pr comment", gh_log)
+
+    def test_failed_merge_endpoint_preserves_the_response_and_explains_protections(self):
+        result = self.run_land(
+            merge_request_status="1",
+            merge_failure="gh: required approving review is missing (HTTP 405)",
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("merge request failed for PR #42", result.stderr)
+        self.assertIn("required approving review is missing (HTTP 405)", result.stderr)
+        self.assertIn("does not override GitHub branch protections", result.stderr)
+        self.assertIn("separate eligible reviewer or automation", result.stderr)
+        gh_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertIn("api -X PUT repos/example/canonical/pulls/42/merge", gh_log)
+        self.assertNotIn("pr edit", gh_log)
+        self.assertNotIn("issue edit", gh_log)
+        self.assertNotIn("pr comment", gh_log)
+
+    def test_unmerged_response_explains_protections_without_terminalizing(self):
+        result = self.run_land(merge_message="Pull Request is not mergeable")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("PR #42 was not merged: Pull Request is not mergeable", result.stderr)
+        self.assertIn("does not override GitHub branch protections", result.stderr)
+        gh_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit", gh_log)
         self.assertNotIn("issue edit", gh_log)
         self.assertNotIn("pr comment", gh_log)
 

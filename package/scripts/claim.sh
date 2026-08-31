@@ -45,10 +45,11 @@ cd "$root"
   exit 2
 }
 
-repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
-  echo "cannot resolve the repository from gh" >&2
+repo=$(ai_team_origin_repo) || {
+  echo "cannot resolve the repository from origin" >&2
   exit 2
 }
+[[ -n "$repo" ]] || { echo "cannot resolve the repository from origin" >&2; exit 2; }
 
 ACTIVATION_MUTEX_BRANCH=ai-team/activation-mutex
 ACTIVATION_MUTEX_REF="refs/heads/$ACTIVATION_MUTEX_BRANCH"

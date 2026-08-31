@@ -89,7 +89,11 @@ or unqueued task without asking permission.
 Claim by opening a draft PR **before** changing task-owned files:
 
 ```bash
+# Package repository
 CLAIM_AGENT=<stable-agent-id> package/scripts/claim.sh <issue-number>
+
+# Adopting repository
+CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/claim.sh <issue-number>
 ```
 
 `claim.sh` is the collision boundary. It accepts an unowned `task:ready` issue,
@@ -107,19 +111,37 @@ refresh it from `main` before requesting review.
 Hand off with the script so the closing reference remains intact:
 
 ```bash
+# Package repository
 CLAIM_AGENT=<stable-agent-id> package/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> package/scripts/land.sh <pr-number> <reviewed-full-sha>
+
+# Adopting repository
+CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
+LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
 `land.sh` gates, merges, attributes the actor, and finalizes the task. Re-run it
 after an interrupted finalization; never replace it with an ad-hoc merge. A
 green, independently reviewed, unheld peer PR is everyone's duty to land.
 
+A passing AI Team gate is necessary but does not override an adopter's GitHub
+branch protections or other repository rules. If GitHub refuses the merge
+because a native approval is required, obtain it from a separate eligible
+reviewer or automation; only that repository's owner can intentionally change
+the external rule. Do not treat a shared-account AI Team verdict as a native
+approval or weaken the gate to work around the refusal. When it can read a
+native-approval rule, `gate.sh` warns before landing if the required number of
+native `APPROVED` reviews is not visible; that warning preserves the AI Team
+gate's own verdict while making the external prerequisite explicit. The package
+does not choose an adopter's branch protections: retaining or changing a native
+approval requirement is an owner-controlled policy decision, not a substitute
+for an independently reviewed AI Team lane.
+
 Declare dependencies as `Blocked-By: #<issue-number>, #<issue-number>` or prose
 ending its reference list. Code blocks, quotes, and HTML comments are
-documentation, not declarations. `package/scripts/blocked_by_sweep.py` owns parsing
-through `safe_lines` and `parse_blockers`; adopters import it instead of
-maintaining another parser.
+documentation, not declarations. `blocked_by_sweep.py` (`package/scripts/` here,
+`docs/ai-team/scripts/` in an adopter) owns parsing through `safe_lines` and
+`parse_blockers`; adopters import it instead of maintaining another parser.
 
 ---
 

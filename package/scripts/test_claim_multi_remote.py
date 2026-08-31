@@ -166,6 +166,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
             GIT_AUTHOR_EMAIL="claim-test@example.com",
             GIT_COMMITTER_NAME="claim-test",
             GIT_COMMITTER_EMAIL="claim-test@example.com",
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
         )
         return env
 
