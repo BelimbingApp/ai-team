@@ -377,6 +377,12 @@ grammar stay pinned while `review_gate.sh` reads the current reviews. After a
 new commit, use the new `synchronize` run, not a run for the old head.
 `land.sh` performs the same live review check immediately before merging.
 
+When a reviewed PR intentionally removes a workflow whose historical check
+names are still in the five-merge baseline, an operator may make that
+exception explicit with `GATE_ALLOW_MISSING_CHECKS`, a comma-separated list of
+the exact check names. `gate.sh` prints every waived name as a warning; the
+override is never implicit and should be recorded in the PR or landing log.
+
 Holds are labels, never prose. `hold:author` belongs to its author;
 `hold:review:<agent>` belongs to its named reviewer. Set and clear review holds
 through `hold.sh`; an author never clears a reviewer's hold. An unresponsive
