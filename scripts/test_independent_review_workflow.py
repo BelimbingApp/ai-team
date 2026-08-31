@@ -1,20 +1,17 @@
+import base64
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import _bash_executable
+from _test_support import _bash_executable, bash_path
 
 
 SCRIPT_DIRECTORY = Path(__file__).parent.resolve()
-# `Path(__file__).parents[2]` reached the repository root only by coincidence
-# in the home layout (scripts -> package -> root, two hops). Mounted, the
-# package root sits one hop deeper (scripts -> ai-team -> docs -> root, three
-# hops) — a fixed parent count cannot reach "the repository root" from a
-# depth that differs between the two contexts (#26 review, codex-fasttrack:
-# this resolved to <adopter>/docs and errored trying to open
-# <adopter>/docs/.github/workflows/independent-review.yml).
 ROOT = Path(
     subprocess.run(
         ["git", "-C", str(SCRIPT_DIRECTORY), "rev-parse", "--show-toplevel"],
@@ -27,102 +24,204 @@ PACKAGE_DIRECTORY = SCRIPT_DIRECTORY.parent
 PACKAGE_PATHSPEC = PACKAGE_DIRECTORY.relative_to(ROOT).as_posix()
 PACKAGE_WORKFLOW = ROOT / ".github" / "workflows" / "independent-review.yml"
 ADOPTER_TEMPLATE = PACKAGE_DIRECTORY / "templates" / "independent-review.yml"
+WORKFLOW_SHA = "c" * 40
+REPOSITORY = "example/project"
+VALID_SCRIPT = b"#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n"
+
+
+def run_block(workflow: str, step_name: str) -> str:
+    """Extract one literal `run: |` block without adding a YAML dependency."""
+    lines = workflow.splitlines()
+    marker = f"- name: {step_name}"
+    step = next(i for i, line in enumerate(lines) if line.strip() == marker)
+    run = next(i for i in range(step + 1, len(lines)) if lines[i].strip() == "run: |")
+    run_indent = len(lines[run]) - len(lines[run].lstrip())
+    end = len(lines)
+    for i in range(run + 1, len(lines)):
+        stripped = lines[i].strip()
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        if stripped and indent <= run_indent:
+            end = i
+            break
+    return textwrap.dedent("\n".join(lines[run + 1 : end])) + "\n"
+
+
+def blob_sha(content: bytes) -> str:
+    header = f"blob {len(content)}\0".encode("ascii")
+    return hashlib.sha1(header + content).hexdigest()
+
+
+def contents_response(canonical_path: str, script_content: bytes = VALID_SCRIPT, **overrides) -> str:
+    data = {
+        "type": "file",
+        "path": canonical_path,
+        "encoding": "base64",
+        "content": base64.b64encode(script_content).decode("ascii"),
+        "size": len(script_content),
+        "sha": blob_sha(script_content),
+    }
+    data.update(overrides)
+    return json.dumps(data)
 
 
 class IndependentReviewWorkflowTest(unittest.TestCase):
-    """Compares this package's own real CI workflow against the template it
-    ships adopters — a self-consistency check for the repository that owns
-    both files, meaningful only in the source repository. `.github/workflows/`
-    at a repository's own root is never part of what a mount carries (#26),
-    so an adopter's own root `.github/workflows/independent-review.yml`, if
-    they installed one, is *their* copy of the adopter template — asserting
-    it still contains this repository's own `package/scripts/...` form would
-    be wrong, not merely inapplicable, for exactly the repositories where the
-    file happens to exist. `PACKAGE_PATHSPEC == "package"` is this package's
-    actual, fixed name for its own directory; nothing but the source
-    repository can be running from a directory with that name at that depth,
-    so it is a sound (if convention-based, matching how every other path in
-    this test suite already works) way to gate a check with no meaning once
-    mounted, without erroring on the file this test never expects to find
-    outside its own repository."""
+    def workflows(self):
+        workflows = [("adopter", ADOPTER_TEMPLATE)]
+        if PACKAGE_PATHSPEC == "package":
+            workflows.append(("package", PACKAGE_WORKFLOW))
+        return workflows
 
-    def setUp(self):
-        if PACKAGE_PATHSPEC != "package":
-            self.skipTest(
-                f"running from '{PACKAGE_PATHSPEC}', not the source repository's 'package' — "
-                "this self-consistency check has no meaning once mounted"
+    def run_materializer(
+        self,
+        workflow_path: Path,
+        gate_path: str,
+        response: str,
+        *,
+        gh_exit: int = 0,
+        repository: str = REPOSITORY,
+        workflow_sha: str = WORKFLOW_SHA,
+    ):
+        workflow = workflow_path.read_text(encoding="utf-8")
+        script = run_block(workflow, "Materialize trusted review grammar")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp = root / "runner"
+            runner_temp.mkdir()
+            response_file = root / "response.json"
+            response_file.write_text(response, encoding="utf-8")
+            calls_file = root / "gh-calls.txt"
+
+            gh = root / "gh"
+            gh.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > "$GH_CALLS"
+if [ "$GH_EXIT" -ne 0 ]; then
+  echo "simulated API failure (HTTP 404)" >&2
+  exit "$GH_EXIT"
+fi
+cat "$CONTENTS_RESPONSE"
+""",
+                encoding="utf-8",
+                newline="\n",
             )
-
-    def test_package_and_adopter_workflows_share_the_trusted_shape(self):
-        package = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
-        adopter = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
-
-        for workflow in (package, adopter):
-            self.assertIn("pull_request_target:", workflow)
-            self.assertIn("pull_request_review:", workflow)
-            self.assertNotIn("  pull_request:\n", workflow)
-            self.assertIn("actions/checkout@v5", workflow)
-            self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
-            self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
-            self.assertIn("github.event.pull_request.number", workflow)
-            self.assertIn("github.event.pull_request.head.sha", workflow)
-            self.assertIn("id: resolve", workflow)
-            self.assertIn("steps.resolve.outputs.present == 'true'", workflow)
-            self.assertIn("steps.resolve.outputs.present == 'false'", workflow)
-            self.assertIn('echo "present=true" >> "$GITHUB_OUTPUT"', workflow)
-            self.assertIn('echo "present=false" >> "$GITHUB_OUTPUT"', workflow)
-
-        self.assertIn('run: docs/ai-team/scripts/review_gate.sh', adopter)
-        self.assertIn("if [ -x docs/ai-team/scripts/review_gate.sh ]; then", adopter)
-
-        # The package's own root workflow — never the adopter template — must
-        # also fall back to the pre-relocation path (#26 review,
-        # codex-fasttrack/codex-gpt-5-b): trusted main still has a working
-        # grammar at scripts/review_gate.sh until this PR merges, so checking
-        # only the new path made the required check vacuously pass, evaluating
-        # nothing, for every PR in that window including the one that landed
-        # the relocation. An adopter mounting fresh never has an old path to
-        # fall back to, so its template correctly keeps only the single check.
-        self.assertIn('run: ${{ steps.resolve.outputs.path }}', package)
-        self.assertIn("if [ -x package/scripts/review_gate.sh ]; then", package)
-        self.assertIn("elif [ -x scripts/review_gate.sh ]; then", package)
-        self.assertIn('echo "path=package/scripts/review_gate.sh" >> "$GITHUB_OUTPUT"', package)
-        self.assertIn('echo "path=scripts/review_gate.sh" >> "$GITHUB_OUTPUT"', package)
-
-    def test_the_package_workflow_finds_a_legacy_only_grammar_on_the_default_branch(self):
-        # A direct regression for the exact failure mode reported: simulate
-        # "trusted main has the grammar only at the pre-relocation path" by
-        # resolving from a scratch directory that has scripts/review_gate.sh
-        # but not package/scripts/review_gate.sh, and confirm the workflow's
-        # own resolution logic would find it rather than reporting absent.
-        workflow = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
-        resolve_step = workflow.split("Resolve trusted review grammar")[1].split("- name:")[0]
-        script = resolve_step.split("run: |", 1)[1]
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            legacy = root / "scripts"
-            legacy.mkdir()
-            (legacy / "review_gate.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-            (legacy / "review_gate.sh").chmod(0o755)
-
-            outputs_file = root / "github_output.txt"
-            outputs_file.write_text("", encoding="utf-8")
+            gh.chmod(0o755)
 
             env = os.environ.copy()
-            env["GITHUB_OUTPUT"] = str(outputs_file)
+            env["AI_TEAM_TEST_STUB_PATH"] = bash_path(root)
+            env["CONTENTS_RESPONSE"] = bash_path(response_file)
+            env["GH_CALLS"] = bash_path(calls_file)
+            env["GH_EXIT"] = str(gh_exit)
+            env["GH_TOKEN"] = "fixture-token"
+            env["REVIEW_GATE_REPOSITORY"] = repository
+            env["REVIEW_GATE_WORKFLOW_SHA"] = workflow_sha
+            env["REVIEW_GATE_PATH"] = gate_path
+            env["RUNNER_TEMP"] = bash_path(runner_temp)
             result = subprocess.run(
-                [_bash_executable(), "-c", "set -u\n" + script],
-                cwd=str(root),
+                [
+                    _bash_executable(),
+                    "-c",
+                    'PATH="$AI_TEAM_TEST_STUB_PATH:$PATH"; export PATH\n' + script,
+                ],
+                cwd=root,
                 env=env,
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
+                check=False,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            outputs = outputs_file.read_text(encoding="utf-8")
+            materialized = runner_temp / "review_gate.sh"
+            content = materialized.read_bytes() if materialized.is_file() else None
+            calls = calls_file.read_text(encoding="utf-8").splitlines() if calls_file.is_file() else []
 
-        self.assertIn("present=true", outputs)
-        self.assertIn("path=scripts/review_gate.sh", outputs)
+        return result, content, calls
+
+    def test_canonical_workflows_use_only_pull_request_target(self):
+        for name, path in self.workflows():
+            with self.subTest(workflow=name):
+                workflow = path.read_text(encoding="utf-8")
+                self.assertIn("pull_request_target:", workflow)
+                self.assertNotIn("pull_request_review:", workflow)
+                self.assertNotIn("  pull_request:\n", workflow)
+                self.assertNotIn("actions/checkout@", workflow)
+                self.assertNotIn("present=false", workflow)
+                self.assertNotIn("default_branch", workflow)
+
+    def test_workflows_pin_the_contents_request_and_quote_event_values(self):
+        for name, path in self.workflows():
+            with self.subTest(workflow=name):
+                workflow = path.read_text(encoding="utf-8")
+                self.assertIn("REVIEW_GATE_REPOSITORY: ${{ github.repository }}", workflow)
+                self.assertIn("REVIEW_GATE_WORKFLOW_SHA: ${{ github.workflow_sha }}", workflow)
+                self.assertIn("REVIEW_GATE_PR_NUMBER: ${{ github.event.pull_request.number }}", workflow)
+                self.assertIn("REVIEW_GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}", workflow)
+                self.assertIn("gh api --method GET", workflow)
+                self.assertIn('-f "ref=$REVIEW_GATE_WORKFLOW_SHA"', workflow)
+                self.assertIn('"$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"', workflow)
+                self.assertNotIn("${{", run_block(workflow, "Materialize trusted review grammar"))
+                self.assertNotIn("${{", run_block(workflow, "Verify independent review of this exact head"))
+
+    def test_source_and_adopter_paths_are_exact(self):
+        adopter = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("REVIEW_GATE_PATH: docs/ai-team/scripts/review_gate.sh", adopter)
+        self.assertNotIn("REVIEW_GATE_PATH: package/scripts/review_gate.sh", adopter)
+
+        if PACKAGE_PATHSPEC != "package":
+            self.skipTest("the source repository workflow is outside an adopter mount")
+        package = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("REVIEW_GATE_PATH: package/scripts/review_gate.sh", package)
+        self.assertNotIn("REVIEW_GATE_PATH: docs/ai-team/scripts/review_gate.sh", package)
+
+    def test_materializer_fetches_and_verifies_the_exact_blob(self):
+        cases = [("adopter", ADOPTER_TEMPLATE, "docs/ai-team/scripts/review_gate.sh")]
+        if PACKAGE_PATHSPEC == "package":
+            cases.append(("package", PACKAGE_WORKFLOW, "package/scripts/review_gate.sh"))
+
+        for name, workflow, gate_path in cases:
+            with self.subTest(workflow=name):
+                result, content, calls = self.run_materializer(
+                    workflow,
+                    gate_path,
+                    contents_response(gate_path),
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(content, VALID_SCRIPT)
+                self.assertIn("--method", calls)
+                self.assertIn("GET", calls)
+                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_path}", calls)
+                self.assertIn(f"ref={WORKFLOW_SHA}", calls)
+
+    def test_materializer_fails_closed_on_api_or_payload_errors(self):
+        path = "docs/ai-team/scripts/review_gate.sh"
+        malformed = [
+            ("404", contents_response(path), 1, REPOSITORY, WORKFLOW_SHA),
+            ("malformed-json", "{", 0, REPOSITORY, WORKFLOW_SHA),
+            ("array", "[]", 0, REPOSITORY, WORKFLOW_SHA),
+            ("wrong-type", contents_response(path, type="dir"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("wrong-path", contents_response(path, path="wrong/review_gate.sh"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("wrong-encoding", contents_response(path, encoding="none"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("empty-content", contents_response(path, content=""), 0, REPOSITORY, WORKFLOW_SHA),
+            ("invalid-base64", contents_response(path, content="%%%"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("size-mismatch", contents_response(path, size=len(VALID_SCRIPT) + 1), 0, REPOSITORY, WORKFLOW_SHA),
+            ("blob-mismatch", contents_response(path, sha="d" * 40), 0, REPOSITORY, WORKFLOW_SHA),
+            ("missing-shebang", contents_response(path, b"exit 0\n"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("invalid-bash", contents_response(path, b"#!/usr/bin/env bash\nif\n"), 0, REPOSITORY, WORKFLOW_SHA),
+            ("invalid-repository", contents_response(path), 0, "example/project/extra", WORKFLOW_SHA),
+            ("invalid-workflow-sha", contents_response(path), 0, REPOSITORY, "main"),
+        ]
+
+        for name, response, gh_exit, repository, workflow_sha in malformed:
+            with self.subTest(case=name):
+                result, _, _ = self.run_materializer(
+                    ADOPTER_TEMPLATE,
+                    path,
+                    response,
+                    gh_exit=gh_exit,
+                    repository=repository,
+                    workflow_sha=workflow_sha,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
