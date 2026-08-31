@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,11 +43,89 @@ class ReviewGateTest(unittest.TestCase):
             "submitted_at": at,
         }
 
+    def run_live_gate_with_argv_guard(self, review_body_size=50_000, jq_arg_limit=4_096):
+        """Exercise the live GitHub path while a jq shim rejects large argv.
+
+        Windows rejects a large review payload before jq starts. The shim gives
+        Linux the same bounded-argument contract, so this regression fails on
+        the old `--argjson reviews "$reviews"` implementation everywhere.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            temp_files = root / "tmp"
+            temp_files.mkdir()
+
+            gh = root / "gh"
+            gh.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}} ${{2:-}}" = "pr view" ]; then
+  printf '%s\n' '{{"headRefOid":"{SHA}","labels":[{{"name":"agent:author"}}]}}'
+elif [ "${{1:-}}" = "api" ]; then
+  padding=$(printf '%*s' "${{REVIEW_BODY_SIZE:?}}" '')
+  padding=${{padding// /x}}
+  printf '%s\n' '[{{"id":1,"state":"COMMENTED","body":"**From:** reviewer\\n\\n**Verdict:** accept\\n'"$padding"'","commit_id":"{SHA}","submitted_at":"2026-01-01T00:00:00Z"}}]'
+else
+  printf 'unexpected gh command: %s\n' "$*" >&2
+  exit 2
+fi
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            gh.chmod(0o755)
+
+            jq = root / "jq"
+            jq.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+for arg in "$@"; do
+  if (( ${#arg} > JQ_ARG_LIMIT )); then
+    printf 'jq argument exceeded test limit: %s > %s\n' "${#arg}" "$JQ_ARG_LIMIT" >&2
+    exit 91
+  fi
+done
+exec "$REAL_JQ" "$@"
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            jq.chmod(0o755)
+
+            env = os.environ.copy()
+            env.pop("REVIEW_GATE_INPUT", None)
+            env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
+            env["JQ_ARG_LIMIT"] = str(jq_arg_limit)
+            real_jq = shutil.which("jq")
+            if real_jq is None:
+                self.fail("jq is required to exercise the review gate")
+            env["REAL_JQ"] = bash_path(Path(real_jq))
+            env["REVIEW_BODY_SIZE"] = str(review_body_size)
+            env["TMPDIR"] = str(temp_files)
+            result = run_with_bash_path(
+                ["bash", bash_path(SCRIPT), "7", SHA],
+                stub_directory=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            leftovers = list(temp_files.iterdir())
+
+        return result, leftovers
+
     def test_commented_exact_head_acceptance_passes(self):
         result = self.run_gate([self.review()])
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+
+    def test_large_live_review_history_never_enters_jq_argv(self):
+        result, leftovers = self.run_live_gate_with_argv_guard()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+        self.assertEqual(leftovers, [], f"temporary review files leaked: {leftovers}")
 
     def test_native_approval_still_requires_a_from_marker(self):
         result = self.run_gate([
