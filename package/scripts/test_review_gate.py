@@ -124,6 +124,7 @@ esac
         *,
         malformed_reviews=False,
         interrupt_on_review_parse=False,
+        repository_override=None,
     ):
         """Exercise the live GitHub path while a jq shim rejects large argv.
 
@@ -141,8 +142,10 @@ esac
                 f"""#!/usr/bin/env bash
 set -euo pipefail
 if [ "${{1:-}} ${{2:-}}" = "pr view" ]; then
+  [[ "$*" == *"--repo example/canonical"* ]] || exit 85
   printf '%s\n' '{{"headRefOid":"{SHA}","labels":[{{"name":"agent:author"}}]}}'
 elif [ "${{1:-}}" = "api" ]; then
+  [[ "$*" == *"repos/example/canonical/pulls/7/reviews"* ]] || exit 86
   if [ "${{MALFORMED_REVIEWS:-0}}" = 1 ]; then
     printf '{{'
     exit 0
@@ -183,7 +186,10 @@ exec "$REAL_JQ" "$@"
 
             env = os.environ.copy()
             env.pop("REVIEW_GATE_INPUT", None)
+            env.pop("REVIEW_GATE_REPOSITORY", None)
             env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
+            if repository_override is not None:
+                env["REVIEW_GATE_REPOSITORY"] = repository_override
             env["JQ_ARG_LIMIT"] = str(jq_arg_limit)
             real_jq = shutil.which("jq")
             if real_jq is None:
@@ -276,6 +282,16 @@ printf 'signal-exit=%s\n' "$rc"
 
     def test_local_live_mode_still_falls_back_to_the_origin_helper(self):
         result, leftovers = self.run_live_gate_with_argv_guard(review_body_size=1)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+        self.assertEqual(leftovers, [])
+
+    def test_local_origin_ignores_an_inherited_repository_override(self):
+        result, leftovers = self.run_live_gate_with_argv_guard(
+            review_body_size=1,
+            repository_override="attacker/repository",
+        )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
