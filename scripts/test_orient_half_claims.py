@@ -7,7 +7,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 
 class OrientHalfClaimTest(unittest.TestCase):
@@ -80,6 +80,7 @@ class OrientHalfClaimTest(unittest.TestCase):
         env = self.git_env.copy()
         env.update(
             AI_TEAM_BASE_BRANCH="main",
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             ORIENT_TEST_UNLABELLED_PRS=unlabelled,
             ORIENT_TEST_ISSUE_AGENTS=issue_agents,
             ORIENT_TEST_ISSUE_STATE=issue_state,
@@ -87,7 +88,7 @@ class OrientHalfClaimTest(unittest.TestCase):
             PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
         )
         return run_with_bash_path(
-            ["bash", str(self.scripts / "orient.sh")],
+            ["bash", bash_path(self.scripts / "orient.sh")],
             stub_directory=self.bin, cwd=self.base, env=env,
             capture_output=True, text=True, check=False,
         )

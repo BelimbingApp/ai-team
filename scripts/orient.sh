@@ -30,10 +30,10 @@ export AI_TEAM_DEFAULT_BRANCH="$BASE"
 # labelled `ops:halt` means the team stands down; it is set and cleared by the
 # owner, or the steward on the owner's word. Printed first so a stand-down that
 # went out on one tool's private channel is not missed by agents on another.
-if ! REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null); then
+if ! REPO=$(ai_team_origin_repo) || [ -z "$REPO" ]; then
   echo "== operations =="
   echo "  *** HALT STATUS UNKNOWN — STAND DOWN ***"
-  echo "  Cannot resolve this repository through gh; do not claim new work."
+  echo "  Cannot resolve this repository from origin; do not claim new work."
   exit 2
 fi
 
