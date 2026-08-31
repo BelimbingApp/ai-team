@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-README = Path(__file__).parents[2] / "README.md"
+README = Path(__file__).parents[1] / "README.md"
 
 
 class AutonomousDeliberationContractTest(unittest.TestCase):

@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 
-README = Path(__file__).parents[2] / "README.md"
+README = Path(__file__).parents[1] / "README.md"
+SCRIPTS_README = Path(__file__).parent / "README.md"
 
 
 class ReadmeOnboardingTest(unittest.TestCase):
@@ -46,6 +47,19 @@ class ReadmeOnboardingTest(unittest.TestCase):
             [],
             f"bare (non-package-prefixed) templates/ reference(s) survive the #26 move: {stale_templates}",
         )
+
+
+class ScriptsReadmeOnboardingTest(unittest.TestCase):
+    def test_the_windows_test_command_has_both_the_package_and_adopter_forms(self):
+        # #26 review, codex-fasttrack: the Linux/macOS commands were fixed
+        # to show both forms, but Windows kept only the home-repository
+        # command — a Windows adopter following the shipped guide had no
+        # runnable command for their own mount at all.
+        document = SCRIPTS_README.read_text(encoding="utf-8")
+        windows_block = document.split("# Windows", 1)[1].split("```", 1)[0]
+
+        self.assertIn("-s package/scripts", windows_block)
+        self.assertIn("-s docs/ai-team/scripts", windows_block)
 
 
 if __name__ == "__main__":

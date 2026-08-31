@@ -34,7 +34,7 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", SWEEP)
 
     def test_install_guide_names_all_adopter_owned_templates(self):
-        document = (TEMPLATES.parent.parent / "README.md").read_text(encoding="utf-8")
+        document = (TEMPLATES.parent / "README.md").read_text(encoding="utf-8")
         self.assertIn(
             "cp docs/ai-team/templates/mechanisms.yml .github/workflows/ai-team-mechanisms.yml",
             document,
