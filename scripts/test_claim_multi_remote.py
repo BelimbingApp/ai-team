@@ -122,12 +122,10 @@ class ClaimMultiRemoteTest(unittest.TestCase):
                     fi
                     if [ "${{CLAIM_TEST_FAIL_CREATE:-}}" = "1" ]; then
                       if [ -n "${{CLAIM_TEST_MUTATE_LOCAL_TO:-}}" ]; then
-                        git -C "$CLAIM_TEST_CLONE" update-ref \
-                          refs/heads/{CLAIM_BRANCH} "$CLAIM_TEST_MUTATE_LOCAL_TO"
+                        git -C "$CLAIM_TEST_CLONE" update-ref refs/heads/{CLAIM_BRANCH} "$CLAIM_TEST_MUTATE_LOCAL_TO"
                       fi
                       if [ "${{CLAIM_TEST_DIRTY_WORKTREE:-}}" = "1" ]; then
-                        printf 'concurrent untracked work\n' > \
-                          "$CLAIM_TEST_WORKTREE_BASH/concurrent-untracked"
+                        printf 'concurrent untracked work\\n' > "$CLAIM_TEST_WORKTREE_BASH/concurrent-untracked"
                       fi
                       echo 'fixture pr creation failure' >&2
                       exit 1
@@ -272,6 +270,11 @@ class ClaimMultiRemoteTest(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 set -eu
+                if [ -n "${AI_TEAM_TEST_ORIGIN_REPO:-}" ] && \
+                   [ "${1:-}" = "remote" ] && [ "${2:-}" = "get-url" ] && [ "${3:-}" = "origin" ]; then
+                  printf 'https://github.com/%s.git\\n' "$AI_TEAM_TEST_ORIGIN_REPO"
+                  exit 0
+                fi
                 recovery_delete=false
                 if [ "${1:-}" = "push" ]; then
                   for argument in "$@"; do
@@ -344,7 +347,8 @@ class ClaimMultiRemoteTest(unittest.TestCase):
             env=self.git_env(),
         )
         self.assertNotEqual(remote_claim.returncode, 0)
-        self.assertNotIn("pr create", self.gh_log.read_text(encoding="utf-8"))
+        gh_calls = self.gh_log.read_text(encoding="utf-8") if self.gh_log.exists() else ""
+        self.assertNotIn("pr create", gh_calls)
 
     def test_claim_mutex_recovery_rejects_unknown_and_accepts_exact_generated_ref(self):
         self.git(["push", "-q", "origin", f"main:refs/heads/{ACTIVATION_MUTEX_BRANCH}"])
@@ -432,6 +436,32 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         self.assertTrue((worktree / "concurrent-untracked").is_file())
         local_tip = self.git_out(["rev-parse", f"refs/heads/{CLAIM_BRANCH}"])
         self.assertEqual(self.remote_ref(CLAIM_BRANCH), local_tip)
+
+    def test_clean_fresh_claim_failure_rolls_back_only_its_exact_lane(self):
+        worktree = Path(self.dir.name) / "wt-clean-rollback"
+
+        result = self.run_claim(worktree=worktree, fail_create=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("rolling back the orphan claim branch", result.stderr)
+        self.assertIsNone(self.remote_ref(CLAIM_BRANCH))
+        self.assertIsNone(
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.clone),
+                    "rev-parse",
+                    "--verify",
+                    f"refs/heads/{CLAIM_BRANCH}",
+                ],
+                env=self.git_env(),
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            or None
+        )
+        self.assertFalse(worktree.exists())
 
     def test_claim_body_requires_closes_keyword(self):
         """Stub rejects claim bodies without Closes #N — the mechanism under test."""

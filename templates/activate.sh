@@ -19,6 +19,7 @@ BODY_FILE=
 WORKTREE_ADDED=0
 PUBLISHED_CLAIM_SHA=
 PUBLISHED_CLAIM_ACTIVE=0
+REMOTE_UPDATE_SHA=
 
 fail() {
   printf 'activation: %s\n' "$*" >&2
@@ -301,6 +302,31 @@ run_mounted_suite() {
     "$suite_python" -B -m unittest discover -s "$PREFIX/scripts" -p 'test_*.py')
 }
 
+refresh_remote_update_sha() {
+  remote_update_line=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+    return 1
+  REMOTE_UPDATE_SHA=$(printf '%s\n' "$remote_update_line" | awk 'NF { print $1; exit }')
+}
+
+scan_active_lanes() {
+  # A blocked backlog issue does not mutate a checkout. Active/review issues
+  # block refresh, and every open PR (including a blocked lane's PR) blocks it.
+  # Only the exact canonical generated refresh lane is exempt.
+  scanned_issues=$(gh issue list --repo "$REPO" --state open --limit 1000 \
+    --json number,labels \
+    --jq '.[] | select(any(.labels[]?; .name == "task:active" or .name == "task:review")) | "#\(.number)"' \
+    2>/dev/null) || return 1
+  scanned_pr_rows=$(gh pr list --repo "$REPO" --state open --limit 1000 \
+    --json number,headRefOid,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+    --jq '.[] | [.number, .headRefOid, .headRefName, .baseRefName, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+    2>/dev/null) || return 1
+  scanned_prs=$(printf '%s\n' "$scanned_pr_rows" | awk -F'\t' \
+    -v head="$REMOTE_UPDATE_SHA" -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
+    -v agent="agent:$BOOTSTRAP_AGENT" \
+    'NF && !($2 != "" && $2 == head && $3 == branch && $4 == base && $5 == repo && $6 == "false" && $7 == agent && $8 == "true" && $9 == "true") { print "PR #" $1 }')
+  printf '%s\n%s\n' "$scanned_issues" "$scanned_prs" | awk 'NF'
+}
+
 # GitHub does not always delete a merged PR's head branch. Remove that branch
 # only after its commit metadata, mounted tree, exact merged PR, and terminal
 # labels prove it is generated state already present on the default branch.
@@ -311,9 +337,15 @@ cleanup_proven_merged_refresh() {
   lingering_sha=$(printf '%s\n' "$lingering_line" | awk 'NF { print $1; exit }')
   [ -n "$lingering_sha" ] || return 0
 
-  open_lingering=$(gh pr list --repo "$REPO" --state open --base "$BASE" \
-    --head "$UPDATE_BRANCH" --limit 2 --json number --jq length 2>/dev/null) || \
+  open_rows=$(gh pr list --repo "$REPO" --state open \
+    --head "$UPDATE_BRANCH" --limit 1000 \
+    --json number,headRefOid,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository \
+    --jq '.[] | [.number, .headRefOid, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName] | @tsv' \
+    2>/dev/null) || \
     fail "cannot inspect whether origin/$UPDATE_BRANCH still has an open PR"
+  open_lingering=$(printf '%s\n' "$open_rows" | awk -F'\t' \
+    -v head="$lingering_sha" -v repo="$REPO" -v branch="$UPDATE_BRANCH" \
+    '$2 == head && $3 == repo && $4 == "false" && $6 == branch { count++ } END { print count + 0 }')
   [ "$open_lingering" = "0" ] || return 0
 
   git fetch -q --no-tags origin "$UPDATE_BRANCH" || \
@@ -330,7 +362,7 @@ cleanup_proven_merged_refresh() {
   # Pending/failed commits are not merge-cleanup candidates. Leave them for
   # the exact recovery state machine below; otherwise an interrupted updater
   # with no PR could never reach its owner-guided recovery path.
-  [ "$lingering_failed" != "true" ] || return 0
+  [ -z "$lingering_failed" ] || return 0
   [ -z "$lingering_claim" ] || return 0
   [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" != "$lingering_sha" ] || return 0
   [ "$lingering_managed" = "true" ] && [ -z "$lingering_claim" ] && \
@@ -354,11 +386,18 @@ cleanup_proven_merged_refresh() {
     [ "$lingering_tree" = "$default_tree" ] || \
     fail "closed origin/$UPDATE_BRANCH is not the package tree on origin/$BASE; refusing to delete it"
 
-  merged_rows=$(gh pr list --repo "$REPO" --state merged --base "$BASE" \
-    --head "$UPDATE_BRANCH" --limit 1000 --json number,headRefOid,mergeCommit,labels,body \
-    --jq '.[] | [.number, .headRefOid, (.mergeCommit.oid // "-"), ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+  merged_rows=$(gh pr list --repo "$REPO" --state merged \
+    --head "$UPDATE_BRANCH" --limit 1000 \
+    --json number,headRefOid,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,mergeCommit,labels,body \
+    --jq '.[] | [.number, .headRefOid, (.mergeCommit.oid // "-"), ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
     2>/dev/null) || fail "cannot inspect the merged PR for origin/$UPDATE_BRANCH"
-  merged_info=$(printf '%s\n' "$merged_rows" | awk -F'\t' -v head="$lingering_sha" '$2 == head')
+  merged_same_head=$(printf '%s\n' "$merged_rows" | awk -F'\t' \
+    -v head="$lingering_sha" -v repo="$REPO" -v branch="$UPDATE_BRANCH" \
+    '$2 == head && $4 == repo && $5 == "false" && $7 == branch')
+  merged_same_head_count=$(printf '%s\n' "$merged_same_head" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$merged_same_head_count" -le 1 ] || \
+    fail "closed origin/$UPDATE_BRANCH is reused by multiple same-repository merged PRs; refusing terminalization or deletion"
+  merged_info=$(printf '%s\n' "$merged_same_head" | awk -F'\t' -v base="$BASE" '$6 == base')
   merged_count=$(printf '%s\n' "$merged_info" | awk 'NF { count++ } END { print count + 0 }')
   # A verified branch whose PR was closed/deleted before merge is owner-
   # recoverable, not deletion-safe. Defer it to the exact recovery state
@@ -366,10 +405,13 @@ cleanup_proven_merged_refresh() {
   [ "$merged_count" -ne 0 ] || return 0
   [ "$merged_count" -eq 1 ] || \
     fail "closed origin/$UPDATE_BRANCH has multiple matching merged PRs; refusing to delete it"
-  IFS=$'\t' read -r merged_number merged_head merged_commit merged_agents merged_owner merged_issueless <<EOF
+  IFS=$'\t' read -r merged_number merged_head merged_commit merged_repo merged_cross \
+    merged_base merged_branch merged_agents merged_owner merged_issueless <<EOF
 $merged_info
 EOF
   [ "$merged_head" = "$lingering_sha" ] && \
+    [ "$merged_repo" = "$REPO" ] && [ "$merged_cross" = "false" ] && \
+    [ "$merged_base" = "$BASE" ] && [ "$merged_branch" = "$UPDATE_BRANCH" ] && \
     [ "$merged_agents" = "agent:$BOOTSTRAP_AGENT" ] && \
     [ "$merged_owner" = "true" ] && [ "$merged_issueless" = "true" ] || \
     fail "the merged PR does not prove sole package-bootstrap ownership of closed origin/$UPDATE_BRANCH"
@@ -415,14 +457,15 @@ EOF
 }
 
 find_unterminalized_deleted_refreshes() {
-  deleted_rows=$(gh pr list --repo "$REPO" --state merged --base "$BASE" \
+  deleted_rows=$(gh pr list --repo "$REPO" --state merged \
     --head "$UPDATE_BRANCH" --limit 1000 \
-    --json number,headRefOid,mergeCommit,labels,body \
-    --jq '.[] | [.number, .headRefOid, (.mergeCommit.oid // "-"), ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null), ([((.body // "") | split("\n")[]) | select(startswith("- Source: `"))][0] // "-"), ([((.body // "") | split("\n")[]) | select(startswith("- Ref: `"))][0] // "-"), ([((.body // "") | split("\n")[]) | select(startswith("- Resolved revision: `"))][0] // "-")] | @tsv' \
+    --json number,headRefOid,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,mergeCommit,labels,body \
+    --jq '.[] | [.number, .headRefOid, (.mergeCommit.oid // "-"), ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null), ([((.body // "") | split("\n")[]) | select(startswith("- Source: `"))][0] // "-"), ([((.body // "") | split("\n")[]) | select(startswith("- Ref: `"))][0] // "-"), ([((.body // "") | split("\n")[]) | select(startswith("- Resolved revision: `"))][0] // "-")] | @tsv' \
     2>/dev/null) || fail "cannot inspect merged package refresh history"
   AUTO_MERGED_ROWS=$(printf '%s\n' "$deleted_rows" | awk -F'\t' \
+    -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
     -v source="- Source: \`$SOURCE\`" -v ref="- Ref: \`$REF\`" \
-    '$4 == "agent:package-bootstrap" && $6 == "true" && $7 == "true" && $8 == source && $9 == ref && $5 != "task:done"')
+    '$4 == repo && $5 == "false" && $6 == base && $7 == branch && $8 == "agent:package-bootstrap" && $10 == "true" && $11 == "true" && $12 == source && $13 == ref && $9 != "task:done"')
 }
 
 terminalize_deleted_refreshes() {
@@ -431,12 +474,18 @@ terminalize_deleted_refreshes() {
 
   # Read candidates on fd 3 so nested git/gh commands cannot consume the
   # remaining rows from the loop's stdin.
-  while IFS=$'\t' read -r deleted_number deleted_head deleted_merge deleted_agents \
-    deleted_tasks deleted_owner deleted_issueless deleted_source deleted_ref deleted_revision_line <&3; do
+  while IFS=$'\t' read -r deleted_number deleted_head deleted_merge deleted_repo \
+    deleted_cross deleted_base_ref deleted_head_ref deleted_agents deleted_tasks \
+    deleted_owner deleted_issueless deleted_source deleted_ref deleted_revision_line <&3; do
     [ -n "$deleted_number" ] || continue
     printf '%s\n' "$deleted_number" | grep -Eq '^[0-9]+$' || continue
     printf '%s\n' "$deleted_head" | grep -Eq '^[0-9a-fA-F]{40,64}$' || continue
     printf '%s\n' "$deleted_merge" | grep -Eq '^[0-9a-fA-F]{40,64}$' || continue
+    deleted_same_head_count=$(printf '%s\n' "$deleted_rows" | awk -F'\t' \
+      -v head="$deleted_head" -v repo="$REPO" -v branch="$UPDATE_BRANCH" \
+      '$2 == head && $4 == repo && $5 == "false" && $7 == branch { count++ } END { print count + 0 }')
+    [ "$deleted_same_head_count" -eq 1 ] || \
+      fail "merged refresh head $deleted_head is reused by multiple same-repository PRs; refusing terminalization"
 
     # The reusable branch name and mutable body/labels are only a candidate
     # index. Fetch GitHub's immutable PR head and prove the generated commit,
@@ -462,7 +511,7 @@ terminalize_deleted_refreshes() {
     deleted_failed=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Activation-Failed: / { value=$2 } END { print value }')
     expected_revision_line=$(printf -- '- Resolved revision: `%s`' "$deleted_revision")
     if [ "$deleted_managed" != "true" ] || [ -n "$deleted_claim" ] || \
-       [ "$deleted_failed" = "true" ] || [ "$deleted_commit_source" != "$SOURCE" ] || \
+       [ -n "$deleted_failed" ] || [ "$deleted_commit_source" != "$SOURCE" ] || \
        [ "$deleted_commit_ref" != "$REF" ] || \
        [ "$deleted_revision_line" != "$expected_revision_line" ]; then
       printf 'activation: ignored merged PR #%s because its head is not exact generated refresh state\n' \
@@ -548,6 +597,10 @@ finalize_current_refresh_if_needed() {
   acquire_activation_mutex
   mutex_status=$?
   [ "$mutex_status" -eq 0 ] || exit "$mutex_status"
+  refresh_remote_update_sha || fail "cannot inspect origin/$UPDATE_BRANCH before finalization"
+  active_lanes=$(scan_active_lanes) || fail "cannot inspect active task and PR lanes before finalization"
+  [ -z "$active_lanes" ] || \
+    fail "package refresh refuses active task lanes: $(printf '%s' "$active_lanes" | tr '\n' ' ')"
   cleanup_proven_merged_refresh
   terminalize_deleted_refreshes
   current_lingering=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
@@ -621,50 +674,45 @@ trap 'exit 130' HUP INT TERM
 acquire_activation_mutex
 mutex_status=$?
 [ "$mutex_status" -eq 0 ] || exit "$mutex_status"
-cleanup_proven_merged_refresh
-terminalize_deleted_refreshes
-
-scan_active_lanes() {
-  # A blocked backlog issue does not mutate a checkout. Active/review issues
-  # block refresh, and every open PR (including a blocked lane's PR) blocks it.
-  scanned_issues=$(gh issue list --repo "$REPO" --state open --limit 1000 \
-    --json number,labels \
-    --jq '.[] | select(any(.labels[]?; .name == "task:active" or .name == "task:review")) | "#\(.number)"' \
-    2>/dev/null) || return 1
-  scanned_prs=$(gh pr list --repo "$REPO" --state open --limit 1000 \
-    --json number,headRefName \
-    --jq '.[] | select(.headRefName != "ai-team/package-refresh") | "PR #\(.number)"' \
-    2>/dev/null) || return 1
-  printf '%s\n%s\n' "$scanned_issues" "$scanned_prs" | awk 'NF'
-}
-
+refresh_remote_update_sha || fail "cannot inspect origin/$UPDATE_BRANCH"
 active_lanes=$(scan_active_lanes) || fail "cannot inspect active task and PR lanes"
 [ -z "$active_lanes" ] || \
   fail "package refresh refuses active task lanes: $(printf '%s' "$active_lanes" | tr '\n' ' ')"
+cleanup_proven_merged_refresh
+terminalize_deleted_refreshes
+refresh_remote_update_sha || fail "cannot recheck origin/$UPDATE_BRANCH after merged-lane finalization"
+active_lanes=$(scan_active_lanes) || fail "cannot recheck active task and PR lanes"
+[ -z "$active_lanes" ] || \
+  fail "package refresh refuses active task lanes: $(printf '%s' "$active_lanes" | tr '\n' ' ')"
 
-pr_info=$(gh pr list --repo "$REPO" --state open --base "$BASE" \
-  --head "$UPDATE_BRANCH" --limit 2 --json number,isDraft,headRefOid,url,labels,body \
-  --jq '.[] | [.number, .isDraft, .headRefOid, .url, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' 2>/dev/null) || \
+pr_rows=$(gh pr list --repo "$REPO" --state open --base "$BASE" \
+  --head "$UPDATE_BRANCH" --limit 1000 \
+  --json number,isDraft,headRefOid,url,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+  --jq '.[] | [.number, .isDraft, .headRefOid, .url, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' 2>/dev/null) || \
   fail "cannot inspect the package refresh PR"
+pr_info=$(printf '%s\n' "$pr_rows" | awk -F'\t' \
+  -v head="$REMOTE_UPDATE_SHA" -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
+  '$3 != "" && $3 == head && $5 == repo && $6 == "false" && $7 == base && $8 == branch')
 pr_count=$(printf '%s\n' "$pr_info" | awk 'NF { count++ } END { print count + 0 }')
 [ "$pr_count" -le 1 ] || fail "more than one open package refresh PR exists"
 PR_NUMBER=
 PR_DRAFT=
 PR_HEAD=
 PR_URL=
+PR_REPO=
+PR_CROSS=
+PR_BASE=
+PR_BRANCH=
 PR_AGENTS=
 PR_TASKS=
 PR_OWNER_BODY=
 PR_ISSUELESS=
 if [ "$pr_count" -eq 1 ]; then
-  IFS=$'\t' read -r PR_NUMBER PR_DRAFT PR_HEAD PR_URL PR_AGENTS PR_TASKS PR_OWNER_BODY PR_ISSUELESS <<EOF
+  IFS=$'\t' read -r PR_NUMBER PR_DRAFT PR_HEAD PR_URL PR_REPO PR_CROSS PR_BASE \
+    PR_BRANCH PR_AGENTS PR_TASKS PR_OWNER_BODY PR_ISSUELESS <<EOF
 $pr_info
 EOF
 fi
-
-remote_update_line=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
-  fail "cannot inspect origin/$UPDATE_BRANCH"
-REMOTE_UPDATE_SHA=$(printf '%s\n' "$remote_update_line" | awk 'NF { print $1; exit }')
 if [ -n "$REMOTE_UPDATE_SHA" ]; then
   git fetch -q --no-tags origin "$UPDATE_BRANCH" || fail "cannot fetch origin/$UPDATE_BRANCH"
   remote_message=$(git show -s --format=%B "$REMOTE_UPDATE_SHA" 2>/dev/null) || \
@@ -697,6 +745,21 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
     fail "origin/$UPDATE_BRANCH changes adopter-owned paths outside $PREFIX; refusing to overwrite it"
 
   update_tree=$(git rev-parse "$REMOTE_UPDATE_SHA:$PREFIX" 2>/dev/null || true)
+  remote_commit_tree=$(git rev-parse "$REMOTE_UPDATE_SHA^{tree}" 2>/dev/null || true)
+  remote_base_tree=$(git rev-parse "$remote_base^{tree}" 2>/dev/null || true)
+  remote_parent_line=$(git rev-list --parents -n 1 "$REMOTE_UPDATE_SHA" 2>/dev/null || true)
+  remote_parent=$(printf '%s\n' "$remote_parent_line" | awk 'NF == 2 { print $2 }')
+  if [ -n "$remote_claim" ] || [ "$remote_failed" = "true" ]; then
+    [ "$remote_parent" = "$remote_base" ] && [ -n "$remote_commit_tree" ] && \
+      [ "$remote_commit_tree" = "$remote_base_tree" ] || \
+      fail "origin/$UPDATE_BRANCH has a malformed generated claim/failure shape; refusing to overwrite it"
+  else
+    git fetch -q --no-tags "$SOURCE" "$remote_revision" || \
+      fail "cannot fetch the package revision recorded by origin/$UPDATE_BRANCH"
+    remote_revision_tree=$(git rev-parse "$remote_revision^{tree}" 2>/dev/null || true)
+    [ -n "$remote_revision_tree" ] && [ "$update_tree" = "$remote_revision_tree" ] || \
+      fail "origin/$UPDATE_BRANCH does not exactly match its recorded package revision; refusing to overwrite it"
+  fi
 
   if [ -z "$PR_NUMBER" ]; then
     if [ "$remote_failed" = "true" ]; then
@@ -719,29 +782,84 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   fi
   if [ -n "$PR_NUMBER" ]; then
     [ "$PR_HEAD" = "$REMOTE_UPDATE_SHA" ] && \
+      [ "$PR_REPO" = "$REPO" ] && [ "$PR_CROSS" = "false" ] && \
+      [ "$PR_BASE" = "$BASE" ] && [ "$PR_BRANCH" = "$UPDATE_BRANCH" ] && \
       [ "$PR_AGENTS" = "agent:$BOOTSTRAP_AGENT" ] && \
       [ "$PR_OWNER_BODY" = "true" ] && [ "$PR_ISSUELESS" = "true" ] || \
       fail "the open refresh PR does not prove sole package-bootstrap ownership of origin/$UPDATE_BRANCH"
   fi
 
-  if [ "$update_tree" = "$UPSTREAM_TREE" ]; then
+  # A claim is a live updater boundary regardless of the source revision it
+  # recorded. Never supersede it merely because the approved source advanced;
+  # only an owner-selected exact lease may recover it after proving that the
+  # original updater has stopped.
+  if [ -n "$remote_claim" ]; then
     if [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-      printf 'activation: owner selected exact verified refresh %s for re-verification/finalization\n' "$REMOTE_UPDATE_SHA" >&2
-    elif [ -z "$PR_NUMBER" ]; then
-      stop_for_pr "origin/$UPDATE_BRANCH contains the current package but has no open PR; after verifying no updater is running, recover it with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
-    elif [ "$PR_DRAFT" = "true" ]; then
-      stop_for_pr "verified package refresh PR #$PR_NUMBER is still draft at $PR_URL; after verifying no updater is running, resume exact finalization with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
-    elif [ "$PR_TASKS" != "task:review" ]; then
-      stop_for_pr "verified package refresh PR #$PR_NUMBER has contradictory task labels ($PR_TASKS); repair exact state with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      printf 'activation: owner selected exact pending refresh claim %s (recorded revision %s) for recovery to %s\n' \
+        "$REMOTE_UPDATE_SHA" "$remote_revision" "$UPSTREAM_SHA" >&2
     else
-      stop_for_pr "package refresh PR #$PR_NUMBER is ready at $PR_URL"
+      if [ -n "$PR_NUMBER" ]; then
+        stop_for_pr "package refresh PR #$PR_NUMBER owns pending claim $REMOTE_UPDATE_SHA for recorded revision $remote_revision at $PR_URL; after verifying no updater is running, recover it to $UPSTREAM_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      fi
+      stop_for_pr "origin/$UPDATE_BRANCH owns pending claim $REMOTE_UPDATE_SHA for recorded revision $remote_revision; after verifying no updater is running, recover it to $UPSTREAM_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
     fi
   fi
-  if [ -n "$remote_claim" ] && [ "$remote_revision" = "$UPSTREAM_SHA" ]; then
-    if [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-      printf 'activation: owner selected exact pending refresh claim %s for recovery\n' "$REMOTE_UPDATE_SHA" >&2
+
+  if [ -z "$remote_claim" ] && [ "$remote_failed" != "true" ]; then
+    if [ "$update_tree" = "$UPSTREAM_TREE" ]; then
+      if [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
+        printf 'activation: owner selected exact verified refresh %s for re-verification/finalization\n' "$REMOTE_UPDATE_SHA" >&2
+      elif [ -z "$PR_NUMBER" ]; then
+        stop_for_pr "origin/$UPDATE_BRANCH contains the current package but has no open PR; after verifying no updater is running, recover it with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      elif [ "$PR_DRAFT" = "true" ]; then
+        stop_for_pr "verified package refresh PR #$PR_NUMBER is still draft at $PR_URL; after verifying no updater is running, resume exact finalization with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      elif [ "$PR_TASKS" != "task:review" ]; then
+        stop_for_pr "verified package refresh PR #$PR_NUMBER has contradictory task labels ($PR_TASKS); repair exact state with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      else
+        stop_for_pr "package refresh PR #$PR_NUMBER is ready at $PR_URL"
+      fi
+    elif [ -n "$PR_NUMBER" ] && \
+         { [ "$PR_DRAFT" = "true" ] || [ "$PR_TASKS" != "task:review" ]; } && \
+         [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" != "$REMOTE_UPDATE_SHA" ]; then
+      stop_for_pr "verified package refresh PR #$PR_NUMBER is not in exact ready/task:review state at older revision $remote_revision; after verifying no updater is still finalizing it, recover exact head $REMOTE_UPDATE_SHA to $UPSTREAM_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+    elif [ -n "$PR_NUMBER" ] && [ "$PR_DRAFT" != "false" ] && \
+         [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" != "$REMOTE_UPDATE_SHA" ]; then
+      stop_for_pr "verified package refresh PR #$PR_NUMBER is not durably ready at $PR_URL; after verifying no updater is running, recover exact head $REMOTE_UPDATE_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+    fi
+  fi
+
+  # Before replacing any existing branch head, move its exact PR to draft and
+  # read it back while the old head is still intact. This prevents exposing a
+  # ready PR whose branch contains a new unverified claim.
+  if [ -n "$PR_NUMBER" ] && [ "$PR_DRAFT" != "true" ]; then
+    gh pr ready "$PR_NUMBER" --repo "$REPO" --undo >/dev/null 2>&1 || \
+      fail "could not return exact refresh PR #$PR_NUMBER to draft; origin/$UPDATE_BRANCH was not changed"
+    drafted_state=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+      --json headRefOid,isDraft,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+      --jq '[.headRefOid, .isDraft, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+      2>/dev/null) || fail "cannot verify draft transition for exact refresh PR #$PR_NUMBER"
+    IFS=$'\t' read -r drafted_head drafted_flag drafted_repo drafted_cross drafted_base \
+      drafted_branch drafted_agents drafted_owner drafted_issueless <<EOF
+$drafted_state
+EOF
+    [ "$drafted_head" = "$REMOTE_UPDATE_SHA" ] && [ "$drafted_flag" = "true" ] && \
+      [ "$drafted_repo" = "$REPO" ] && [ "$drafted_cross" = "false" ] && \
+      [ "$drafted_base" = "$BASE" ] && [ "$drafted_branch" = "$UPDATE_BRANCH" ] && \
+      [ "$drafted_agents" = "agent:$BOOTSTRAP_AGENT" ] && \
+      [ "$drafted_owner" = "true" ] && [ "$drafted_issueless" = "true" ] || \
+      fail "refresh PR #$PR_NUMBER changed while returning it to draft; origin/$UPDATE_BRANCH was not changed"
+    PR_DRAFT=true
+  fi
+
+  if [ "$remote_failed" = "true" ]; then
+    if [ -n "$PR_NUMBER" ] && [ "$PR_DRAFT" != "true" ]; then
+      fail "recoverable failed refresh PR #$PR_NUMBER could not be proven draft"
+    fi
+    if [ "$remote_revision" != "$UPSTREAM_SHA" ]; then
+      printf 'activation: superseding exact generated failure marker %s from revision %s with %s\n' \
+        "$REMOTE_UPDATE_SHA" "$remote_revision" "$UPSTREAM_SHA" >&2
     else
-      stop_for_pr "package refresh PR #$PR_NUMBER is in progress at $PR_URL; after verifying no updater is running, recover it with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
+      printf 'activation: resuming exact generated failure marker %s\n' "$REMOTE_UPDATE_SHA" >&2
     fi
   fi
 fi
@@ -831,14 +949,28 @@ claim_message() {
   printf 'AI-Team-Activation-Claim: %s\n' "$claim_nonce"
 }
 
+[ -z "$PR_NUMBER" ] || [ "$PR_DRAFT" = "true" ] || \
+  fail "existing refresh PR was not proven draft before publishing an unverified claim"
+
 resolve_pr_by_head() {
+  expected_head=$1
   resolve_attempt=0
   while [ "$resolve_attempt" -lt 5 ]; do
-    resolved_pr=$(gh pr view "$UPDATE_BRANCH" --repo "$REPO" --json number,url \
-      --jq '[.number, .url] | @tsv' 2>/dev/null) && {
+    resolve_rows=$(gh pr list --repo "$REPO" --state open --base "$BASE" \
+      --head "$UPDATE_BRANCH" --limit 1000 \
+      --json number,url,headRefOid,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+      --jq '.[] | [.number, .url, .headRefOid, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+      2>/dev/null) || resolve_rows=
+    resolved_pr=$(printf '%s\n' "$resolve_rows" | awk -F'\t' \
+      -v head="$expected_head" -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
+      -v agent="agent:$BOOTSTRAP_AGENT" \
+      '$3 == head && $4 == repo && $5 == "false" && $6 == base && $7 == branch && $8 == agent && $9 == "true" && $10 == "true" { print $1 "\t" $2 }')
+    resolved_count=$(printf '%s\n' "$resolved_pr" | awk 'NF { count++ } END { print count + 0 }')
+    if [ "$resolved_count" -eq 1 ]; then
       printf '%s\n' "$resolved_pr"
       return 0
-    }
+    fi
+    [ "$resolved_count" -eq 0 ] || return 1
     resolve_attempt=$((resolve_attempt + 1))
     sleep 1
   done
@@ -863,21 +995,16 @@ if ! git -C "$TEMP_WORKTREE" push --quiet \
   fi
 fi
 lease_sha=$claim_sha
+REMOTE_UPDATE_SHA=$claim_sha
 PUBLISHED_CLAIM_SHA=$claim_sha
 PUBLISHED_CLAIM_ACTIVE=1
-
-if [ -n "$PR_NUMBER" ] && [ "$PR_DRAFT" != "true" ]; then
-  gh pr ready "$PR_NUMBER" --repo "$REPO" --undo >/dev/null 2>&1 || \
-    fail "claimed the refresh branch but could not return PR #$PR_NUMBER to draft"
-  PR_DRAFT=true
-fi
 write_pending_body
 if [ -z "$PR_NUMBER" ]; then
   created_pr=$(gh pr create --repo "$REPO" --base "$BASE" --head "$UPDATE_BRANCH" \
     --draft --title "Refresh mounted AI Team package to ${UPSTREAM_SHA:0:12}" \
     --body-file "$BODY_FILE" --label "agent:$BOOTSTRAP_AGENT" --label task:active \
     2>/dev/null) || true
-  resolved_pr=$(resolve_pr_by_head) || \
+  resolved_pr=$(resolve_pr_by_head "$claim_sha") || \
     fail "claimed origin/$UPDATE_BRANCH but could not open or resolve its draft PR"
   IFS=$'\t' read -r PR_NUMBER PR_URL <<EOF
 $resolved_pr
@@ -892,6 +1019,24 @@ else
     fail "claimed origin/$UPDATE_BRANCH but could not mark PR #$PR_NUMBER pending"
   gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label task:review >/dev/null 2>&1 || true
 fi
+for stale_label in task:ready task:review task:blocked task:done; do
+  gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale_label" >/dev/null 2>&1 || true
+done
+pending_pr_state=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+  --json headRefOid,isDraft,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+  --jq '[.headRefOid, .isDraft, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+  2>/dev/null) || fail "cannot verify pending state of exact refresh PR #$PR_NUMBER"
+IFS=$'\t' read -r pending_head pending_draft pending_repo pending_cross pending_base \
+  pending_branch pending_agents pending_tasks pending_owner pending_issueless <<EOF
+$pending_pr_state
+EOF
+[ "$pending_head" = "$claim_sha" ] && [ "$pending_draft" = "true" ] && \
+  [ "$pending_repo" = "$REPO" ] && [ "$pending_cross" = "false" ] && \
+  [ "$pending_base" = "$BASE" ] && [ "$pending_branch" = "$UPDATE_BRANCH" ] && \
+  [ "$pending_agents" = "agent:$BOOTSTRAP_AGENT" ] && \
+  [ "$pending_tasks" = "task:active" ] && [ "$pending_owner" = "true" ] && \
+  [ "$pending_issueless" = "true" ] || \
+  fail "refresh PR #$PR_NUMBER did not reach exact canonical draft/task:active state"
 
 # The fixed remote branch is now the activation lock. Scan again so a claim
 # that became visible between the first scan and this atomic lock cannot be
@@ -946,6 +1091,7 @@ if ! git -C "$TEMP_WORKTREE" push --quiet \
   fi
 fi
 PUBLISHED_CLAIM_ACTIVE=0
+REMOTE_UPDATE_SHA=$FINAL_SHA
 
 write_verified_body
 if [ -z "$PR_NUMBER" ]; then
@@ -953,7 +1099,7 @@ if [ -z "$PR_NUMBER" ]; then
     --draft --title "Refresh mounted AI Team package to ${UPSTREAM_SHA:0:12}" \
     --body-file "$BODY_FILE" --label "agent:$BOOTSTRAP_AGENT" --label task:active \
     2>/dev/null) || true
-  resolved_pr=$(resolve_pr_by_head) || \
+  resolved_pr=$(resolve_pr_by_head "$FINAL_SHA") || \
     fail "published origin/$UPDATE_BRANCH but could not open or resolve its draft PR"
   IFS=$'\t' read -r PR_NUMBER PR_URL <<EOF
 $resolved_pr
@@ -968,20 +1114,41 @@ gh pr edit "$PR_NUMBER" --repo "$REPO" \
   --body-file "$BODY_FILE" --add-label "agent:$BOOTSTRAP_AGENT" \
   --add-label task:review >/dev/null 2>&1 || \
   fail "published the verified refresh but could not update PR #$PR_NUMBER"
-gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label task:active >/dev/null 2>&1 || true
+for stale_label in task:ready task:active task:blocked task:done; do
+  gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale_label" >/dev/null 2>&1 || true
+done
+verified_draft_state=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+  --json headRefOid,isDraft,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+  --jq '[.headRefOid, .isDraft, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
+  2>/dev/null) || fail "cannot verify the exact reviewed draft state of PR #$PR_NUMBER"
+IFS=$'\t' read -r verified_head verified_draft verified_repo verified_cross verified_base \
+  verified_branch verified_agents verified_tasks verified_owner verified_issueless <<EOF
+$verified_draft_state
+EOF
+[ "$verified_head" = "$FINAL_SHA" ] && [ "$verified_draft" = "true" ] && \
+  [ "$verified_repo" = "$REPO" ] && [ "$verified_cross" = "false" ] && \
+  [ "$verified_base" = "$BASE" ] && [ "$verified_branch" = "$UPDATE_BRANCH" ] && \
+  [ "$verified_agents" = "agent:$BOOTSTRAP_AGENT" ] && \
+  [ "$verified_tasks" = "task:review" ] && [ "$verified_owner" = "true" ] && \
+  [ "$verified_issueless" = "true" ] || \
+  fail "verified refresh PR #$PR_NUMBER did not reach exact canonical draft/task:review state"
 gh pr ready "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1 || \
   fail "published the verified refresh but could not mark PR #$PR_NUMBER ready"
 
 final_pr_state=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
-  --json headRefOid,isDraft,labels \
-  --jq '[.headRefOid, .isDraft, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), ([.labels[].name] | any(. == "task:active")), ([.labels[].name] | any(. == "task:review"))] | @tsv' \
+  --json headRefOid,isDraft,headRefName,baseRefName,headRepository,headRepositoryOwner,isCrossRepository,labels,body \
+  --jq '[.headRefOid, .isDraft, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, .baseRefName, .headRefName, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (([.labels[].name | select(startswith("task:"))] | sort | join(",")) | if . == "" then "-" else . end), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
   2>/dev/null) || fail "cannot verify the final state of PR #$PR_NUMBER"
-IFS=$'\t' read -r final_pr_head final_pr_draft final_pr_agents final_pr_active final_pr_review <<EOF
+IFS=$'\t' read -r final_pr_head final_pr_draft final_pr_repo final_pr_cross final_pr_base \
+  final_pr_branch final_pr_agents final_pr_tasks final_pr_owner final_pr_issueless <<EOF
 $final_pr_state
 EOF
 [ "$final_pr_head" = "$FINAL_SHA" ] && [ "$final_pr_draft" = "false" ] && \
+  [ "$final_pr_repo" = "$REPO" ] && [ "$final_pr_cross" = "false" ] && \
+  [ "$final_pr_base" = "$BASE" ] && [ "$final_pr_branch" = "$UPDATE_BRANCH" ] && \
   [ "$final_pr_agents" = "agent:$BOOTSTRAP_AGENT" ] && \
-  [ "$final_pr_active" = "false" ] && [ "$final_pr_review" = "true" ] || \
+  [ "$final_pr_tasks" = "task:review" ] && [ "$final_pr_owner" = "true" ] && \
+  [ "$final_pr_issueless" = "true" ] || \
   fail "PR #$PR_NUMBER did not reach the exact package-bootstrap/task:review state; after correcting GitHub access, recover exact refresh $FINAL_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$FINAL_SHA"
 
 stop_for_pr "package revision $UPSTREAM_SHA passed the mounted suite in PR #$PR_NUMBER at $PR_URL"

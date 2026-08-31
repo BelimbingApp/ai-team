@@ -23,6 +23,15 @@ only job granted `issues: write`, and the independent-review workflow reads
 the trusted default-branch grammar. The implementation and its tests live
 here, with the board contract they enforce.
 
+The package also ships `templates/activate.sh` and
+`templates/package-refresh.conf`. Copy both to the adopter-owned `.ai-team/`
+directory and enter through `.ai-team/activate.sh`; it updates the mount in an
+isolated PR before handing off to `docs/ai-team/scripts/orient.sh`. The
+operating guide's “Activate and refresh the mount” section is mandatory for a
+legacy first migration: old claim clients do not participate in the new
+remote-ref mutex, so the owner must establish the documented exclusive window
+rather than treating the acknowledgement variable as a lock.
+
 `blocked_by_sweep.py` is a Python entry point, not a shell command. Run it as
 `python3 docs/ai-team/scripts/blocked_by_sweep.py` (the workflow supplies the
 required `GITHUB_REPOSITORY` and `GITHUB_TOKEN` environment variables).

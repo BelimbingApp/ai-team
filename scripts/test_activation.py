@@ -108,6 +108,11 @@ class ActivationRefreshTest(unittest.TestCase):
             encoding="utf-8",
         )
         (package_scripts / "orient.sh").chmod(0o755)
+        (package_scripts / "claim.sh").write_text(
+            "#!/usr/bin/env bash\nAI_TEAM_ACTIVATION_MUTEX_PROTOCOL=1\n",
+            encoding="utf-8",
+        )
+        (package_scripts / "claim.sh").chmod(0o755)
         (package_scripts / "test_smoke.py").write_text(
             textwrap.dedent(
                 """\
@@ -208,43 +213,57 @@ class ActivationRefreshTest(unittest.TestCase):
                       if [ -f "$state/pr-merged" ]; then
                         if [ -f "$state/older-merged" ]; then
                           if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
-                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\tagent:package-bootstrap\\ttask:review\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `0000000000000000000000000000000000000000`\\n' "$ACTIVATION_TEST_SOURCE"
+                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttask:review\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `0000000000000000000000000000000000000000`\\n' "$ACTIVATION_TEST_SOURCE"
                           else
-                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\tagent:package-bootstrap\\ttrue\\ttrue\\n'
+                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n'
                           fi
                         fi
                         number=$(cat "$state/pr-number")
                         head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse --verify refs/heads/ai-team/package-refresh 2>/dev/null || cat "$state/pr-head")
                         merge=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/main)
                         revision=$(cat "$state/pr-package-sha")
+                        if [ -f "$state/wrong-base-merged" ]; then
+                          if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
+                            printf '47\\t%s\\t%s\\texample/adopter\\tfalse\\trelease\\tai-team/package-refresh\\tagent:package-bootstrap\\ttask:review\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
+                              "$head" "$merge" "$ACTIVATION_TEST_SOURCE" "$revision"
+                          else
+                            printf '47\\t%s\\t%s\\texample/adopter\\tfalse\\trelease\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$head" "$merge"
+                          fi
+                        fi
                         if [ -f "$state/valid-older-merged" ] && printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
                           older_tasks=task:review
                           [ ! -f "$state/pr-terminal-48" ] || older_tasks=task:done
-                          printf '48\\t%s\\t%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
+                          printf '48\\t%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
                             "$head" "$merge" "$older_tasks" "$ACTIVATION_TEST_SOURCE" "$revision"
                         fi
                         if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
                           tasks=task:review
                           [ ! -f "$state/pr-done-plus-review" ] || tasks=task:done,task:review
                           [ ! -f "$state/pr-terminal-51" ] || tasks=task:done
-                          printf '%s\\t%s\\t%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
+                          printf '%s\\t%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
                             "$number" "$head" "$merge" "$tasks" "$ACTIVATION_TEST_SOURCE" "$revision"
                         else
-                          printf '%s\\t%s\\t%s\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$head" "$merge"
+                          printf '%s\\t%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$head" "$merge"
                         fi
                       fi
-                    elif [ "$has_head" = true ] && printf '%s\\n' "$*" | grep -q -- '--jq length'; then
-                      if [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
-                        printf '1\\n'
-                      else
-                        printf '0\\n'
-                      fi
                     elif [ "$has_head" = false ]; then
+                      if [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
+                        number=$(cat "$state/pr-number")
+                        head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
+                        printf '%s\\t%s\\tai-team/package-refresh\\tmain\\texample/adopter\\tfalse\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$head"
+                      fi
                       if [ -f "$state/active-pr" ]; then
-                        printf 'PR #88\\n'
+                        printf '88\\t0000000000000000000000000000000000000000\\tagent/other-issue-88\\tmain\\texample/adopter\\tfalse\\tagent:other\\tfalse\\tfalse\\n'
                       fi
                       if [ -f "$state/claim-pr-visible" ]; then
-                        printf 'PR #52\\n'
+                        printf '52\\t0000000000000000000000000000000000000000\\tagent/race-claimant-issue-77\\tmain\\texample/adopter\\tfalse\\tagent:race-claimant\\tfalse\\tfalse\\n'
+                      fi
+                      if [ -f "$state/fork-refresh-pr" ]; then
+                        printf '89\\t0000000000000000000000000000000000000000\\tai-team/package-refresh\\tmain\\tfork-owner/adopter\\ttrue\\tagent:package-bootstrap\\ttrue\\ttrue\\n'
+                      fi
+                      if [ -f "$state/other-base-refresh-pr" ]; then
+                        other_head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse --verify refs/heads/ai-team/package-refresh 2>/dev/null || printf '0000000000000000000000000000000000000000')
+                        printf '90\\t%s\\tai-team/package-refresh\\trelease\\texample/adopter\\tfalse\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$other_head"
                       fi
                     elif [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
                       number=$(cat "$state/pr-number")
@@ -252,8 +271,34 @@ class ActivationRefreshTest(unittest.TestCase):
                       head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
                       tasks=task:active
                       [ ! -f "$state/verified-edit" ] || tasks=task:review
+                      if [ -f "$state/extra-blocked" ]; then
+                        tasks=$(printf '%s\\ntask:blocked\\n' "$tasks" | sort | paste -sd, -)
+                      fi
                       [ ! -f "$state/contradictory-ready" ] || tasks=task:active,task:review
-                      printf '%s\\t%s\\t%s\\thttps://example.test/pull/%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\n' "$number" "$draft" "$head" "$number" "$tasks"
+                      if printf '%s\\n' "$*" | grep -q -- 'number,isDraft'; then
+                        printf '%s\\t%s\\t%s\\thttps://example.test/pull/%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\n' "$number" "$draft" "$head" "$number" "$tasks"
+                      elif printf '%s\\n' "$*" | grep -q -- 'number,url'; then
+                        printf '%s\\thttps://example.test/pull/%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$number" "$head"
+                      else
+                        printf '%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\n' "$number" "$head"
+                      fi
+                    elif [ "$has_head" = true ] && [ -f "$state/fork-refresh-pr" ]; then
+                      if printf '%s\\n' "$*" | grep -q -- 'number,isDraft'; then
+                        printf '89\\ttrue\\t0000000000000000000000000000000000000000\\thttps://example.test/pull/89\\tfork-owner/adopter\\ttrue\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttask:active\\ttrue\\ttrue\\n'
+                      elif printf '%s\\n' "$*" | grep -q -- 'number,url'; then
+                        printf '89\\thttps://example.test/pull/89\\t0000000000000000000000000000000000000000\\tfork-owner/adopter\\ttrue\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n'
+                      else
+                        printf '89\\t0000000000000000000000000000000000000000\\tfork-owner/adopter\\ttrue\\tmain\\tai-team/package-refresh\\n'
+                      fi
+                    elif [ "$has_head" = true ] && [ -f "$state/other-base-refresh-pr" ]; then
+                      head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse --verify refs/heads/ai-team/package-refresh 2>/dev/null || printf '0000000000000000000000000000000000000000')
+                      if printf '%s\\n' "$*" | grep -q -- 'number,isDraft'; then
+                        printf '90\\ttrue\\t%s\\thttps://example.test/pull/90\\texample/adopter\\tfalse\\trelease\\tai-team/package-refresh\\tagent:package-bootstrap\\ttask:active\\ttrue\\ttrue\\n' "$head"
+                      elif printf '%s\\n' "$*" | grep -q -- 'number,url'; then
+                        printf '90\\thttps://example.test/pull/90\\t%s\\texample/adopter\\tfalse\\trelease\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$head"
+                      else
+                        printf '90\\t%s\\texample/adopter\\tfalse\\trelease\\tai-team/package-refresh\\n' "$head"
+                      fi
                     fi
                     ;;
                   "pr create")
@@ -270,12 +315,18 @@ class ActivationRefreshTest(unittest.TestCase):
                       printf 'https://example.test/pull/52\\n'
                       exit 0
                     fi
-                    set -o noclobber
-                    if ! printf '51\\n' > "$state/pr-number" 2>/dev/null; then
-                      echo 'duplicate refresh PR' >&2
-                      exit 1
+                    if [ -f "$state/pr-merged" ] || [ -f "$state/pr-closed" ]; then
+                      printf '52\\n' > "$state/pr-number"
+                      rm -f "$state/pr-merged" "$state/pr-closed"
+                    else
+                      set -o noclobber
+                      if ! printf '51\\n' > "$state/pr-number" 2>/dev/null; then
+                        echo 'duplicate refresh PR' >&2
+                        exit 1
+                      fi
+                      set +o noclobber
                     fi
-                    set +o noclobber
+                    number=$(cat "$state/pr-number")
                     printf 'created\\n' >> "$state/pr-create-success"
                     printf 'true\\n' > "$state/pr-draft"
                     if [ -f "$state/activate-late-lane" ]; then
@@ -288,7 +339,7 @@ class ActivationRefreshTest(unittest.TestCase):
                       fi
                       previous=$argument
                     done
-                    printf 'https://example.test/pull/51\\n'
+                    printf 'https://example.test/pull/%s\\n' "$number"
                     ;;
                   "pr view")
                     if [ "${3:-}" = "52" ]; then
@@ -306,13 +357,29 @@ class ActivationRefreshTest(unittest.TestCase):
                       fi
                     elif printf '%s\\n' "$*" | grep -q -- 'headRefOid'; then
                       head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
-                      if [ -f "$state/bad-final-labels" ] || [ -f "$state/contradictory-ready" ]; then
-                        printf '%s\\tfalse\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$head"
+                      if printf '%s\\n' "$*" | grep -q -- 'headRepository'; then
+                        draft=$(cat "$state/pr-draft")
+                        tasks=task:active
+                        [ ! -f "$state/verified-edit" ] || tasks=task:review
+                        if [ -f "$state/extra-blocked" ] || [ -f "$state/final-blocked" ]; then
+                          tasks=$(printf '%s\\ntask:blocked\\n' "$tasks" | sort | paste -sd, -)
+                        fi
+                        if { [ "$draft" = "false" ] && [ -f "$state/bad-final-labels" ]; } || \
+                           [ -f "$state/contradictory-ready" ]; then
+                          tasks=task:active,task:review
+                        fi
+                        if printf '%s\\n' "$*" | grep -q -- 'startswith("task:")'; then
+                          printf '%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\n' "$head" "$draft" "$tasks"
+                        else
+                          printf '%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$head" "$draft"
+                        fi
                       else
-                        printf '%s\\tfalse\\tagent:package-bootstrap\\tfalse\\ttrue\\n' "$head"
+                        draft=$(cat "$state/pr-draft")
+                        printf '%s\\t%s\\tagent:package-bootstrap\\n' "$head" "$draft"
                       fi
                     else
-                      printf '51\\thttps://example.test/pull/51\\n'
+                      number=$(cat "$state/pr-number")
+                      printf '%s\\thttps://example.test/pull/%s\\n' "$number" "$number"
                     fi
                     ;;
                   "pr edit")
@@ -325,6 +392,12 @@ class ActivationRefreshTest(unittest.TestCase):
                     if printf '%s\\n' "$*" | grep -q -- '--add-label task:review'; then
                       : > "$state/verified-edit"
                     fi
+                    if printf '%s\\n' "$*" | grep -q -- '--remove-label task:review'; then
+                      rm -f "$state/verified-edit"
+                    fi
+                    if printf '%s\\n' "$*" | grep -q -- '--remove-label task:blocked'; then
+                      rm -f "$state/extra-blocked" "$state/final-blocked"
+                    fi
                     previous=
                     for argument in "$@"; do
                       if [ "$previous" = "--body-file" ]; then
@@ -335,6 +408,11 @@ class ActivationRefreshTest(unittest.TestCase):
                     ;;
                   "pr ready")
                     if printf '%s\\n' "$*" | grep -q -- '--undo'; then
+                      if [ -f "$state/fail-next-undo" ]; then
+                        rm -f "$state/fail-next-undo"
+                        echo 'fixture draft transition failure' >&2
+                        exit 1
+                      fi
                       printf 'true\\n' > "$state/pr-draft"
                       rm -f "$state/ready"
                     else
@@ -345,10 +423,14 @@ class ActivationRefreshTest(unittest.TestCase):
                       fi
                       printf 'false\\n' > "$state/pr-draft"
                       : > "$state/ready"
+                      if [ -f "$state/inject-blocked-on-ready" ]; then
+                        : > "$state/final-blocked"
+                      fi
                       head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
                       printf '%s\\n' "$head" > "$state/pr-head"
                       printf '%s\\n' "$ACTIVATION_TEST_PACKAGE_SHA" > "$state/pr-package-sha"
-                      git --git-dir="$ACTIVATION_TEST_ORIGIN" update-ref refs/pull/51/head "$head"
+                      number=$(cat "$state/pr-number")
+                      git --git-dir="$ACTIVATION_TEST_ORIGIN" update-ref "refs/pull/$number/head" "$head"
                     fi
                     ;;
                   "label create")
@@ -374,6 +456,11 @@ class ActivationRefreshTest(unittest.TestCase):
                 """\
                 #!/usr/bin/env bash
                 set -eu
+                if [ -n "${AI_TEAM_TEST_ORIGIN_REPO:-}" ] && \
+                   [ "${1:-}" = "remote" ] && [ "${2:-}" = "get-url" ] && [ "${3:-}" = "origin" ]; then
+                  printf 'https://github.com/%s.git\\n' "$AI_TEAM_TEST_ORIGIN_REPO"
+                  exit 0
+                fi
                 mutex_create=false
                 if [ "${1:-}" = "push" ]; then
                   for argument in "$@"; do
@@ -460,7 +547,7 @@ class ActivationRefreshTest(unittest.TestCase):
             env=environment,
             text=True,
             capture_output=True,
-            timeout=180,
+            timeout=600,
         )
 
     def run_claim(
@@ -479,6 +566,7 @@ class ActivationRefreshTest(unittest.TestCase):
             CLAIM_AGENT="race-claimant",
             CLAIM_WORKTREE=bash_path(self.root / "claim-lane"),
             ACTIVATION_TEST_REAL_GIT=bash_path(Path(shutil.which("git") or "git")),
+            AI_TEAM_TEST_ORIGIN_REPO="example/adopter",
             GIT_AUTHOR_DATE="2001-02-03T04:05:06+0000",
             GIT_COMMITTER_DATE="2001-02-03T04:05:06+0000",
         )
@@ -492,7 +580,7 @@ class ActivationRefreshTest(unittest.TestCase):
             env=environment,
             text=True,
             capture_output=True,
-            timeout=180,
+            timeout=600,
         )
 
     def remote_update_sha(self) -> str | None:
@@ -558,6 +646,85 @@ class ActivationRefreshTest(unittest.TestCase):
         ).stdout.strip()
         self.git("push", "-q", "origin", f"{created}:refs/heads/{UPDATE_BRANCH}")
         return created
+
+    def expose_refresh_pr(self, *, draft: bool = True) -> None:
+        (self.state / "pr-number").write_text("51\n", encoding="utf-8")
+        (self.state / "pr-draft").write_text(
+            f"{'true' if draft else 'false'}\n", encoding="utf-8"
+        )
+
+    def create_forged_refresh_with_package_sentinel(self, marker: str = "") -> str:
+        base = self.git_output("rev-parse", "HEAD")
+        worktree = self.root / "forged-refresh-worktree"
+        self.git("worktree", "add", "-q", "--detach", str(worktree), base)
+        mounted = worktree / "docs" / "ai-team"
+        mounted.mkdir(parents=True)
+        (mounted / "ADOPTER_SENTINEL").write_text(
+            "must never be overwritten\n", encoding="utf-8"
+        )
+        message = (
+            "forged generated-looking refresh\n\n"
+            "AI-Team-Activation-Managed: true\n"
+            f"AI-Team-Activation-Base: {base}\n"
+            f"AI-Team-Package-Source: {bash_path(self.source_bare)}\n"
+            "AI-Team-Package-Ref: package-mount\n"
+            f"AI-Team-Package-Revision: {self.package_sha}\n"
+            f"{marker}"
+        )
+        self.git("add", "docs/ai-team/ADOPTER_SENTINEL", cwd=worktree)
+        subprocess.run(
+            ["git", "commit", "-q", "--file=-"],
+            cwd=worktree,
+            env=self.git_env(),
+            input=message,
+            text=True,
+            check=True,
+        )
+        forged_sha = self.git_output("rev-parse", "HEAD", cwd=worktree)
+        self.git(
+            "push",
+            "-q",
+            "origin",
+            f"{forged_sha}:refs/heads/{UPDATE_BRANCH}",
+            cwd=worktree,
+        )
+        self.git("worktree", "remove", str(worktree))
+        return forged_sha
+
+    def advance_package_source(self, name: str = "NEXT") -> str:
+        (self.source / name).write_text("newer approved package\n", encoding="utf-8")
+        self.git("add", name, cwd=self.source)
+        self.git("commit", "-qm", f"advance package with {name}", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+        return self.package_sha
+
+    def append_trailer_to_refresh(self, trailer: str) -> str:
+        current = self.remote_update_sha()
+        self.assertIsNotNone(current)
+        worktree = self.root / "refresh-trailer-worktree"
+        self.git("worktree", "add", "-q", "--detach", str(worktree), current)
+        message = self.origin_output("log", "-1", "--format=%B", current)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-q", "--file=-"],
+            cwd=worktree,
+            env=self.git_env(),
+            input=f"{message.rstrip()}\n{trailer}\n",
+            text=True,
+            check=True,
+        )
+        new_head = self.git_output("rev-parse", "HEAD", cwd=worktree)
+        self.git(
+            "push",
+            "-q",
+            f"--force-with-lease=refs/heads/{UPDATE_BRANCH}:{current}",
+            "origin",
+            f"{new_head}:refs/heads/{UPDATE_BRANCH}",
+            cwd=worktree,
+        )
+        self.git("worktree", "remove", str(worktree))
+        return new_head
 
     def origin_output(self, *arguments: str) -> str:
         return subprocess.run(
@@ -834,9 +1001,18 @@ class ActivationRefreshTest(unittest.TestCase):
         (self.state / "pr-done-plus-review").write_text("yes\n", encoding="utf-8")
         (self.state / "active").write_text("yes\n", encoding="utf-8")
 
+        blocked = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(blocked.returncode, 1, blocked.stdout + blocked.stderr)
+        self.assertIn("refuses active task lanes: #77", blocked.stderr)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        self.assertFalse((self.state / "pr-terminal-48").exists())
+        self.assertIsNone(self.remote_mutex_sha())
+
+        (self.state / "active").unlink()
         finalized = self.run_activation(exclusive_first_refresh=True)
 
-        self.assertEqual(finalized.returncode, 1, finalized.stdout + finalized.stderr)
+        self.assertEqual(finalized.returncode, 3, finalized.stdout + finalized.stderr)
         self.assertIn(
             "terminalized auto-deleted merged package refresh PR #51",
             finalized.stdout,
@@ -847,12 +1023,68 @@ class ActivationRefreshTest(unittest.TestCase):
             finalized.stdout,
             finalized.stdout + finalized.stderr,
         )
-        self.assertIn("refuses active task lanes: #77", finalized.stderr)
         self.assertTrue((self.state / "pr-terminal").is_file())
         self.assertTrue((self.state / "pr-terminal-48").is_file())
         self.assertIsNone(self.remote_mutex_sha())
         self.assertFalse(self.orient_marker.exists())
         self.assertNotIn("pr edit 49 --repo", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_malformed_failed_trailer_is_never_terminalized_with_or_without_branch(self):
+        created = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(created.returncode, 3, created.stdout + created.stderr)
+        malformed_sha = self.append_trailer_to_refresh(
+            "AI-Team-Activation-Failed: false"
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(self.origin), "update-ref", "refs/heads/main", malformed_sha],
+            env=self.git_env(),
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "update-ref",
+                "refs/pull/51/head",
+                malformed_sha,
+            ],
+            env=self.git_env(),
+            check=True,
+        )
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        self.gh_log.write_text("", encoding="utf-8")
+
+        lingering = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(lingering.returncode, 3, lingering.stdout + lingering.stderr)
+        self.assertEqual(self.remote_update_sha(), malformed_sha)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        self.assertNotIn("pr edit 51", self.gh_log.read_text(encoding="utf-8"))
+        self.assertIsNone(self.remote_mutex_sha())
+
+        (self.state / "pr-head").write_text(f"{malformed_sha}\n", encoding="utf-8")
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "update-ref",
+                "-d",
+                f"refs/heads/{UPDATE_BRANCH}",
+            ],
+            env=self.git_env(),
+            check=True,
+        )
+        self.gh_log.write_text("", encoding="utf-8")
+        deleted = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
+        self.assertIn("head is not exact generated refresh state", deleted.stderr)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        self.assertNotIn("pr edit 51", self.gh_log.read_text(encoding="utf-8"))
+        self.assertIsNone(self.remote_mutex_sha())
 
     def test_dirty_checkout_refuses_without_creating_remote_state(self):
         original_head = self.git_output("rev-parse", "HEAD")
@@ -1020,6 +1252,107 @@ class ActivationRefreshTest(unittest.TestCase):
             (self.state / "pr-draft").read_text(encoding="utf-8").strip(), "true"
         )
         self.assert_caller_unchanged(original_head)
+
+    def test_same_named_fork_and_wrong_base_refresh_prs_are_never_exempt_or_edited(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+
+        (self.state / "fork-refresh-pr").write_text("yes\n", encoding="utf-8")
+        fork_result = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(
+            fork_result.returncode, 1, fork_result.stdout + fork_result.stderr
+        )
+        self.assertIn("refuses active task lanes: PR #89", fork_result.stderr)
+        self.assertIsNone(self.remote_update_sha())
+        fork_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit 89", fork_log)
+        self.assertNotIn("pr ready 89", fork_log)
+        self.assert_caller_unchanged(original_head)
+
+        (self.state / "fork-refresh-pr").unlink()
+        self.gh_log.write_text("", encoding="utf-8")
+        (self.state / "other-base-refresh-pr").write_text("yes\n", encoding="utf-8")
+        base_result = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(
+            base_result.returncode, 1, base_result.stdout + base_result.stderr
+        )
+        self.assertIn("refuses active task lanes: PR #90", base_result.stderr)
+        self.assertIsNone(self.remote_update_sha())
+        base_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit 90", base_log)
+        self.assertNotIn("pr ready 90", base_log)
+        self.assert_caller_unchanged(original_head)
+
+    def test_wrong_base_pr_protects_a_lingering_merged_refresh_before_cleanup(self):
+        created = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(created.returncode, 3, created.stdout + created.stderr)
+        lingering_sha = self.remote_update_sha()
+        self.assertIsNotNone(lingering_sha)
+
+        self.git("fetch", "-q", "origin", UPDATE_BRANCH)
+        self.git("merge", "-q", "--ff-only", f"origin/{UPDATE_BRANCH}")
+        self.git("push", "-q", "origin", "main")
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
+        (self.state / "other-base-refresh-pr").write_text("yes\n", encoding="utf-8")
+        self.gh_log.write_text("", encoding="utf-8")
+        merged_head = self.git_output("rev-parse", "HEAD")
+
+        blocked = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(blocked.returncode, 1, blocked.stdout + blocked.stderr)
+        self.assertIn("refuses active task lanes: PR #90", blocked.stderr)
+        self.assertEqual(self.remote_update_sha(), lingering_sha)
+        log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit 51", log)
+        self.assertNotIn("pr edit 90", log)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        self.assert_caller_unchanged(merged_head)
+
+        (self.state / "other-base-refresh-pr").unlink()
+        (self.state / "wrong-base-merged").write_text("yes\n", encoding="utf-8")
+        self.gh_log.write_text("", encoding="utf-8")
+        ambiguous_history = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(
+            ambiguous_history.returncode,
+            1,
+            ambiguous_history.stdout + ambiguous_history.stderr,
+        )
+        self.assertIn("reused by multiple same-repository merged PRs", ambiguous_history.stderr)
+        self.assertEqual(self.remote_update_sha(), lingering_sha)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        ambiguous_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit 47", ambiguous_log)
+        self.assertNotIn("pr edit 51", ambiguous_log)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(merged_head)
+
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "update-ref",
+                "-d",
+                f"refs/heads/{UPDATE_BRANCH}",
+            ],
+            env=self.git_env(),
+            check=True,
+        )
+        self.gh_log.write_text("", encoding="utf-8")
+        ambiguous_deleted = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            ambiguous_deleted.returncode,
+            1,
+            ambiguous_deleted.stdout + ambiguous_deleted.stderr,
+        )
+        self.assertIn("reused by multiple same-repository PRs", ambiguous_deleted.stderr)
+        deleted_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertNotIn("pr edit 47", deleted_log)
+        self.assertNotIn("pr edit 51", deleted_log)
+        self.assertFalse((self.state / "pr-terminal").exists())
+        self.assertIsNone(self.remote_mutex_sha())
 
     def test_blocked_backlog_without_an_open_pr_does_not_freeze_activation(self):
         original_head = self.git_output("rev-parse", "HEAD")
@@ -1208,7 +1541,7 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertNotEqual(verified_sha, orphan_claim)
         self.assertTrue((self.state / "ready").is_file())
 
-        (self.state / "bad-final-labels").write_text("yes\n", encoding="utf-8")
+        (self.state / "inject-blocked-on-ready").write_text("yes\n", encoding="utf-8")
         bad_labels = self.run_activation(
             recover_refresh_sha=verified_sha, exclusive_first_refresh=True
         )
@@ -1216,7 +1549,8 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertIn("did not reach the exact", bad_labels.stderr)
         failed_label_sha = self.remote_update_sha()
         self.assertNotEqual(failed_label_sha, verified_sha)
-        (self.state / "bad-final-labels").unlink()
+        self.assertTrue((self.state / "final-blocked").exists())
+        (self.state / "inject-blocked-on-ready").unlink()
 
         label_recovery = self.run_activation(
             recover_refresh_sha=failed_label_sha, exclusive_first_refresh=True
@@ -1226,6 +1560,7 @@ class ActivationRefreshTest(unittest.TestCase):
             3,
             label_recovery.stdout + label_recovery.stderr,
         )
+        self.assertFalse((self.state / "final-blocked").exists())
         self.assertIsNone(self.remote_mutex_sha())
         self.assert_caller_unchanged(original_head)
 
@@ -1240,10 +1575,14 @@ class ActivationRefreshTest(unittest.TestCase):
         verified_sha = self.remote_update_sha()
         self.assertIsNotNone(verified_sha)
         self.assertEqual((self.state / "pr-draft").read_text().strip(), "true")
+        verified_revision = self.package_sha
+        newer_revision = self.advance_package_source("AFTER_VERIFIED_DRAFT")
 
         refused = self.run_activation(exclusive_first_refresh=True)
         self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
-        self.assertIn("is still draft", refused.stderr)
+        self.assertIn("is not in exact ready/task:review state", refused.stderr)
+        self.assertIn(verified_revision, refused.stderr)
+        self.assertIn(newer_revision, refused.stderr)
         self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={verified_sha}", refused.stderr)
         self.assertEqual(self.remote_update_sha(), verified_sha)
 
@@ -1254,8 +1593,10 @@ class ActivationRefreshTest(unittest.TestCase):
         repaired_sha = self.remote_update_sha()
         self.assertNotEqual(repaired_sha, verified_sha)
         self.assertTrue((self.state / "ready").is_file())
+        repaired_message = self.origin_output("log", "-1", "--format=%B", repaired_sha)
+        self.assertIn(f"AI-Team-Package-Revision: {newer_revision}", repaired_message)
 
-        (self.state / "contradictory-ready").write_text("yes\n", encoding="utf-8")
+        (self.state / "extra-blocked").write_text("yes\n", encoding="utf-8")
         contradictory = self.run_activation(exclusive_first_refresh=True)
         self.assertEqual(
             contradictory.returncode,
@@ -1265,11 +1606,63 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertIn("contradictory task labels", contradictory.stderr)
         self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={repaired_sha}", contradictory.stderr)
 
-        (self.state / "contradictory-ready").unlink()
         normalized = self.run_activation(
             recover_refresh_sha=repaired_sha, exclusive_first_refresh=True
         )
         self.assertEqual(normalized.returncode, 3, normalized.stdout + normalized.stderr)
+        self.assertFalse((self.state / "extra-blocked").exists())
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "false")
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_ready_verified_refresh_is_drafted_before_a_newer_claim_is_pushed(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        first = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        old_verified_sha = self.remote_update_sha()
+        self.assertIsNotNone(old_verified_sha)
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "false")
+
+        newer_revision = self.advance_package_source("AFTER_READY_REFRESH")
+        (self.state / "fail-next-undo").write_text("yes\n", encoding="utf-8")
+        failed_draft = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            failed_draft.returncode,
+            1,
+            failed_draft.stdout + failed_draft.stderr,
+        )
+        self.assertIn("could not return exact refresh PR #51 to draft", failed_draft.stderr)
+        self.assertEqual(self.remote_update_sha(), old_verified_sha)
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "false")
+
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                while read -r old new ref; do
+                  if [ "$ref" = "refs/heads/ai-team/package-refresh" ] &&
+                     [ "$(cat "$ACTIVATION_TEST_GH_STATE/pr-draft")" != "true" ]; then
+                    echo "fixture rejected a refresh push before the PR became draft" >&2
+                    exit 1
+                  fi
+                done
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+        self.gh_log.write_text("", encoding="utf-8")
+
+        refreshed = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(refreshed.returncode, 3, refreshed.stdout + refreshed.stderr)
+        self.assertNotEqual(self.remote_update_sha(), old_verified_sha)
+        message = self.origin_output("log", "-1", "--format=%B", self.remote_update_sha())
+        self.assertIn(f"AI-Team-Package-Revision: {newer_revision}", message)
+        self.assertIn("pr ready 51 --repo example/adopter --undo", self.gh_log.read_text())
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "false")
         self.assertIsNone(self.remote_mutex_sha())
         self.assert_caller_unchanged(original_head)
 
@@ -1310,6 +1703,89 @@ class ActivationRefreshTest(unittest.TestCase):
         )
         self.assertIn(f"AI-Team-Package-Revision: {self.package_sha}", recovered_metadata)
         self.assertTrue((self.state / "ready").is_file())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_open_pending_claim_remains_the_only_owner_when_source_advances(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        recorded_revision = self.package_sha
+        pending_sha = self.create_orphan_refresh_claim()
+        self.expose_refresh_pr(draft=True)
+        newer_revision = self.advance_package_source("AFTER_LIVE_CLAIM")
+
+        contender = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(
+            contender.returncode, 3, contender.stdout + contender.stderr
+        )
+        self.assertIn(f"PR #51 owns pending claim {pending_sha}", contender.stderr)
+        self.assertIn(f"recorded revision {recorded_revision}", contender.stderr)
+        self.assertIn(f"recover it to {newer_revision}", contender.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={pending_sha}", contender.stderr)
+        self.assertEqual(self.remote_update_sha(), pending_sha)
+        self.assertFalse(self.suite_marker.exists())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+        recovered = self.run_activation(
+            recover_refresh_sha=pending_sha, exclusive_first_refresh=True
+        )
+
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertIn("owner selected exact pending refresh claim", recovered.stderr)
+        self.assertNotEqual(self.remote_update_sha(), pending_sha)
+        recovered_message = self.origin_output(
+            "log", "-1", "--format=%B", self.remote_update_sha()
+        )
+        self.assertIn(f"AI-Team-Package-Revision: {newer_revision}", recovered_message)
+        self.assertTrue((self.state / "ready").exists())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_generated_markers_never_authorize_overwriting_package_path_sentinels(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+
+        forged_claim = self.create_forged_refresh_with_package_sentinel(
+            "AI-Team-Activation-Claim: 0123456789abcdef0123456789abcdef\n"
+        )
+        self.expose_refresh_pr(draft=True)
+        claim_result = self.run_activation(
+            recover_refresh_sha=forged_claim, exclusive_first_refresh=True
+        )
+        self.assertEqual(
+            claim_result.returncode, 1, claim_result.stdout + claim_result.stderr
+        )
+        self.assertIn("malformed generated claim/failure shape", claim_result.stderr)
+        self.assertEqual(self.remote_update_sha(), forged_claim)
+        self.assertIsNone(self.remote_mutex_sha())
+
+        self.git("push", "-q", "origin", "--delete", UPDATE_BRANCH)
+        (self.state / "pr-number").unlink()
+        (self.state / "pr-draft").unlink()
+        forged_failed = self.create_forged_refresh_with_package_sentinel(
+            "AI-Team-Activation-Failed: true\n"
+        )
+        failed_result = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            failed_result.returncode, 1, failed_result.stdout + failed_result.stderr
+        )
+        self.assertIn("malformed generated claim/failure shape", failed_result.stderr)
+        self.assertEqual(self.remote_update_sha(), forged_failed)
+        self.assertIsNone(self.remote_mutex_sha())
+
+        self.git("push", "-q", "origin", "--delete", UPDATE_BRANCH)
+        forged_verified = self.create_forged_refresh_with_package_sentinel()
+        self.expose_refresh_pr(draft=False)
+        (self.state / "verified-edit").write_text("yes\n", encoding="utf-8")
+        verified_result = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            verified_result.returncode,
+            1,
+            verified_result.stdout + verified_result.stderr,
+        )
+        self.assertIn("does not exactly match its recorded package revision", verified_result.stderr)
+        self.assertEqual(self.remote_update_sha(), forged_verified)
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "false")
         self.assertIsNone(self.remote_mutex_sha())
         self.assert_caller_unchanged(original_head)
 
@@ -1458,6 +1934,36 @@ class ActivationRefreshTest(unittest.TestCase):
             capture_output=True,
         )
         self.assertNotEqual(removed.returncode, 0)
+
+    def test_current_mutex_client_refreshes_without_legacy_owner_override(self):
+        self.git(
+            "subtree",
+            "add",
+            "--prefix=docs/ai-team",
+            str(self.source_bare),
+            self.package_sha,
+            "--squash",
+        )
+        self.git("push", "-q", "origin", "main")
+        original_head = self.git_output("rev-parse", "HEAD")
+
+        (self.source / "CURRENT_CLIENT_UPDATE").write_text(
+            "new package content\n", encoding="utf-8"
+        )
+        self.git("add", "CURRENT_CLIENT_UPDATE", cwd=self.source)
+        self.git("commit", "-qm", "advance current mutex package", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+
+        result = self.run_activation()
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertNotIn("first activation/migration is not mutex-compatible", result.stderr)
+        self.assertNotIn("owner acknowledged an exclusive first refresh", result.stdout)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
 
 
 if __name__ == "__main__":
