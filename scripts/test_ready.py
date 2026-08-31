@@ -86,13 +86,14 @@ class ReadyHandoffTest(unittest.TestCase):
         env["READY_TEST_TITLE"] = self.title
         env["READY_TEST_BRANCH"] = self.branch
         env["CLAIM_AGENT"] = "composer"
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
         if ready_issue is not None:
             env["READY_ISSUE"] = ready_issue
         elif "READY_ISSUE" in env:
             del env["READY_ISSUE"]
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         return run_with_bash_path(
-            ["bash", str(SCRIPT), "99"],
+            ["bash", bash_path(SCRIPT), "99"],
             stub_directory=self.bin,
             cwd=self.cwd,
             env=env,

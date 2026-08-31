@@ -20,6 +20,9 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=docs/ai-team/scripts/_lane_issue.sh
 # shellcheck disable=SC1091
 source "$here/_lane_issue.sh"
+# shellcheck source=docs/ai-team/scripts/_default_branch.sh
+# shellcheck disable=SC1091
+source "$here/_default_branch.sh"
 
 if [[ $# -ne 2 || ! "$pr" =~ ^[0-9]+$ || ! "$reviewed" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "usage: LAND_AGENT=<stable-agent-id> $0 <pr-number> <reviewed-full-sha>" >&2
@@ -31,10 +34,11 @@ if [[ ! "$agent" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
   exit 2
 fi
 
-repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
-  echo "cannot resolve the repository from gh" >&2
+repo=$(ai_team_origin_repo) || {
+  echo "cannot resolve the repository from origin" >&2
   exit 2
 }
+[[ -n "$repo" ]] || { echo "cannot resolve the repository from origin" >&2; exit 2; }
 
 pr_json=$(gh pr view "$pr" --repo "$repo" \
   --json number,title,body,headRefName,labels,isDraft,state,mergeCommit,comments 2>/dev/null) || {

@@ -162,6 +162,7 @@ class DefaultBranchResolutionTest(unittest.TestCase):
         # test then passes or fails for reasons unrelated to what it asserts.
         env = os.environ.copy()
         env.pop("AI_TEAM_BASE_BRANCH", None)
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
         env.update(env_extra or {})
         return run_with_bash_path(
             ["bash", bash_path(Path(__file__).with_name(script))],
@@ -288,6 +289,7 @@ class NestedRepositoryLanePlacementTest(unittest.TestCase):
     def test_the_lane_worktree_is_created_outside_the_host_working_tree(self):
         env = self.env.copy()
         env["CLAIM_AGENT"] = "opus-5-b"
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
         result = run_with_bash_path(
             ["bash", bash_path(Path(__file__).with_name("claim.sh")), "7"],
             stub_directory=self.bin,

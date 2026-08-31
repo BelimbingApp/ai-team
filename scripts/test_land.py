@@ -12,6 +12,7 @@ from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("land.sh")
 LANE = Path(__file__).with_name("_lane_issue.sh")
+DEFAULT_BRANCH = Path(__file__).with_name("_default_branch.sh")
 HYGIENE = Path(__file__).with_name("label_hygiene.sh")
 
 
@@ -23,7 +24,7 @@ class LandMechanismTest(unittest.TestCase):
         base = Path(self.dir.name)
         self.scripts = base / "scripts"
         self.scripts.mkdir()
-        for path in (SCRIPT, LANE):
+        for path in (SCRIPT, LANE, DEFAULT_BRANCH):
             destination = self.scripts / path.name
             destination.write_bytes(path.read_bytes())
             destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
@@ -93,6 +94,7 @@ class LandMechanismTest(unittest.TestCase):
             LAND_TEST_GATE_STATUS=gate_status,
             LAND_TEST_STATE=state,
             LAND_TEST_MERGE_SHA="b" * 40,
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             PATH=f"{self.cwd / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         )
         if attributed:
@@ -100,7 +102,7 @@ class LandMechanismTest(unittest.TestCase):
         else:
             env.pop("LAND_TEST_ATTRIBUTION", None)
         return run_with_bash_path(
-            ["bash", str(self.scripts / "land.sh"), "42", "a" * 40],
+            ["bash", bash_path(self.scripts / "land.sh"), "42", "a" * 40],
             stub_directory=self.cwd / "bin",
             cwd=self.cwd,
             env=env,

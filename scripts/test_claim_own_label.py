@@ -7,7 +7,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("claim.sh")
 ORIENT = Path(__file__).with_name("orient.sh")
@@ -100,6 +100,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
             {
                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+                "AI_TEAM_TEST_ORIGIN_REPO": "example/canonical",
             }
         )
         return env
@@ -113,7 +114,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
         env["CLAIM_TEST_REMOVE_READY_EXIT"] = remove_ready_exit
         env["CLAIM_TEST_BODY_CAPTURE"] = str(self.bin / "captured-pr-body")
         return run_with_bash_path(
-            ["bash", str(SCRIPT), "42"],
+            ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin,
             env=env,
             cwd=self.clone,
@@ -210,7 +211,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
             }
         )
         result = run_with_bash_path(
-            ["bash", str(SCRIPT), "42"],
+            ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin, env=env, cwd=self.clone,
             text=True, capture_output=True, check=False,
         )

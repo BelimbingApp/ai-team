@@ -10,7 +10,7 @@ from pathlib import Path
 
 import test_gate_preflight
 import test_ready
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 
 SCRIPTS = Path(__file__).parent
@@ -83,10 +83,11 @@ class OrientHarness:
             "body": body,
         }]
         env = os.environ.copy()
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
         env["ORIENT_TEST_PRS"] = json.dumps(fixture)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         return run_with_bash_path(
-            ["bash", str(self.scripts / "orient.sh")],
+            ["bash", bash_path(self.scripts / "orient.sh")],
             stub_directory=self.bin,
             cwd=self.root,
             env=env,

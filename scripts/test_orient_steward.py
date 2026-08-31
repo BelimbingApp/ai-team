@@ -81,10 +81,11 @@ class OrientStewardMechanismTest(unittest.TestCase):
         env = os.environ.copy()
         env.update(
             ORIENT_TEST_STEWARDS=stewards,
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
         )
         return run_with_bash_path(
-            ["bash", str(self.scripts / "orient.sh")],
+            ["bash", bash_path(self.scripts / "orient.sh")],
             stub_directory=self.bin,
             cwd=self.base,
             env=env,

@@ -1,5 +1,7 @@
 import os
+import shlex
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Sequence
@@ -66,6 +68,30 @@ def run_with_bash_path(
     """Run a command under Bash with extensionless test shims first on PATH."""
     child_env = env.copy()
     child_env["AI_TEAM_TEST_STUB_PATH"] = bash_path(stub_directory)
+    if child_env.get("AI_TEAM_TEST_ORIGIN_REPO"):
+        # Repository-aware mechanisms intentionally resolve the raw origin URL
+        # instead of asking gh for its ambient choice. Most hermetic tests use
+        # a local bare remote (or no remote) and still need their unrelated
+        # Git operations to reach the real executable. Intercept only the one
+        # read performed by ai_team_origin_repo; everything else is delegated.
+        git_stub = stub_directory / "git"
+        real_git = shutil.which("git")
+        if real_git is None:
+            raise FileNotFoundError("Git is required to exercise the AI-team mechanisms")
+        if not git_stub.exists():
+            git_stub.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${{AI_TEAM_TEST_ORIGIN_REPO:-}}" ] && [ "${{1:-}} ${{2:-}} ${{3:-}}" = "remote get-url origin" ]; then
+  printf 'https://github.com/%s.git\n' "$AI_TEAM_TEST_ORIGIN_REPO"
+  exit 0
+fi
+exec {shlex.quote(bash_path(Path(real_git)))} "$@"
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            git_stub.chmod(git_stub.stat().st_mode | stat.S_IXUSR)
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("encoding", "utf-8")
 
