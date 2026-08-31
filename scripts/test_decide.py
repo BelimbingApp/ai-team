@@ -8,7 +8,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("decide.sh")
 
@@ -93,10 +93,10 @@ class DecideTestCase(unittest.TestCase):
 
     def env(self, extra=None):
         e = os.environ.copy()
-        e["DECIDE_TEST_COMMENTS"] = str(self.comments)
-        e["DECIDE_TEST_COUNTER"] = str(self.counter)
-        e["DECIDE_TEST_ROSTER"] = str(self.roster)
-        e["DECIDE_TEST_LOG"] = str(self.log)
+        e["DECIDE_TEST_COMMENTS"] = bash_path(self.comments)
+        e["DECIDE_TEST_COUNTER"] = bash_path(self.counter)
+        e["DECIDE_TEST_ROSTER"] = bash_path(self.roster)
+        e["DECIDE_TEST_LOG"] = bash_path(self.log)
         e["DECIDE_REPO"] = "example/canonical"
         e.update(extra or {})
         return e
@@ -108,7 +108,7 @@ class DecideTestCase(unittest.TestCase):
         env = self.env(extra_env)
         env["CLAIM_AGENT"] = agent
         return run_with_bash_path(
-            ["bash", str(SCRIPT), *args],
+            ["bash", bash_path(SCRIPT), *args],
             stub_directory=self.bin,
             cwd=self.base,
             env=env,
@@ -626,7 +626,7 @@ class VerdictSeparationTest(DecideTestCase):
         env["CLAIM_AGENT"] = "p"
         board = SCRIPT.with_name("board.sh")
         proc = run_with_bash_path(
-            ["bash", str(board), "post", "10", "--agent", "p", "--type", "verdict", "accept"],
+            ["bash", bash_path(board), "post", "10", "--agent", "p", "--type", "verdict", "accept"],
             stub_directory=self.bin,
             cwd=self.base,
             env=env,

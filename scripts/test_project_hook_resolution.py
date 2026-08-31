@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 import test_orient_steward
-from _test_support import bash_path
+from _test_support import bash_path, run_with_bash_path
 
 
 class ProjectHookResolutionTest(unittest.TestCase):
@@ -25,8 +25,6 @@ class ProjectHookResolutionTest(unittest.TestCase):
             PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
         )
         env.update(env_extra or {})
-        from _test_support import run_with_bash_path
-
         return run_with_bash_path(
             ["bash", bash_path(self.scripts / "orient.sh")],
             stub_directory=self.bin,
@@ -73,7 +71,7 @@ class ProjectHookResolutionTest(unittest.TestCase):
         self.write_hook(elsewhere, "OVERRIDE-HOOK-RAN")
         self.write_hook(self.base / ".ai-team" / "project-orient.sh", "DEFAULT-HOOK-RAN")
 
-        result = self.run_orient({"AI_TEAM_PROJECT_ORIENT": str(elsewhere)})
+        result = self.run_orient({"AI_TEAM_PROJECT_ORIENT": bash_path(elsewhere)})
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("OVERRIDE-HOOK-RAN", result.stdout)

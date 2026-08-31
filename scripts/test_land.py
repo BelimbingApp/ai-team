@@ -232,7 +232,7 @@ class LabelHygieneMechanismTest(unittest.TestCase):
                 PATH=f"{base}{os.pathsep}{env.get('PATH', '')}",
             )
             result = run_with_bash_path(
-                ["bash", str(HYGIENE), "example/canonical"],
+                ["bash", bash_path(HYGIENE), "example/canonical"],
                 stub_directory=base,
                 cwd=base,
                 env=env,
