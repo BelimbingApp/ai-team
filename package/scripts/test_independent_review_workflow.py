@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -68,10 +70,57 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             self.assertIn('echo "present=true" >> "$GITHUB_OUTPUT"', workflow)
             self.assertIn('echo "present=false" >> "$GITHUB_OUTPUT"', workflow)
 
-        self.assertIn('run: package/scripts/review_gate.sh', package)
         self.assertIn('run: docs/ai-team/scripts/review_gate.sh', adopter)
-        self.assertIn("if [ -x package/scripts/review_gate.sh ]; then", package)
         self.assertIn("if [ -x docs/ai-team/scripts/review_gate.sh ]; then", adopter)
+
+        # The package's own root workflow — never the adopter template — must
+        # also fall back to the pre-relocation path (#26 review,
+        # codex-fasttrack/codex-gpt-5-b): trusted main still has a working
+        # grammar at scripts/review_gate.sh until this PR merges, so checking
+        # only the new path made the required check vacuously pass, evaluating
+        # nothing, for every PR in that window including the one that landed
+        # the relocation. An adopter mounting fresh never has an old path to
+        # fall back to, so its template correctly keeps only the single check.
+        self.assertIn('run: ${{ steps.resolve.outputs.path }}', package)
+        self.assertIn("if [ -x package/scripts/review_gate.sh ]; then", package)
+        self.assertIn("elif [ -x scripts/review_gate.sh ]; then", package)
+        self.assertIn('echo "path=package/scripts/review_gate.sh" >> "$GITHUB_OUTPUT"', package)
+        self.assertIn('echo "path=scripts/review_gate.sh" >> "$GITHUB_OUTPUT"', package)
+
+    def test_the_package_workflow_finds_a_legacy_only_grammar_on_the_default_branch(self):
+        # A direct regression for the exact failure mode reported: simulate
+        # "trusted main has the grammar only at the pre-relocation path" by
+        # resolving from a scratch directory that has scripts/review_gate.sh
+        # but not package/scripts/review_gate.sh, and confirm the workflow's
+        # own resolution logic would find it rather than reporting absent.
+        workflow = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
+        resolve_step = workflow.split("Resolve trusted review grammar")[1].split("- name:")[0]
+        script = resolve_step.split("run: |", 1)[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "scripts"
+            legacy.mkdir()
+            (legacy / "review_gate.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            (legacy / "review_gate.sh").chmod(0o755)
+
+            outputs_file = root / "github_output.txt"
+            outputs_file.write_text("", encoding="utf-8")
+
+            env = os.environ.copy()
+            env["GITHUB_OUTPUT"] = str(outputs_file)
+            result = subprocess.run(
+                ["bash", "-c", "set -u\n" + script],
+                cwd=str(root),
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = outputs_file.read_text(encoding="utf-8")
+
+        self.assertIn("present=true", outputs)
+        self.assertIn("path=scripts/review_gate.sh", outputs)
 
 
 if __name__ == "__main__":
