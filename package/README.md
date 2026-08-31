@@ -44,8 +44,28 @@ The mechanism workflow runs the mounted suite on every pull request and on
 pushes to `main`; if the adopter uses another default branch, change that one
 branch in the copied template. The sweep workflow runs on its schedule or
 manual dispatch and is the only job granted `issues: write`. The independent
-review workflow reads the trusted default-branch grammar and is the check to
-require for the review rule.
+review workflow is a `pull_request_target` check: it downloads the mounted
+grammar through the Contents API from the exact trusted commit that supplied
+the workflow, without checking out pull-request code. `Independent review` is
+the check to require for the review rule.
+
+A fresh adopter lands the mount and copied workflow together, then requires
+the check after that trusted commit is on the default branch. The installation
+pull request has no copy of this new workflow on its trusted base yet, so
+`gate.sh` still supplies the independent-review proof for that first merge.
+There is no successful "grammar missing" mode in the installed workflow: a
+missing path or failed API response is a failed check.
+
+An existing adopter must keep a continuous trusted gate during migration. Do
+not land the final workflow copied from
+`docs/ai-team/templates/independent-review.yml` while its canonical
+`docs/ai-team/scripts/review_gate.sh` grammar is absent from the trusted
+workflow commit. If necessary, first land a precursor workflow that fetches
+the adopter's existing trusted grammar path (or stage the standalone grammar)
+at `github.workflow_sha`. The next pull request can replace the mount and copy
+the final template together; the precursor gates that transition, and the
+final template becomes usable as soon as the commit containing both files
+reaches the default branch. Never turn a 404 into a green bootstrap check.
 
 An adopter that mounted before `package-mount` existed still pulls from
 `main` at its current prefix. Point the same command at the new branch
@@ -250,17 +270,24 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 to verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
 
-`package/scripts/review_gate.sh` is the canonical review grammar here, and `gate.sh`
-uses it. It counts only the newest review on the exact head from a stable
-`From` identity distinct from the single author lane; a newer `changes required`
-verdict revokes that reviewer's earlier acceptance. To make the same rule a
-required GitHub check in an adopter, copy
+`package/scripts/review_gate.sh` is the canonical review grammar here, and
+`gate.sh` uses it. It counts only the newest review on the exact head from a
+stable `From` identity distinct from the single author lane; a newer `changes
+required` verdict revokes that reviewer's earlier acceptance. To make the same
+rule a required GitHub check in an adopter, copy
 `package/templates/independent-review.yml` to `.github/workflows/independent-review.yml`
 and require its `Independent review` check. In an adopter mount, those paths
 are `docs/ai-team/scripts/review_gate.sh` and
-`docs/ai-team/templates/independent-review.yml`. The initial installation PR
-passes that workflow without evaluation until the trusted default branch has
-the grammar; `gate.sh` still requires independent acceptance for that merge.
+`docs/ai-team/templates/independent-review.yml`.
+
+Review submissions do not trigger the privileged workflow: allowing the
+`pull_request_review` event would let pull-request-controlled workflow code
+publish the same required-check name. When a review is submitted, edited, or
+dismissed, rerun the latest `pull_request_target` run for the current head (a
+subsequent label transition also creates a fresh run). Its trusted workflow and
+grammar stay pinned while `review_gate.sh` reads the current reviews. After a
+new commit, use the new `synchronize` run, not a run for the old head.
+`land.sh` performs the same live review check immediately before merging.
 
 Holds are labels, never prose. `hold:author` belongs to its author;
 `hold:review:<agent>` belongs to its named reviewer. Set and clear review holds

@@ -19,9 +19,22 @@ The package ships `templates/mechanisms.yml`,
 adopters to copy into their own `.github/workflows/` directory at mount time.
 GitHub owns the triggers and permissions there: the mechanism workflow runs
 the mounted suite unfiltered on pull requests, the schedule-only sweep is the
-only job granted `issues: write`, and the independent-review workflow reads
-the trusted default-branch grammar. The implementation and its tests live
-here, with the board contract they enforce.
+only job granted `issues: write`, and the `pull_request_target`-only
+independent-review workflow fetches the grammar through the Contents API at the
+exact trusted `github.workflow_sha`. It does not check out repository code and
+fails if the canonical grammar path is absent or malformed. The implementation
+and its tests live here, with the board contract they enforce.
+
+Because review events are not trusted triggers, submit or update the review and
+then rerun the latest failed `Independent review` run for the current head; a
+label transition also starts a new target run. For a fresh install, land the
+mount and workflow together before requiring the check. For an existing
+adopter, retain a fail-closed precursor against whichever trusted grammar path
+it already has (or stage a standalone grammar at a custom trusted path) until
+the transition pull request has both installed the mounted grammar at
+`docs/ai-team/scripts/review_gate.sh` and copied
+`docs/ai-team/templates/independent-review.yml` into the adopter's root
+workflow directory. A 404 is never a successful installation signal.
 
 `blocked_by_sweep.py` is a Python entry point, not a shell command. Run it as
 `python3 docs/ai-team/scripts/blocked_by_sweep.py` (the workflow supplies the

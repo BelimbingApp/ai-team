@@ -43,6 +43,80 @@ class ReviewGateTest(unittest.TestCase):
             "submitted_at": at,
         }
 
+    def run_standalone_gate(self, *, fixture=False, repository="example/canonical"):
+        """Run a copy that has neither `_default_branch.sh` nor a checkout."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            standalone = root / "review_gate.sh"
+            shutil.copyfile(SCRIPT, standalone)
+            standalone.chmod(0o755)
+
+            fixture_file = root / "fixture.json"
+            fixture_file.write_text(
+                json.dumps(
+                    {
+                        "reviewed": SHA,
+                        "labels": ["agent:author"],
+                        "reviews": [self.review()],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            gh = root / "gh"
+            gh.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+case "${{1:-}} ${{2:-}}" in
+  "pr view")
+    [[ "$*" == *"--repo example/canonical"* ]] || exit 81
+    printf '%s\n' '{{"headRefOid":"{SHA}","labels":[{{"name":"agent:author"}}]}}'
+    ;;
+  api\\ *)
+    [[ "$*" == *"repos/example/canonical/pulls/7/reviews"* ]] || exit 82
+    printf '%s\n' '[{{"id":1,"state":"COMMENTED","body":"**From:** reviewer\\n\\n**Verdict:** accept","commit_id":"{SHA}","submitted_at":"2026-01-01T00:00:00Z"}}]'
+    ;;
+  *) exit 83 ;;
+esac
+""",
+                encoding="utf-8",
+                newline="\n",
+            )
+            gh.chmod(0o755)
+
+            git = root / "git"
+            git.write_text(
+                "#!/usr/bin/env bash\necho 'standalone gate touched git/origin' >&2\nexit 84\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            git.chmod(0o755)
+
+            env = os.environ.copy()
+            env.pop("AI_TEAM_TEST_ORIGIN_REPO", None)
+            env.pop("REVIEW_GATE_INPUT", None)
+            if fixture:
+                env["REVIEW_GATE_INPUT"] = str(fixture_file)
+                # Fixture evaluation must not validate or consult the live
+                # repository override either.
+                env["REVIEW_GATE_REPOSITORY"] = "not/a/valid/repository"
+                arguments = []
+            else:
+                if repository is None:
+                    env.pop("REVIEW_GATE_REPOSITORY", None)
+                else:
+                    env["REVIEW_GATE_REPOSITORY"] = repository
+                arguments = ["7", SHA]
+
+            return run_with_bash_path(
+                ["bash", bash_path(standalone), *arguments],
+                stub_directory=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
     def run_live_gate_with_argv_guard(
         self,
         review_body_size=50_000,
@@ -50,6 +124,7 @@ class ReviewGateTest(unittest.TestCase):
         *,
         malformed_reviews=False,
         interrupt_on_review_parse=False,
+        repository_override=None,
     ):
         """Exercise the live GitHub path while a jq shim rejects large argv.
 
@@ -67,8 +142,10 @@ class ReviewGateTest(unittest.TestCase):
                 f"""#!/usr/bin/env bash
 set -euo pipefail
 if [ "${{1:-}} ${{2:-}}" = "pr view" ]; then
+  [[ "$*" == *"--repo example/canonical"* ]] || exit 85
   printf '%s\n' '{{"headRefOid":"{SHA}","labels":[{{"name":"agent:author"}}]}}'
 elif [ "${{1:-}}" = "api" ]; then
+  [[ "$*" == *"repos/example/canonical/pulls/7/reviews"* ]] || exit 86
   if [ "${{MALFORMED_REVIEWS:-0}}" = 1 ]; then
     printf '{{'
     exit 0
@@ -109,7 +186,10 @@ exec "$REAL_JQ" "$@"
 
             env = os.environ.copy()
             env.pop("REVIEW_GATE_INPUT", None)
+            env.pop("REVIEW_GATE_REPOSITORY", None)
             env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
+            if repository_override is not None:
+                env["REVIEW_GATE_REPOSITORY"] = repository_override
             env["JQ_ARG_LIMIT"] = str(jq_arg_limit)
             real_jq = shutil.which("jq")
             if real_jq is None:
@@ -178,6 +258,44 @@ printf 'signal-exit=%s\n' "$rc"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+
+    def test_standalone_fixture_mode_never_sources_the_origin_helper(self):
+        result = self.run_standalone_gate(fixture=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+
+    def test_standalone_live_mode_uses_the_explicit_repository(self):
+        result = self.run_standalone_gate()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+
+    def test_standalone_live_mode_requires_a_valid_repository(self):
+        missing = self.run_standalone_gate(repository=None)
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+        self.assertIn("REVIEW_GATE_REPOSITORY is required", missing.stderr)
+
+        invalid = self.run_standalone_gate(repository="example/canonical/extra")
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("must be an owner/repository name", invalid.stderr)
+
+    def test_local_live_mode_still_falls_back_to_the_origin_helper(self):
+        result, leftovers = self.run_live_gate_with_argv_guard(review_body_size=1)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+        self.assertEqual(leftovers, [])
+
+    def test_local_origin_ignores_an_inherited_repository_override(self):
+        result, leftovers = self.run_live_gate_with_argv_guard(
+            review_body_size=1,
+            repository_override="attacker/repository",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
+        self.assertEqual(leftovers, [])
 
     def test_large_live_review_history_never_enters_jq_argv(self):
         result, leftovers = self.run_live_gate_with_argv_guard()
