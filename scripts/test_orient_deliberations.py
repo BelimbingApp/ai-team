@@ -7,7 +7,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 ORIENT = Path(__file__).with_name("orient.sh")
 SCRIPT_NAMES = (
@@ -56,7 +56,8 @@ class OrientDeliberationsTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view")
-                    printf 'example/canonical\\n'
+                    if [[ "$*" == *defaultBranchRef* ]]; then printf 'main\\n'
+                    else printf 'example/canonical\\n'; fi
                     ;;
                   "issue list")
                     if [[ "$*" == *"--label ops:halt"* ]]; then
@@ -117,10 +118,11 @@ class OrientDeliberationsTest(unittest.TestCase):
             ORIENT_TEST_AGENTS=str(agents_file),
             ORIENT_TEST_COMMENTS=str(self.comments),
             ORIENT_TEST_COUNTER=str(self.counter),
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
         )
         return run_with_bash_path(
-            ["bash", str(self.scripts / "orient.sh")],
+            ["bash", bash_path(self.scripts / "orient.sh")],
             stub_directory=self.bin,
             cwd=self.base,
             env=env,
