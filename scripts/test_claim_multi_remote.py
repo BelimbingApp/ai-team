@@ -10,6 +10,7 @@ from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("claim.sh")
 CLAIM_BRANCH = "agent/composer-issue-42"
+PACKAGE_REFRESH_BRANCH = "ai-team/package-refresh"
 
 
 class ClaimMultiRemoteTest(unittest.TestCase):
@@ -166,7 +167,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         if resume_branch:
             env["CLAIM_BRANCH"] = resume_branch
         return run_with_bash_path(
-            ["bash", str(SCRIPT), "42"],
+            ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin,
             cwd=self.clone,
             env=env,
@@ -208,6 +209,23 @@ class ClaimMultiRemoteTest(unittest.TestCase):
             self.gh_log.read_text(encoding="utf-8"),
             r"pr create .*--body-file",
         )
+
+    def test_activation_refresh_remote_lock_refuses_the_claim(self):
+        self.git(["push", "-q", "origin", f"main:refs/heads/{PACKAGE_REFRESH_BRANCH}"])
+        worktree = Path(self.dir.name) / "wt-refresh-lock"
+
+        result = self.run_claim(worktree=worktree)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("activation package refresh is in progress", result.stderr)
+        remote_claim = subprocess.run(
+            ["git", "--git-dir", str(self.bare), "rev-parse", "--verify", f"refs/heads/{CLAIM_BRANCH}"],
+            text=True,
+            capture_output=True,
+            env=self.git_env(),
+        )
+        self.assertNotEqual(remote_claim.returncode, 0)
+        self.assertNotIn("pr create", self.gh_log.read_text(encoding="utf-8"))
 
     def test_claim_body_requires_closes_keyword(self):
         """Stub rejects claim bodies without Closes #N — the mechanism under test."""

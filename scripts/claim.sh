@@ -50,6 +50,25 @@ repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
   exit 2
 }
 
+# Activation refresh owns a repository-wide baseline. A task claim must never
+# start while that fixed remote lock exists, including the short interval
+# before its draft PR is visible on GitHub.
+refuse_package_refresh_lock() {
+  local refresh_ref="refs/heads/ai-team/package-refresh"
+  local refresh_tip
+  refresh_tip=$(git ls-remote --heads origin "$refresh_ref" 2>/dev/null) || {
+    echo "cannot inspect the activation package-refresh lock on origin" >&2
+    return 2
+  }
+  if [[ -n "$refresh_tip" ]]; then
+    echo "refusing to claim: activation package refresh is in progress on origin/ai-team/package-refresh" >&2
+    return 1
+  fi
+  return 0
+}
+
+refuse_package_refresh_lock || exit $?
+
 # Read the issue and every open PR before creating a branch, commit, or remote
 # ref. GitHub does not offer a transaction across those resources; this is the
 # closest useful boundary and every write below is fail-fast.
@@ -222,6 +241,7 @@ fi
 # Labels on live Issues and PRs are the identity registry. Create the lane label
 # only after the claim has passed all availability checks, and before creating a
 # branch or PR that would need it.
+refuse_package_refresh_lock || exit $?
 agent_label="agent:$agent"
 labels=$(gh label list --repo "$repo" --limit 1000 --json name 2>/dev/null) || {
   echo "cannot read labels from $repo" >&2
@@ -352,6 +372,7 @@ ensure_worktree() {
 
 base_branch=$(ai_team_default_branch)
 git fetch -q origin "$base_branch"
+refuse_package_refresh_lock || exit $?
 
 if [[ $resume -eq 0 ]]; then
   restore_root_off_claim
