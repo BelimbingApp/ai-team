@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 
 SCRIPTS = Path(__file__).parent
@@ -85,7 +85,7 @@ class ProjectOrientCountsTest(unittest.TestCase):
         stubs.mkdir(exist_ok=True)
 
         result = run_with_bash_path(
-            [str(self.hook)],
+            [bash_path(self.hook)],
             stub_directory=stubs,
             env=environment,
             cwd=str(self.checkout),

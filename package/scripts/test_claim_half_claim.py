@@ -105,7 +105,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
         env["CLAIM_TEST_PR_LIST"] = pr_list
         env["CLAIM_TEST_PR_READBACK"] = pr_readback
         env["CLAIM_TEST_ISSUE_READBACK"] = issue_readback
-        env["CLAIM_TEST_EDITS"] = str(self.edits)
+        env["CLAIM_TEST_EDITS"] = bash_path(self.edits)
         # Independent switches: the mixed state — one lookup failing while the
         # other succeeds and is empty — is the invariant the split branch
         # exists for, and a single switch could not express it (#18 review).

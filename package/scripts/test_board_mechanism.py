@@ -9,7 +9,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import _bash_executable, _git_tool_executable, run_with_bash_path
+from _test_support import bash_path, _bash_executable, _git_tool_executable, run_with_bash_path
 
 
 SCRIPT = Path(__file__).with_name("board.sh")
@@ -60,11 +60,11 @@ def gh_capture_stub(directory: Path, comments_json: str = "[]") -> Path:
 class BoardMechanismTest(unittest.TestCase):
     def run_board(self, args, directory: Path, env_extra=None, stdin: str = ""):
         env = os.environ.copy()
-        env["BOARD_TEST_CAPTURE"] = str(directory / "captured-body")
-        env["BOARD_TEST_FIXTURE"] = str(directory / "fixture.json")
+        env["BOARD_TEST_CAPTURE"] = bash_path(directory / "captured-body")
+        env["BOARD_TEST_FIXTURE"] = bash_path(directory / "fixture.json")
         env.update(env_extra or {})
         return run_with_bash_path(
-            ["bash", str(SCRIPT), *args],
+            ["bash", bash_path(SCRIPT), *args],
             stub_directory=directory,
             env=env,
             text=True,
@@ -136,10 +136,10 @@ class BoardMechanismTest(unittest.TestCase):
             env.pop("CLAIM_AGENT", None)
             env.pop("BOARD_AGENT", None)
             result = run_with_bash_path(
-                ["bash", str(SCRIPT), "post", "42", "--type", "status", "hello"],
+                ["bash", bash_path(SCRIPT), "post", "42", "--type", "status", "hello"],
                 stub_directory=directory,
-                env={**env, "BOARD_TEST_CAPTURE": str(directory / "captured-body"),
-                     "BOARD_TEST_FIXTURE": str(directory / "fixture.json")},
+                env={**env, "BOARD_TEST_CAPTURE": bash_path(directory / "captured-body"),
+                     "BOARD_TEST_FIXTURE": bash_path(directory / "fixture.json")},
                 text=True,
                 capture_output=True,
                 check=False,
@@ -281,7 +281,7 @@ class BoardMechanismTest(unittest.TestCase):
             (directory / "reviews.json").write_text(reviews, encoding="utf-8")
             result = self.run_board(
                 ["digest", "42"], directory,
-                env_extra={"BOARD_TEST_REVIEWS": str(directory / "reviews.json")},
+                env_extra={"BOARD_TEST_REVIEWS": bash_path(directory / "reviews.json")},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("[review COMMENTED @489f958]", result.stdout)
@@ -353,17 +353,17 @@ class BoardMechanismTest(unittest.TestCase):
                 if os.name != "nt":
                     destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
             env = os.environ.copy()
-            env["BOARD_TEST_CAPTURE"] = str(directory / "captured-body")
-            env["BOARD_TEST_FIXTURE"] = str(directory / "fixture.json")
+            env["BOARD_TEST_CAPTURE"] = bash_path(directory / "captured-body")
+            env["BOARD_TEST_FIXTURE"] = bash_path(directory / "fixture.json")
             env["BOARD_POST_BUDGET"] = "201"
             # PATH is deliberately reduced to the fixture's tools, so neither gh
             # nor git is reachable to name the repository. board.sh no longer
             # assumes one (#445), so state it explicitly — this test is about
             # the iconv fallback, not about repository resolution.
             env["BOARD_REPO"] = "example/canonical"
-            env["PATH"] = str(directory)
+            env["PATH"] = bash_path(directory)
             result = subprocess.run(
-                [bash, str(SCRIPT), "post", "42",
+                [bash, bash_path(SCRIPT), "post", "42",
                  "--agent", "fable", "--type", "finding"],
                 input="\u00e9" * 300,
                 env=env,
