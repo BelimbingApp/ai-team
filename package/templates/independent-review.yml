@@ -1,12 +1,11 @@
 name: independent review
 
-# Copy this file into an adopting repository at .github/workflows/. It checks
-# out the trusted default-branch grammar, not the untrusted pull-request copy.
+# Copy this file into an adopting repository at .github/workflows/. The
+# privileged workflow fetches only the mounted grammar from the exact trusted
+# commit that supplied this workflow; it never checks out pull-request code.
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
@@ -19,28 +18,56 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Check out trusted review grammar
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-
-      # The first PR that installs this workflow also installs its grammar.
-      # The trusted default branch cannot evaluate it until that first PR lands.
-      - name: Resolve trusted review grammar
-        id: resolve
-        run: |
-          if [ -x docs/ai-team/scripts/review_gate.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Verify independent review of this exact head
-        if: steps.resolve.outputs.present == 'true'
+      - name: Materialize trusted review grammar
         env:
           GH_TOKEN: ${{ github.token }}
-        run: docs/ai-team/scripts/review_gate.sh "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
+          REVIEW_GATE_REPOSITORY: ${{ github.repository }}
+          REVIEW_GATE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          REVIEW_GATE_PATH: docs/ai-team/scripts/review_gate.sh
+        run: |
+          set -euo pipefail
+          [[ "$REVIEW_GATE_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+          [[ "$REVIEW_GATE_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REVIEW_GATE_PATH" == "docs/ai-team/scripts/review_gate.sh" ]]
 
-      - name: Grammar not yet on the default branch
-        if: steps.resolve.outputs.present == 'false'
-        run: echo "review grammar is not on the default branch yet; nothing to evaluate" >> "$GITHUB_STEP_SUMMARY"
+          response="$RUNNER_TEMP/review_gate.json"
+          script="$RUNNER_TEMP/review_gate.sh"
+          gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$REVIEW_GATE_REPOSITORY/contents/$REVIEW_GATE_PATH" \
+            -f "ref=$REVIEW_GATE_WORKFLOW_SHA" >"$response"
+
+          jq -e --arg path "$REVIEW_GATE_PATH" '
+            type == "object"
+            and .type == "file"
+            and .path == $path
+            and .encoding == "base64"
+            and ((.content | type) == "string")
+            and ((.content | length) > 0)
+            and ((.size | type) == "number")
+            and (.size > 0 and .size <= 1048576)
+            and ((.sha | type) == "string")
+            and (.sha | test("^[0-9a-f]{40}$"))
+          ' "$response" >/dev/null
+
+          expected_size=$(jq -r '.size' "$response")
+          expected_sha=$(jq -r '.sha' "$response")
+          jq -r '.content' "$response" \
+            | tr -d '\r\n' \
+            | base64 --decode >"$script"
+
+          actual_size=$(wc -c <"$script" | tr -d '[:space:]')
+          [[ "$actual_size" == "$expected_size" ]]
+          [[ "$(git hash-object --no-filters "$script")" == "$expected_sha" ]]
+          [[ "$(head -n 1 "$script")" == '#!/usr/bin/env bash' ]]
+          bash -n "$script"
+          chmod 700 "$script"
+
+      - name: Verify independent review of this exact head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_GATE_REPOSITORY: ${{ github.repository }}
+          REVIEW_GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"

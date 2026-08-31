@@ -7,8 +7,14 @@
 # CI check. Keeping those two callers behind this file prevents a valid review
 # in one place from being invisible in the other.
 #
-#   scripts/review_gate.sh <pr-number> [<reviewed-full-sha>]
-#   REVIEW_GATE_INPUT=<fixture.json> scripts/review_gate.sh
+#   package/scripts/review_gate.sh <pr-number> [<reviewed-full-sha>]
+#   REVIEW_GATE_REPOSITORY=<owner/repo> package/scripts/review_gate.sh <pr> [<sha>]
+#   REVIEW_GATE_INPUT=<fixture.json> package/scripts/review_gate.sh
+#
+# In an adopter those paths start with docs/ai-team/scripts/. A standalone copy
+# downloaded by the trusted workflow has no sibling helper or Git checkout, so
+# live workflow callers pass REVIEW_GATE_REPOSITORY explicitly. Local callers
+# may omit it and fall back to the repository named by origin.
 #
 # Fixture input has `reviewed`, `labels`, and `reviews` fields. `labels` may be
 # an array of label names or GitHub label objects; `reviews` uses the API shape.
@@ -19,10 +25,6 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=docs/ai-team/scripts/_default_branch.sh
-# shellcheck disable=SC1091
-source "$here/_default_branch.sh"
-
 input="${REVIEW_GATE_INPUT:-}"
 cleanup_paths=()
 
@@ -46,11 +48,28 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
-  repo=$(ai_team_origin_repo) || {
-    echo "ERROR: cannot resolve this repository from origin" >&2
+  repo="${REVIEW_GATE_REPOSITORY:-}"
+  if [[ -z "$repo" ]]; then
+    helper="$here/_default_branch.sh"
+    if [[ ! -r "$helper" ]]; then
+      echo "ERROR: REVIEW_GATE_REPOSITORY is required when the origin helper is unavailable" >&2
+      exit 2
+    fi
+    # Fixture mode never reaches this source. The workflow's standalone copy
+    # also bypasses it through REVIEW_GATE_REPOSITORY; only a local package or
+    # mounted invocation needs origin resolution.
+    # shellcheck source=docs/ai-team/scripts/_default_branch.sh
+    # shellcheck disable=SC1091
+    source "$helper"
+    repo=$(ai_team_origin_repo) || {
+      echo "ERROR: cannot resolve this repository from origin" >&2
+      exit 2
+    }
+  fi
+  if [[ ! "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "ERROR: REVIEW_GATE_REPOSITORY must be an owner/repository name" >&2
     exit 2
-  }
-  [[ -n "$repo" ]] || { echo "ERROR: cannot resolve this repository from origin" >&2; exit 2; }
+  fi
   pr_json_file=$(mktemp) || {
     echo "ERROR: cannot create temporary review input" >&2
     exit 2
