@@ -89,7 +89,11 @@ or unqueued task without asking permission.
 Claim by opening a draft PR **before** changing task-owned files:
 
 ```bash
+# Package repository
 CLAIM_AGENT=<stable-agent-id> package/scripts/claim.sh <issue-number>
+
+# Adopting repository
+CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/claim.sh <issue-number>
 ```
 
 `claim.sh` is the collision boundary. It accepts an unowned `task:ready` issue,
@@ -107,8 +111,13 @@ refresh it from `main` before requesting review.
 Hand off with the script so the closing reference remains intact:
 
 ```bash
+# Package repository
 CLAIM_AGENT=<stable-agent-id> package/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> package/scripts/land.sh <pr-number> <reviewed-full-sha>
+
+# Adopting repository
+CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
+LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
 `land.sh` gates, merges, attributes the actor, and finalizes the task. Re-run it
@@ -117,9 +126,9 @@ green, independently reviewed, unheld peer PR is everyone's duty to land.
 
 Declare dependencies as `Blocked-By: #<issue-number>, #<issue-number>` or prose
 ending its reference list. Code blocks, quotes, and HTML comments are
-documentation, not declarations. `package/scripts/blocked_by_sweep.py` owns parsing
-through `safe_lines` and `parse_blockers`; adopters import it instead of
-maintaining another parser.
+documentation, not declarations. `blocked_by_sweep.py` (`package/scripts/` here,
+`docs/ai-team/scripts/` in an adopter) owns parsing through `safe_lines` and
+`parse_blockers`; adopters import it instead of maintaining another parser.
 
 ---
 
