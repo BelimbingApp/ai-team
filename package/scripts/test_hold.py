@@ -151,6 +151,7 @@ class HoldTestCase(unittest.TestCase):
         env["HOLD_TEST_LOOKUP_COUNT"] = bash_path(self.lookup_count)
         env["HOLD_TEST_STATE"] = state
         env["CLAIM_AGENT"] = agent
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
         if removal_actually_fails:
             env["HOLD_TEST_REMOVAL_ACTUALLY_FAILS"] = "1"
         elif "HOLD_TEST_REMOVAL_ACTUALLY_FAILS" in env:
@@ -165,7 +166,7 @@ class HoldTestCase(unittest.TestCase):
             del env["HOLD_TEST_LOOKUP_FAIL_ON_CALL"]
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         return run_with_bash_path(
-            ["bash", str(SCRIPT), *args],
+            ["bash", bash_path(SCRIPT), *args],
             stub_directory=self.bin,
             cwd=self.cwd,
             env=env,

@@ -18,6 +18,11 @@
 
 set -euo pipefail
 
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=docs/ai-team/scripts/_default_branch.sh
+# shellcheck disable=SC1091
+source "$here/_default_branch.sh"
+
 input="${REVIEW_GATE_INPUT:-}"
 cleanup_input=""
 
@@ -29,10 +34,11 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
-  repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
-    echo "ERROR: cannot resolve this repository through gh" >&2
+  repo=$(ai_team_origin_repo) || {
+    echo "ERROR: cannot resolve this repository from origin" >&2
     exit 2
   }
+  [[ -n "$repo" ]] || { echo "ERROR: cannot resolve this repository from origin" >&2; exit 2; }
   pr_json=$(gh pr view "$pr" --repo "$repo" --json headRefOid,labels 2>/dev/null) || {
     echo "ERROR: cannot read PR #$pr from $repo" >&2
     exit 2

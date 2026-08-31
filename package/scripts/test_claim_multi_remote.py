@@ -137,6 +137,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
             GIT_AUTHOR_EMAIL="claim-test@example.com",
             GIT_COMMITTER_NAME="claim-test",
             GIT_COMMITTER_EMAIL="claim-test@example.com",
+            AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
         )
         return env
 
@@ -166,7 +167,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         if resume_branch:
             env["CLAIM_BRANCH"] = resume_branch
         return run_with_bash_path(
-            ["bash", str(SCRIPT), "42"],
+            ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin,
             cwd=self.clone,
             env=env,

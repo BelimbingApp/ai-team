@@ -45,10 +45,11 @@ cd "$root"
   exit 2
 }
 
-repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
-  echo "cannot resolve the repository from gh" >&2
+repo=$(ai_team_origin_repo) || {
+  echo "cannot resolve the repository from origin" >&2
   exit 2
 }
+[[ -n "$repo" ]] || { echo "cannot resolve the repository from origin" >&2; exit 2; }
 
 # Read the issue and every open PR before creating a branch, commit, or remote
 # ref. GitHub does not offer a transaction across those resources; this is the
