@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _test_support import _bash_executable
+
 
 SCRIPT_DIRECTORY = Path(__file__).parent.resolve()
 # `Path(__file__).parents[2]` reached the repository root only by coincidence
@@ -110,7 +112,7 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             env = os.environ.copy()
             env["GITHUB_OUTPUT"] = str(outputs_file)
             result = subprocess.run(
-                ["bash", "-c", "set -u\n" + script],
+                [_bash_executable(), "-c", "set -u\n" + script],
                 cwd=str(root),
                 env=env,
                 text=True,
