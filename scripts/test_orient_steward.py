@@ -53,7 +53,8 @@ class OrientStewardMechanismTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view")
-                    printf 'example/canonical\\n'
+                    if [[ "$*" == *defaultBranchRef* ]]; then printf 'main\\n'
+                    else printf 'example/canonical\\n'; fi
                     ;;
                   "issue list")
                     if [[ "$*" == *"--label ops:halt"* ]]; then
