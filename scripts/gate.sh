@@ -333,16 +333,21 @@ if branch_rules=$(gh api "repos/$REPO/rules/branches/$BASE" --paginate 2>/dev/nu
       native_reviews=""
       if native_reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null); then
         native_approved=$(printf '%s' "$native_reviews" | jq -s \
-          '[.[][]? | select(.state == "APPROVED")] | length' 2>/dev/null)
+          '[.[][]?
+            | select(.user.login? != null)
+            | {login: .user.login, state: (.state // ""), submitted_at: (.submitted_at // ""), id: (.id // 0)}]
+           | group_by(.login)
+           | map(sort_by(.submitted_at, .id) | last | select(.state == "APPROVED"))
+           | length' 2>/dev/null)
         case "$native_approved" in
           ''|*[!0-9]*)
             say_warn "cannot parse native GitHub reviews; a passing AI Team gate does not predict external merge permission"
             ;;
           *)
             if [[ "$native_approved" -lt "$required_native_approvals" ]]; then
-              say_warn "GitHub requires $required_native_approvals native approval(s) on $BASE, but only $native_approved APPROVED review(s) are visible — a separate eligible native reviewer or automation is still required before merge"
+              say_warn "GitHub requires $required_native_approvals native approval(s) on $BASE, but only $native_approved distinct current APPROVED reviewer(s) are visible — a separate eligible native reviewer or automation is still required before merge"
             else
-              say_ok "GitHub native approval preflight: requires $required_native_approvals, $native_approved APPROVED review(s) visible"
+              say_ok "GitHub native approval preflight: requires $required_native_approvals, $native_approved distinct current APPROVED reviewer(s) visible; GitHub still decides eligibility and freshness"
             fi
             ;;
         esac

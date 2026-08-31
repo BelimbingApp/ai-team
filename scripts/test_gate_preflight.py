@@ -205,6 +205,7 @@ class GateMechanismTest(unittest.TestCase):
                 "body": "**From:** reviewer",
                 "commit_id": effective_head,
                 "submitted_at": "2026-01-01T00:00:00Z",
+                "user": {"login": "reviewer"},
             }]
         env["GATE_TEST_REVIEWS"] = json.dumps(reviews)
         env["GATE_TEST_ISSUE_COMMENTS"] = json.dumps(issue_comments if issue_comments is not None else [])
@@ -305,12 +306,13 @@ class GateMechanismTest(unittest.TestCase):
                 "body": "**From:** reviewer\n\n**Verdict:** accept",
                 "commit_id": self.head_sha,
                 "submitted_at": "2026-01-01T00:00:00Z",
+                "user": {"login": "reviewer"},
             }],
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("WARN", result.stdout)
         self.assertIn("GitHub requires 1 native approval(s)", result.stdout)
-        self.assertIn("only 0 APPROVED review(s) are visible", result.stdout)
+        self.assertIn("only 0 distinct current APPROVED reviewer(s) are visible", result.stdout)
         self.assertIn("separate eligible native reviewer or automation", result.stdout)
         self.assertIn("GATE: PASS", result.stdout)
 
@@ -325,10 +327,74 @@ class GateMechanismTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
-            "GitHub native approval preflight: requires 1, 1 APPROVED review(s) visible",
+            "GitHub native approval preflight: requires 1, 1 distinct current APPROVED reviewer(s) visible",
             result.stdout,
         )
-        self.assertNotIn("only 0 APPROVED review(s) are visible", result.stdout)
+        self.assertIn("GitHub still decides eligibility and freshness", result.stdout)
+        self.assertNotIn("only 0 distinct current APPROVED reviewer(s) are visible", result.stdout)
+
+    def test_duplicate_approvals_from_one_reviewer_do_not_satisfy_the_count(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[{
+                "type": "pull_request",
+                "parameters": {"required_approving_review_count": 2},
+            }],
+            reviews=[
+                {
+                    "id": 1,
+                    "state": "APPROVED",
+                    "body": "**From:** reviewer\n\n**Verdict:** accept",
+                    "commit_id": self.head_sha,
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                    "user": {"login": "reviewer"},
+                },
+                {
+                    "id": 2,
+                    "state": "APPROVED",
+                    "body": "**From:** reviewer\n\n**Verdict:** accept",
+                    "commit_id": self.head_sha,
+                    "submitted_at": "2026-01-02T00:00:00Z",
+                    "user": {"login": "reviewer"},
+                },
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("requires 2 native approval(s)", result.stdout)
+        self.assertIn("only 1 distinct current APPROVED reviewer(s) are visible", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_later_nonapproval_supersedes_an_earlier_approval_for_the_preflight(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[{
+                "type": "pull_request",
+                "parameters": {"required_approving_review_count": 1},
+            }],
+            reviews=[
+                {
+                    "id": 1,
+                    "state": "APPROVED",
+                    "body": "**From:** reviewer\n\n**Verdict:** accept",
+                    "commit_id": self.head_sha,
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                    "user": {"login": "reviewer"},
+                },
+                {
+                    "id": 2,
+                    "state": "CHANGES_REQUESTED",
+                    "body": "**From:** reviewer\n\n**Verdict:** changes required",
+                    "commit_id": self.head_sha,
+                    "submitted_at": "2026-01-02T00:00:00Z",
+                    "user": {"login": "reviewer"},
+                },
+            ],
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("requires 1 native approval(s)", result.stdout)
+        self.assertIn("only 0 distinct current APPROVED reviewer(s) are visible", result.stdout)
 
     def test_latest_success_supersedes_a_cancelled_run_with_the_same_name(self):
         result = self.run_gate(
