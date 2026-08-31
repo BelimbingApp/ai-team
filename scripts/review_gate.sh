@@ -13,8 +13,9 @@
 #
 # In an adopter those paths start with docs/ai-team/scripts/. A standalone copy
 # downloaded by the trusted workflow has no sibling helper or Git checkout, so
-# live workflow callers pass REVIEW_GATE_REPOSITORY explicitly. Local callers
-# may omit it and fall back to the repository named by origin.
+# live workflow callers pass REVIEW_GATE_REPOSITORY explicitly. A packaged or
+# mounted copy has the helper and always treats origin as authoritative; an
+# inherited override cannot split review reads from gate.sh's repository.
 #
 # Fixture input has `reviewed`, `labels`, and `reviews` fields. `labels` may be
 # an array of label names or GitHub label objects; `reviews` uses the API shape.
@@ -48,16 +49,11 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
-  repo="${REVIEW_GATE_REPOSITORY:-}"
-  if [[ -z "$repo" ]]; then
-    helper="$here/_default_branch.sh"
-    if [[ ! -r "$helper" ]]; then
-      echo "ERROR: REVIEW_GATE_REPOSITORY is required when the origin helper is unavailable" >&2
-      exit 2
-    fi
-    # Fixture mode never reaches this source. The workflow's standalone copy
-    # also bypasses it through REVIEW_GATE_REPOSITORY; only a local package or
-    # mounted invocation needs origin resolution.
+  helper="$here/_default_branch.sh"
+  if [[ -r "$helper" ]]; then
+    # Fixture mode never reaches this source. A local package or mounted gate
+    # must share gate.sh's origin repository even if the caller inherited a
+    # REVIEW_GATE_REPOSITORY intended for some other command.
     # shellcheck source=docs/ai-team/scripts/_default_branch.sh
     # shellcheck disable=SC1091
     source "$helper"
@@ -65,6 +61,15 @@ if [[ -z "$input" ]]; then
       echo "ERROR: cannot resolve this repository from origin" >&2
       exit 2
     }
+  else
+    # The trusted workflow downloads only this script, not its sibling helper.
+    # That standalone shape has no origin and must receive the repository from
+    # the trusted workflow context.
+    repo="${REVIEW_GATE_REPOSITORY:-}"
+    if [[ -z "$repo" ]]; then
+      echo "ERROR: REVIEW_GATE_REPOSITORY is required when the origin helper is unavailable" >&2
+      exit 2
+    fi
   fi
   if [[ ! "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "ERROR: REVIEW_GATE_REPOSITORY must be an owner/repository name" >&2
