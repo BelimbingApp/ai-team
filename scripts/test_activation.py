@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -11,7 +12,9 @@ from _test_support import bash_path, run_with_bash_path
 
 
 TEMPLATE = Path(__file__).parents[1] / "templates" / "activate.sh"
+CLAIM_SCRIPT = Path(__file__).parent / "claim.sh"
 UPDATE_BRANCH = "ai-team/package-refresh"
+MUTEX_BRANCH = "ai-team/activation-mutex"
 
 
 class ActivationRefreshTest(unittest.TestCase):
@@ -164,38 +167,109 @@ class ActivationRefreshTest(unittest.TestCase):
                 state="$ACTIVATION_TEST_GH_STATE"
                 case "$1 $2" in
                   "repo view")
-                    printf 'example/adopter\\tmain\\n'
+                    if printf '%s\\n' "$*" | grep -q -- 'defaultBranchRef'; then
+                      printf 'example/adopter\\tmain\\n'
+                    else
+                      printf 'example/adopter\\n'
+                    fi
                     ;;
                   "issue list")
                     if [ -f "$state/active" ]; then
                       printf '#77\\n'
                     fi
+                    if [ -f "$state/blocked-only" ] && printf '%s\\n' "$*" | grep -q -- 'task:blocked'; then
+                      printf '#66\\n'
+                    fi
+                    ;;
+                  "issue view")
+                    if printf '%s\\n' "$*" | grep -q -- '--jq'; then
+                      printf 'agent:race-claimant,task:active\\n'
+                    else
+                      printf '{"state":"OPEN","labels":[{"name":"task:ready"}],"title":"Race claim","url":"https://example.test/issues/77"}\\n'
+                    fi
+                    ;;
+                  "issue edit")
+                    : > "$state/claim-issue-visible"
                     ;;
                   "pr list")
                     has_head=false
+                    merged=false
                     for argument in "$@"; do
                       if [ "$argument" = "--head" ]; then
                         has_head=true
                       fi
+                      if [ "$argument" = "merged" ]; then
+                        merged=true
+                      fi
                     done
-                    if [ -n "${ACTIVATION_TEST_RACE_BARRIER:-}" ] && [ "$has_head" = true ]; then
-                      : > "$ACTIVATION_TEST_RACE_BARRIER/$ACTIVATION_TEST_RACE_RUNNER"
-                      while [ "$(find "$ACTIVATION_TEST_RACE_BARRIER" -type f | wc -l)" -lt 2 ]; do
-                        sleep 1
-                      done
-                    fi
-                    if [ "$has_head" = false ]; then
+                    if printf '%s\\n' "$*" | grep -q -- 'number,title,body,headRefName,labels,url'; then
+                      printf '[]\\n'
+                    elif [ "$merged" = true ]; then
+                      if [ -f "$state/pr-merged" ]; then
+                        if [ -f "$state/older-merged" ]; then
+                          if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
+                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\tagent:package-bootstrap\\ttask:review\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `0000000000000000000000000000000000000000`\\n' "$ACTIVATION_TEST_SOURCE"
+                          else
+                            printf '49\\t0000000000000000000000000000000000000000\\t0000000000000000000000000000000000000000\\tagent:package-bootstrap\\ttrue\\ttrue\\n'
+                          fi
+                        fi
+                        number=$(cat "$state/pr-number")
+                        head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse --verify refs/heads/ai-team/package-refresh 2>/dev/null || cat "$state/pr-head")
+                        merge=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/main)
+                        revision=$(cat "$state/pr-package-sha")
+                        if [ -f "$state/valid-older-merged" ] && printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
+                          older_tasks=task:review
+                          [ ! -f "$state/pr-terminal-48" ] || older_tasks=task:done
+                          printf '48\\t%s\\t%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
+                            "$head" "$merge" "$older_tasks" "$ACTIVATION_TEST_SOURCE" "$revision"
+                        fi
+                        if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
+                          tasks=task:review
+                          [ ! -f "$state/pr-done-plus-review" ] || tasks=task:done,task:review
+                          [ ! -f "$state/pr-terminal-51" ] || tasks=task:done
+                          printf '%s\\t%s\\t%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
+                            "$number" "$head" "$merge" "$tasks" "$ACTIVATION_TEST_SOURCE" "$revision"
+                        else
+                          printf '%s\\t%s\\t%s\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$head" "$merge"
+                        fi
+                      fi
+                    elif [ "$has_head" = true ] && printf '%s\\n' "$*" | grep -q -- '--jq length'; then
+                      if [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
+                        printf '1\\n'
+                      else
+                        printf '0\\n'
+                      fi
+                    elif [ "$has_head" = false ]; then
                       if [ -f "$state/active-pr" ]; then
                         printf 'PR #88\\n'
                       fi
-                    elif [ -f "$state/pr-number" ]; then
+                      if [ -f "$state/claim-pr-visible" ]; then
+                        printf 'PR #52\\n'
+                      fi
+                    elif [ -f "$state/pr-number" ] && [ ! -f "$state/pr-merged" ] && [ ! -f "$state/pr-closed" ]; then
                       number=$(cat "$state/pr-number")
                       draft=$(cat "$state/pr-draft")
                       head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
-                      printf '%s\\t%s\\t%s\\thttps://example.test/pull/%s\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$number" "$draft" "$head" "$number"
+                      tasks=task:active
+                      [ ! -f "$state/verified-edit" ] || tasks=task:review
+                      [ ! -f "$state/contradictory-ready" ] || tasks=task:active,task:review
+                      printf '%s\\t%s\\t%s\\thttps://example.test/pull/%s\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\n' "$number" "$draft" "$head" "$number" "$tasks"
                     fi
                     ;;
                   "pr create")
+                    claim_head=false
+                    previous=
+                    for argument in "$@"; do
+                      if [ "$previous" = "--head" ] && [ "$argument" != "ai-team/package-refresh" ]; then
+                        claim_head=true
+                      fi
+                      previous=$argument
+                    done
+                    if [ "$claim_head" = true ]; then
+                      : > "$state/claim-pr-visible"
+                      printf 'https://example.test/pull/52\\n'
+                      exit 0
+                    fi
                     set -o noclobber
                     if ! printf '51\\n' > "$state/pr-number" 2>/dev/null; then
                       echo 'duplicate refresh PR' >&2
@@ -217,17 +291,40 @@ class ActivationRefreshTest(unittest.TestCase):
                     printf 'https://example.test/pull/51\\n'
                     ;;
                   "pr view")
+                    if [ "${3:-}" = "52" ]; then
+                      printf 'agent:race-claimant,task:active\\n'
+                      exit 0
+                    fi
                     if [ ! -f "$state/pr-number" ]; then
                       exit 1
                     fi
-                    if printf '%s\\n' "$*" | grep -q -- 'headRefOid'; then
+                    if printf '%s\\n' "$*" | grep -q -- '--json labels'; then
+                      if [ -f "$state/pr-terminal-${3:-}" ]; then
+                        printf 'task:done\\n'
+                      else
+                        printf 'task:review\\n'
+                      fi
+                    elif printf '%s\\n' "$*" | grep -q -- 'headRefOid'; then
                       head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
-                      printf '%s\\tfalse\\tagent:package-bootstrap\\tfalse\\ttrue\\n' "$head"
+                      if [ -f "$state/bad-final-labels" ] || [ -f "$state/contradictory-ready" ]; then
+                        printf '%s\\tfalse\\tagent:package-bootstrap\\ttrue\\ttrue\\n' "$head"
+                      else
+                        printf '%s\\tfalse\\tagent:package-bootstrap\\tfalse\\ttrue\\n' "$head"
+                      fi
                     else
                       printf '51\\thttps://example.test/pull/51\\n'
                     fi
                     ;;
                   "pr edit")
+                    if printf '%s\\n' "$*" | grep -q -- '--add-label task:done'; then
+                      : > "$state/pr-terminal-${3:-unknown}"
+                      if [ "${3:-}" = "51" ]; then
+                        : > "$state/pr-terminal"
+                      fi
+                    fi
+                    if printf '%s\\n' "$*" | grep -q -- '--add-label task:review'; then
+                      : > "$state/verified-edit"
+                    fi
                     previous=
                     for argument in "$@"; do
                       if [ "$previous" = "--body-file" ]; then
@@ -241,11 +338,23 @@ class ActivationRefreshTest(unittest.TestCase):
                       printf 'true\\n' > "$state/pr-draft"
                       rm -f "$state/ready"
                     else
+                      if [ -f "$state/fail-next-ready" ]; then
+                        rm -f "$state/fail-next-ready"
+                        echo 'fixture ready failure' >&2
+                        exit 1
+                      fi
                       printf 'false\\n' > "$state/pr-draft"
                       : > "$state/ready"
+                      head=$(git --git-dir="$ACTIVATION_TEST_ORIGIN" rev-parse refs/heads/ai-team/package-refresh)
+                      printf '%s\\n' "$head" > "$state/pr-head"
+                      printf '%s\\n' "$ACTIVATION_TEST_PACKAGE_SHA" > "$state/pr-package-sha"
+                      git --git-dir="$ACTIVATION_TEST_ORIGIN" update-ref refs/pull/51/head "$head"
                     fi
                     ;;
                   "label create")
+                    ;;
+                  "label list")
+                    printf '[{"name":"agent:race-claimant"}]\\n'
                     ;;
                   *)
                     echo "unexpected gh call: $*" >&2
@@ -258,6 +367,50 @@ class ActivationRefreshTest(unittest.TestCase):
         )
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
 
+    def install_git_race_shim(self) -> None:
+        git = self.bin / "git"
+        git.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -eu
+                mutex_create=false
+                if [ "${1:-}" = "push" ]; then
+                  for argument in "$@"; do
+                    case "$argument" in
+                      [0-9a-fA-F]*:refs/heads/ai-team/activation-mutex)
+                        mutex_create=true
+                        ;;
+                    esac
+                  done
+                fi
+                if [ "$mutex_create" = true ] && [ -n "${ACTIVATION_TEST_RACE_BARRIER:-}" ]; then
+                  : > "$ACTIVATION_TEST_RACE_BARRIER/$ACTIVATION_TEST_RACE_RUNNER"
+                  attempts=0
+                  while [ "$(find "$ACTIVATION_TEST_RACE_BARRIER" -type f | wc -l)" -lt 2 ]; do
+                    attempts=$((attempts + 1))
+                    [ "$attempts" -lt 600 ] || exit 97
+                    sleep 0.1
+                  done
+                fi
+                if [ "$mutex_create" = true ]; then
+                  if "$ACTIVATION_TEST_REAL_GIT" "$@"; then
+                    status=0
+                  else
+                    status=$?
+                  fi
+                  if [ "$status" -eq 0 ] && [ -n "${ACTIVATION_TEST_MUTEX_WINNER_DELAY:-}" ]; then
+                    sleep "$ACTIVATION_TEST_MUTEX_WINNER_DELAY"
+                  fi
+                  exit "$status"
+                fi
+                exec "$ACTIVATION_TEST_REAL_GIT" "$@"
+                """
+            ),
+            encoding="utf-8",
+        )
+        git.chmod(git.stat().st_mode | stat.S_IXUSR)
+
     def run_activation(
         self,
         *,
@@ -265,6 +418,11 @@ class ActivationRefreshTest(unittest.TestCase):
         race_barrier: Path | None = None,
         race_runner: str | None = None,
         fixed_commit_time: bool = False,
+        exclusive_first_refresh: bool = False,
+        recover_mutex_sha: str | None = None,
+        recover_refresh_sha: str | None = None,
+        mutex_wait_seconds: int | None = None,
+        mutex_winner_delay: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         checkout = checkout or self.checkout
         environment = self.git_env()
@@ -272,9 +430,12 @@ class ActivationRefreshTest(unittest.TestCase):
             ACTIVATION_TEST_GH_LOG=bash_path(self.gh_log),
             ACTIVATION_TEST_GH_STATE=bash_path(self.state),
             ACTIVATION_TEST_ORIGIN=bash_path(self.origin),
+            ACTIVATION_TEST_PACKAGE_SHA=self.package_sha,
+            ACTIVATION_TEST_SOURCE=bash_path(self.source_bare),
             ACTIVATION_TEST_SUITE_MARKER=str(self.suite_marker),
             ACTIVATION_TEST_ORIENT_MARKER=str(self.orient_marker),
             TMPDIR=bash_path(self.activation_tmp),
+            ACTIVATION_TEST_REAL_GIT=bash_path(Path(shutil.which("git") or "git")),
         )
         if race_barrier is not None:
             environment["ACTIVATION_TEST_RACE_BARRIER"] = bash_path(race_barrier)
@@ -282,8 +443,50 @@ class ActivationRefreshTest(unittest.TestCase):
         if fixed_commit_time:
             environment["GIT_AUTHOR_DATE"] = "2001-02-03T04:05:06+0000"
             environment["GIT_COMMITTER_DATE"] = "2001-02-03T04:05:06+0000"
+        if exclusive_first_refresh:
+            environment["AI_TEAM_EXCLUSIVE_FIRST_REFRESH"] = "1"
+        if recover_mutex_sha is not None:
+            environment["AI_TEAM_RECOVER_MUTEX_SHA"] = recover_mutex_sha
+        if recover_refresh_sha is not None:
+            environment["AI_TEAM_RECOVER_REFRESH_SHA"] = recover_refresh_sha
+        if mutex_wait_seconds is not None:
+            environment["AI_TEAM_MUTEX_WAIT_SECONDS"] = str(mutex_wait_seconds)
+        if mutex_winner_delay is not None:
+            environment["ACTIVATION_TEST_MUTEX_WINNER_DELAY"] = str(mutex_winner_delay)
         return run_with_bash_path(
             ["bash", str(checkout / ".ai-team" / "activate.sh")],
+            stub_directory=self.bin,
+            cwd=checkout,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+
+    def run_claim(
+        self,
+        *,
+        checkout: Path | None = None,
+        race_barrier: Path | None = None,
+        race_runner: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        checkout = checkout or self.checkout
+        environment = self.git_env()
+        environment.update(
+            ACTIVATION_TEST_GH_LOG=bash_path(self.gh_log),
+            ACTIVATION_TEST_GH_STATE=bash_path(self.state),
+            ACTIVATION_TEST_ORIGIN=bash_path(self.origin),
+            CLAIM_AGENT="race-claimant",
+            CLAIM_WORKTREE=bash_path(self.root / "claim-lane"),
+            ACTIVATION_TEST_REAL_GIT=bash_path(Path(shutil.which("git") or "git")),
+            GIT_AUTHOR_DATE="2001-02-03T04:05:06+0000",
+            GIT_COMMITTER_DATE="2001-02-03T04:05:06+0000",
+        )
+        if race_barrier is not None:
+            environment["ACTIVATION_TEST_RACE_BARRIER"] = bash_path(race_barrier)
+            environment["ACTIVATION_TEST_RACE_RUNNER"] = race_runner or "claim"
+        return run_with_bash_path(
+            ["bash", bash_path(CLAIM_SCRIPT), "77"],
             stub_directory=self.bin,
             cwd=checkout,
             env=environment,
@@ -300,6 +503,61 @@ class ActivationRefreshTest(unittest.TestCase):
             capture_output=True,
         )
         return result.stdout.strip() if result.returncode == 0 else None
+
+    def remote_mutex_sha(self) -> str | None:
+        result = subprocess.run(
+            ["git", "--git-dir", str(self.origin), "rev-parse", "--verify", f"refs/heads/{MUTEX_BRANCH}"],
+            env=self.git_env(),
+            text=True,
+            capture_output=True,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def create_stale_generated_mutex(self) -> str:
+        parent = self.git_output("rev-parse", "HEAD")
+        tree = self.git_output("rev-parse", "HEAD^{tree}")
+        message = (
+            "AI Team activation/claim mutex\n\n"
+            "AI-Team-Activation-Mutex: true\n"
+            f"AI-Team-Activation-Mutex-Base: {parent}\n"
+            f"AI-Team-Activation-Mutex-Owner: package-refresh:{self.package_sha}\n"
+            "AI-Team-Activation-Mutex-Nonce: 0123456789abcdef0123456789abcdef\n"
+        )
+        created = subprocess.run(
+            ["git", "commit-tree", tree, "-p", parent],
+            cwd=self.checkout,
+            env=self.git_env(),
+            input=message,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.git("push", "-q", "origin", f"{created}:refs/heads/{MUTEX_BRANCH}")
+        return created
+
+    def create_orphan_refresh_claim(self) -> str:
+        base = self.git_output("rev-parse", "HEAD")
+        tree = self.git_output("rev-parse", "HEAD^{tree}")
+        message = (
+            "AI Team package refresh claim\n\n"
+            "AI-Team-Activation-Managed: true\n"
+            f"AI-Team-Activation-Base: {base}\n"
+            f"AI-Team-Package-Source: {bash_path(self.source_bare)}\n"
+            "AI-Team-Package-Ref: package-mount\n"
+            f"AI-Team-Package-Revision: {self.package_sha}\n"
+            "AI-Team-Activation-Claim: 0123456789abcdef0123456789abcdef\n"
+        )
+        created = subprocess.run(
+            ["git", "commit-tree", tree, "-p", base],
+            cwd=self.checkout,
+            env=self.git_env(),
+            input=message,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.git("push", "-q", "origin", f"{created}:refs/heads/{UPDATE_BRANCH}")
+        return created
 
     def origin_output(self, *arguments: str) -> str:
         return subprocess.run(
@@ -323,6 +581,7 @@ class ActivationRefreshTest(unittest.TestCase):
 
     def test_concurrent_initial_refresh_is_idempotent_and_onboards_only_after_merge(self):
         original_head = self.git_output("rev-parse", "HEAD")
+        self.install_git_race_shim()
         second_checkout = self.root / "checkout-two"
         self.git("clone", "-q", str(self.origin), str(second_checkout), cwd=self.root)
         second_head = self.git_output("rev-parse", "HEAD", cwd=second_checkout)
@@ -337,6 +596,8 @@ class ActivationRefreshTest(unittest.TestCase):
                     race_barrier=race_barrier,
                     race_runner=f"runner-{index}",
                     fixed_commit_time=True,
+                    mutex_wait_seconds=120,
+                    exclusive_first_refresh=True,
                 )
                 for index, checkout in enumerate((self.checkout, second_checkout), start=1)
             ]
@@ -346,11 +607,9 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertEqual(raced.returncode, 3, raced.stdout + raced.stderr)
         combined_error = first.stderr + raced.stderr
         self.assertIn(self.package_sha, combined_error)
-        self.assertRegex(
-            combined_error,
-            r"another updater changed|is claimed for package revision",
-        )
-        self.assertIn("onboarding is paused", first.stderr)
+        self.assertIn("the short mutex cleared", combined_error)
+        self.assertIn("PR #51", combined_error)
+        self.assertIn("onboarding is paused", combined_error)
         self.assertTrue(self.suite_marker.is_file())
         self.assertEqual(
             self.suite_marker.read_text(encoding="utf-8").splitlines(),
@@ -377,8 +636,9 @@ class ActivationRefreshTest(unittest.TestCase):
             (self.state / "pr-create-success").read_text(encoding="utf-8").splitlines(),
             ["created"],
         )
+        self.assertIsNone(self.remote_mutex_sha())
 
-        second = self.run_activation()
+        second = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
         self.assertIn("PR #51 is ready", second.stderr)
@@ -392,12 +652,13 @@ class ActivationRefreshTest(unittest.TestCase):
             check=True,
         )
         self.git("pull", "-q", "--ff-only", "origin", "main")
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
         mounted_orient = self.checkout / "docs" / "ai-team" / "scripts" / "orient.sh"
         mounted_orient.write_text(
             "#!/usr/bin/env bash\nprintf 'unverified local orient ran\\n'\n",
             encoding="utf-8",
         )
-        dirty_mount = self.run_activation()
+        dirty_mount = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(dirty_mount.returncode, 1, dirty_mount.stdout + dirty_mount.stderr)
         self.assertIn("mounted package has unstaged changes", dirty_mount.stderr)
@@ -407,26 +668,270 @@ class ActivationRefreshTest(unittest.TestCase):
             ["one updater"],
         )
         self.git("restore", "docs/ai-team/scripts/orient.sh")
-        after_merge = self.run_activation()
+
+        mounted_orient.write_text("#!/usr/bin/env bash\nprintf 'staged local orient ran\\n'\n", encoding="utf-8")
+        self.git("add", "docs/ai-team/scripts/orient.sh")
+        staged_mount = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(staged_mount.returncode, 1, staged_mount.stdout + staged_mount.stderr)
+        self.assertIn("mounted package has staged changes", staged_mount.stderr)
+        self.git("restore", "--staged", "docs/ai-team/scripts/orient.sh")
+        self.git("restore", "docs/ai-team/scripts/orient.sh")
+
+        untracked = self.checkout / "docs" / "ai-team" / "local-untracked"
+        untracked.write_text("do not execute through this tree\n", encoding="utf-8")
+        untracked_mount = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            untracked_mount.returncode, 1, untracked_mount.stdout + untracked_mount.stderr
+        )
+        self.assertIn("mounted package has untracked files", untracked_mount.stderr)
+        untracked.unlink()
+
+        (self.state / "older-merged").write_text("yes\n", encoding="utf-8")
+        after_merge = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(after_merge.returncode, 0, after_merge.stdout + after_merge.stderr)
         self.assertIn("package is current", after_merge.stdout)
+        self.assertIn("finalized merged package refresh PR #51", after_merge.stdout)
         self.assertTrue(self.orient_marker.is_file())
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertTrue((self.state / "pr-terminal").is_file())
+        self.assertNotIn("pr edit 49 --repo", self.gh_log.read_text(encoding="utf-8"))
+        temp_pr_ref = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/ai-team/activation-pr-head"],
+            cwd=self.checkout,
+            env=self.git_env(),
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(temp_pr_ref.returncode, 0)
         self.assertEqual(
             self.suite_marker.read_text(encoding="utf-8").splitlines(),
             ["one updater", "one updater"],
         )
 
+    def test_real_claim_and_activation_share_one_atomic_mutex(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        self.install_git_race_shim()
+        race_barrier = self.root / "claim-activation-barrier"
+        race_barrier.mkdir()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            activation_future = executor.submit(
+                self.run_activation,
+                race_barrier=race_barrier,
+                race_runner="activation",
+                fixed_commit_time=True,
+                exclusive_first_refresh=True,
+            )
+            claim_future = executor.submit(
+                self.run_claim,
+                race_barrier=race_barrier,
+                race_runner="claim",
+            )
+            activation = activation_future.result()
+            claim = claim_future.result()
+
+        combined = activation.stdout + activation.stderr + claim.stdout + claim.stderr
+        self.assertIn(
+            (activation.returncode, claim.returncode),
+            ((3, 1), (1, 0)),
+            combined,
+        )
+        refresh_won = self.remote_update_sha() is not None
+        claim_branch = self.origin_output(
+            "show-ref", "--verify", "--hash", "refs/heads/agent/race-claimant-issue-77"
+        ) if claim.returncode == 0 else ""
+        self.assertEqual(bool(refresh_won), not bool(claim_branch), combined)
+        self.assertEqual((self.state / "pr-number").exists(), refresh_won)
+        self.assertEqual((self.state / "claim-pr-visible").exists(), not refresh_won)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertEqual(self.git_output("rev-parse", "HEAD"), original_head)
+        self.assertEqual(self.git_output("status", "--porcelain"), "")
+        self.assertEqual(sorted(path.name for path in race_barrier.iterdir()), ["activation", "claim"])
+
+    def test_slow_concurrent_activation_reports_the_exact_in_progress_revision(self):
+        self.install_git_race_shim()
+        second_checkout = self.root / "checkout-slow-two"
+        self.git("clone", "-q", str(self.origin), str(second_checkout), cwd=self.root)
+        race_barrier = self.root / "slow-race-barrier"
+        race_barrier.mkdir()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    self.run_activation,
+                    checkout=checkout,
+                    race_barrier=race_barrier,
+                    race_runner=f"slow-{index}",
+                    mutex_wait_seconds=1,
+                    mutex_winner_delay=3,
+                    exclusive_first_refresh=True,
+                )
+                for index, checkout in enumerate((self.checkout, second_checkout), start=1)
+            ]
+            results = [future.result() for future in futures]
+
+        self.assertEqual([result.returncode for result in results], [3, 3])
+        combined = "".join(result.stdout + result.stderr for result in results)
+        self.assertIn(f"package revision {self.package_sha} is in progress", combined)
+        self.assertIn("under exact activation mutex", combined)
+        self.assertIn("PR #51", combined)
+        self.assertEqual(
+            self.suite_marker.read_text(encoding="utf-8").splitlines(),
+            ["one updater"],
+        )
+        self.assertIsNone(self.remote_mutex_sha())
+
+    def test_auto_deleted_merge_is_terminalized_before_a_newer_refresh(self):
+        original = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(original.returncode, 3, original.stdout + original.stderr)
+        refresh_sha = self.remote_update_sha()
+        self.assertIsNotNone(refresh_sha)
+        subprocess.run(
+            ["git", "--git-dir", str(self.origin), "update-ref", "refs/heads/main", refresh_sha],
+            env=self.git_env(),
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "update-ref",
+                "-d",
+                f"refs/heads/{UPDATE_BRANCH}",
+            ],
+            env=self.git_env(),
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "update-ref",
+                "refs/pull/48/head",
+                refresh_sha,
+            ],
+            env=self.git_env(),
+            check=True,
+        )
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+
+        # The package source can advance again before any activation observes
+        # GitHub's automatic branch deletion. R1 still has to reach task:done
+        # from its own immutable head/merge metadata before R2 is considered.
+        (self.source / "VERSION").write_text("second package revision\n", encoding="utf-8")
+        self.git("add", "VERSION", cwd=self.source)
+        self.git("commit", "-qm", "publish another package revision", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+        (self.state / "older-merged").write_text("yes\n", encoding="utf-8")
+        (self.state / "valid-older-merged").write_text("yes\n", encoding="utf-8")
+        (self.state / "pr-done-plus-review").write_text("yes\n", encoding="utf-8")
+        (self.state / "active").write_text("yes\n", encoding="utf-8")
+
+        finalized = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(finalized.returncode, 1, finalized.stdout + finalized.stderr)
+        self.assertIn(
+            "terminalized auto-deleted merged package refresh PR #51",
+            finalized.stdout,
+            finalized.stdout + finalized.stderr,
+        )
+        self.assertIn(
+            "terminalized auto-deleted merged package refresh PR #48",
+            finalized.stdout,
+            finalized.stdout + finalized.stderr,
+        )
+        self.assertIn("refuses active task lanes: #77", finalized.stderr)
+        self.assertTrue((self.state / "pr-terminal").is_file())
+        self.assertTrue((self.state / "pr-terminal-48").is_file())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertFalse(self.orient_marker.exists())
+        self.assertNotIn("pr edit 49 --repo", self.gh_log.read_text(encoding="utf-8"))
+
     def test_dirty_checkout_refuses_without_creating_remote_state(self):
         original_head = self.git_output("rev-parse", "HEAD")
+
+        unacknowledged = self.run_activation(exclusive_first_refresh=False)
+
+        self.assertEqual(
+            unacknowledged.returncode,
+            1,
+            unacknowledged.stdout + unacknowledged.stderr,
+        )
+        self.assertIn("first activation/migration is not mutex-compatible", unacknowledged.stderr)
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{UPDATE_BRANCH}")
         unknown_branch = self.remote_update_sha()
 
-        unknown = self.run_activation()
+        unknown = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(unknown.returncode, 1, unknown.stdout + unknown.stderr)
-        self.assertIn("not an activation-owned branch", unknown.stderr)
+        self.assertIn("not a completed activation-owned branch", unknown.stderr)
         self.assertEqual(self.remote_update_sha(), unknown_branch)
+        self.assert_caller_unchanged(original_head)
+        self.git("push", "-q", "origin", "--delete", UPDATE_BRANCH)
+
+        self.git("switch", "-q", "-c", "forged-refresh")
+        self.git(
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "forged activation metadata",
+            "-m",
+            "AI-Team-Activation-Managed: true\n"
+            "AI-Team-Activation-Base: fixture\n"
+            f"AI-Team-Package-Source: {bash_path(self.source_bare)}\n"
+            "AI-Team-Package-Ref: package-mount\n"
+            f"AI-Team-Package-Revision: {self.package_sha}",
+        )
+        self.git("push", "-q", "origin", f"HEAD:refs/heads/{UPDATE_BRANCH}")
+        forged_sha = self.remote_update_sha()
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "forged-refresh")
+
+        forged = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(forged.returncode, 1, forged.stdout + forged.stderr)
+        self.assertIn("invalid activation ancestry", forged.stderr)
+        self.assertEqual(self.remote_update_sha(), forged_sha)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+        self.git("push", "-q", "origin", "--delete", UPDATE_BRANCH)
+
+        self.git("switch", "-q", "-c", "forged-adopter-change")
+        (self.checkout / "README.md").write_text("adopter work on generated branch\n", encoding="utf-8")
+        self.git("add", "README.md")
+        self.git(
+            "commit",
+            "-qm",
+            "generated-looking commit with adopter work",
+            "-m",
+            "AI-Team-Activation-Managed: true\n"
+            f"AI-Team-Activation-Base: {original_head}\n"
+            f"AI-Team-Package-Source: {bash_path(self.source_bare)}\n"
+            "AI-Team-Package-Ref: package-mount\n"
+            f"AI-Team-Package-Revision: {self.package_sha}",
+        )
+        self.git("push", "-q", "origin", f"HEAD:refs/heads/{UPDATE_BRANCH}")
+        adopter_work_sha = self.remote_update_sha()
+        self.git("switch", "-q", "main")
+        self.git("branch", "-D", "forged-adopter-change")
+
+        adopter_work = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(adopter_work.returncode, 1, adopter_work.stdout + adopter_work.stderr)
+        self.assertIn("changes adopter-owned paths outside docs/ai-team", adopter_work.stderr)
+        self.assertEqual(self.remote_update_sha(), adopter_work_sha)
+        self.assertIsNone(self.remote_mutex_sha())
         self.assert_caller_unchanged(original_head)
         self.git("push", "-q", "origin", "--delete", UPDATE_BRANCH)
 
@@ -448,7 +953,7 @@ class ActivationRefreshTest(unittest.TestCase):
         )
         reject_hook.chmod(reject_hook.stat().st_mode | stat.S_IXUSR)
 
-        denied = self.run_activation()
+        denied = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
         self.assertIn("cannot publish the package refresh claim", denied.stderr)
@@ -464,7 +969,7 @@ class ActivationRefreshTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        unavailable = self.run_activation()
+        unavailable = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(unavailable.returncode, 1, unavailable.stdout + unavailable.stderr)
         self.assertIn("cannot resolve approved package ref", unavailable.stderr)
@@ -476,7 +981,7 @@ class ActivationRefreshTest(unittest.TestCase):
 
         (self.checkout / "README.md").write_text("dirty adopter\n", encoding="utf-8")
 
-        result = self.run_activation()
+        result = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("refuses a dirty checkout", result.stderr)
@@ -488,7 +993,7 @@ class ActivationRefreshTest(unittest.TestCase):
         original_head = self.git_output("rev-parse", "HEAD")
         (self.state / "active").write_text("yes\n", encoding="utf-8")
 
-        issue_result = self.run_activation()
+        issue_result = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(issue_result.returncode, 1, issue_result.stdout + issue_result.stderr)
         self.assertIn("refuses active task lanes: #77", issue_result.stderr)
@@ -497,7 +1002,7 @@ class ActivationRefreshTest(unittest.TestCase):
 
         (self.state / "active").unlink()
         (self.state / "active-pr").write_text("yes\n", encoding="utf-8")
-        pr_result = self.run_activation()
+        pr_result = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(pr_result.returncode, 1, pr_result.stdout + pr_result.stderr)
         self.assertIn("refuses active task lanes: PR #88", pr_result.stderr)
@@ -506,7 +1011,7 @@ class ActivationRefreshTest(unittest.TestCase):
 
         (self.state / "active-pr").unlink()
         (self.state / "activate-late-lane").write_text("yes\n", encoding="utf-8")
-        late_lane = self.run_activation()
+        late_lane = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(late_lane.returncode, 1, late_lane.stdout + late_lane.stderr)
         self.assertIn("task lane appeared concurrently: PR #88", late_lane.stderr)
@@ -516,19 +1021,113 @@ class ActivationRefreshTest(unittest.TestCase):
         )
         self.assert_caller_unchanged(original_head)
 
+    def test_blocked_backlog_without_an_open_pr_does_not_freeze_activation(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        (self.state / "blocked-only").write_text("yes\n", encoding="utf-8")
+
+        result = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertNotIn("#66", result.stderr)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_unknown_mutex_and_unmerged_or_nonexact_refresh_fail_closed(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", f"HEAD:refs/heads/{MUTEX_BRANCH}")
+        unknown_mutex = self.remote_mutex_sha()
+
+        locked = self.run_activation(mutex_wait_seconds=1, exclusive_first_refresh=True)
+
+        self.assertEqual(locked.returncode, 1, locked.stdout + locked.stderr)
+        self.assertIn("another activation or claim owns", locked.stderr)
+        self.assertIn("never steals it", locked.stderr)
+        self.assertEqual(self.remote_mutex_sha(), unknown_mutex)
+        self.assertIsNone(self.remote_update_sha())
+        self.assert_caller_unchanged(original_head)
+        malformed_recovery = self.run_activation(
+            recover_mutex_sha=unknown_mutex, exclusive_first_refresh=True
+        )
+        self.assertEqual(
+            malformed_recovery.returncode,
+            2,
+            malformed_recovery.stdout + malformed_recovery.stderr,
+        )
+        self.assertIn("malformed or not generated state", malformed_recovery.stderr)
+        self.assertEqual(self.remote_mutex_sha(), unknown_mutex)
+        self.git("push", "-q", "origin", "--delete", MUTEX_BRANCH)
+
+        stale_mutex = self.create_stale_generated_mutex()
+        stale_refusal = self.run_activation(
+            mutex_wait_seconds=1, exclusive_first_refresh=True
+        )
+        self.assertEqual(
+            stale_refusal.returncode,
+            1,
+            stale_refusal.stdout + stale_refusal.stderr,
+        )
+        self.assertEqual(self.remote_mutex_sha(), stale_mutex)
+
+        created = self.run_activation(
+            recover_mutex_sha=stale_mutex, exclusive_first_refresh=True
+        )
+        self.assertEqual(created.returncode, 3, created.stdout + created.stderr)
+        self.assertIn("recovered exact stale generated mutex", created.stderr)
+        self.assertIsNone(self.remote_mutex_sha())
+        refresh_sha = self.remote_update_sha()
+        self.assertIsNotNone(refresh_sha)
+        (self.state / "pr-closed").write_text("yes\n", encoding="utf-8")
+
+        closed = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(closed.returncode, 3, closed.stdout + closed.stderr)
+        self.assertIn("has no open or matching merged PR", closed.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={refresh_sha}", closed.stderr)
+        self.assertEqual(self.remote_update_sha(), refresh_sha)
+        self.assertIsNone(self.remote_mutex_sha())
+
+        (self.state / "pr-closed").unlink()
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
+        nonexact = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(nonexact.returncode, 1, nonexact.stdout + nonexact.stderr)
+        self.assertIn("is not the package tree on origin/main", nonexact.stderr)
+        self.assertEqual(self.remote_update_sha(), refresh_sha)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
     def test_failed_mounted_suite_leaves_caller_unchanged_and_pr_draft(self):
         package_test = self.source / "scripts" / "test_smoke.py"
         package_test.write_text(
-            "import unittest\n\nclass Broken(unittest.TestCase):\n"
-            "    def test_broken(self):\n        self.fail('expected fixture failure')\n",
+            textwrap.dedent(
+                """\
+                import os
+                import unittest
+                from pathlib import Path
+
+                class Recoverable(unittest.TestCase):
+                    def test_same_revision_can_resume(self):
+                        state = Path(os.environ["ACTIVATION_TEST_GH_STATE"])
+                        if (state / "force-suite-failure").exists():
+                            self.fail("expected fixture failure")
+                        with Path(os.environ["ACTIVATION_TEST_SUITE_MARKER"]).open(
+                            "a", encoding="utf-8"
+                        ) as marker:
+                            marker.write("recovered updater\\n")
+                """
+            ),
             encoding="utf-8",
         )
         self.git("add", "scripts/test_smoke.py", cwd=self.source)
         self.git("commit", "-qm", "publish broken package", cwd=self.source)
         self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
         original_head = self.git_output("rev-parse", "HEAD")
+        (self.state / "force-suite-failure").write_text("yes\n", encoding="utf-8")
 
-        result = self.run_activation()
+        result = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("mounted mechanism tests failed", result.stderr)
@@ -541,11 +1140,253 @@ class ActivationRefreshTest(unittest.TestCase):
             capture_output=True,
         )
         self.assertNotEqual(missing_mount.returncode, 0)
+        failure_metadata = self.origin_output("log", "-1", "--format=%B", claim_sha)
+        self.assertIn("AI-Team-Activation-Failed: true", failure_metadata)
+        self.assertNotIn("AI-Team-Activation-Claim:", failure_metadata)
         self.assertEqual((self.state / "pr-draft").read_text(encoding="utf-8").strip(), "true")
         self.assertFalse((self.state / "ready").exists())
         failed_body = (self.state / "pr-body").read_text(encoding="utf-8")
         self.assertIn("Verification: pending", failed_body)
         self.assertNotIn("full mechanism suite passed", failed_body)
+
+        (self.state / "force-suite-failure").unlink()
+        retried = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(retried.returncode, 3, retried.stdout + retried.stderr)
+        self.assertIn("resuming recoverable failed refresh state", retried.stderr)
+        self.assertNotEqual(self.remote_update_sha(), claim_sha)
+        self.assertTrue((self.state / "ready").is_file())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_final_push_and_label_failures_require_exact_recovery(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        reject_final = self.origin / "hooks" / "pre-receive"
+        reject_final.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                while read -r old new ref; do
+                  if [ "$ref" = "refs/heads/ai-team/package-refresh" ]; then
+                    message=$(git show -s --format=%B "$new")
+                    if ! printf '%s\\n' "$message" | grep -q '^AI-Team-Activation-Claim: '; then
+                      echo "verified refresh push denied by fixture" >&2
+                      exit 1
+                    fi
+                  fi
+                done
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        reject_final.chmod(reject_final.stat().st_mode | stat.S_IXUSR)
+
+        denied = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
+        self.assertIn("cannot publish the verified package refresh", denied.stderr)
+        self.assertIn("could not convert", denied.stderr)
+        orphan_claim = self.remote_update_sha()
+        self.assertIsNotNone(orphan_claim)
+        orphan_message = self.origin_output("log", "-1", "--format=%B", orphan_claim)
+        self.assertIn("AI-Team-Activation-Claim:", orphan_message)
+        self.assertIsNone(self.remote_mutex_sha())
+        reject_final.unlink()
+
+        refused = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
+        self.assertIn("AI_TEAM_RECOVER_REFRESH_SHA", refused.stderr)
+        self.assertEqual(self.remote_update_sha(), orphan_claim)
+
+        recovered = self.run_activation(
+            recover_refresh_sha=orphan_claim, exclusive_first_refresh=True
+        )
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertIn("owner selected exact pending refresh claim", recovered.stderr)
+        verified_sha = self.remote_update_sha()
+        self.assertNotEqual(verified_sha, orphan_claim)
+        self.assertTrue((self.state / "ready").is_file())
+
+        (self.state / "bad-final-labels").write_text("yes\n", encoding="utf-8")
+        bad_labels = self.run_activation(
+            recover_refresh_sha=verified_sha, exclusive_first_refresh=True
+        )
+        self.assertEqual(bad_labels.returncode, 1, bad_labels.stdout + bad_labels.stderr)
+        self.assertIn("did not reach the exact", bad_labels.stderr)
+        failed_label_sha = self.remote_update_sha()
+        self.assertNotEqual(failed_label_sha, verified_sha)
+        (self.state / "bad-final-labels").unlink()
+
+        label_recovery = self.run_activation(
+            recover_refresh_sha=failed_label_sha, exclusive_first_refresh=True
+        )
+        self.assertEqual(
+            label_recovery.returncode,
+            3,
+            label_recovery.stdout + label_recovery.stderr,
+        )
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_verified_pr_restart_requires_exact_recovery_and_repairs_task_state(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        (self.state / "fail-next-ready").write_text("yes\n", encoding="utf-8")
+
+        interrupted = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(interrupted.returncode, 1, interrupted.stdout + interrupted.stderr)
+        self.assertIn("could not mark PR #51 ready", interrupted.stderr)
+        verified_sha = self.remote_update_sha()
+        self.assertIsNotNone(verified_sha)
+        self.assertEqual((self.state / "pr-draft").read_text().strip(), "true")
+
+        refused = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
+        self.assertIn("is still draft", refused.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={verified_sha}", refused.stderr)
+        self.assertEqual(self.remote_update_sha(), verified_sha)
+
+        recovered = self.run_activation(
+            recover_refresh_sha=verified_sha, exclusive_first_refresh=True
+        )
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        repaired_sha = self.remote_update_sha()
+        self.assertNotEqual(repaired_sha, verified_sha)
+        self.assertTrue((self.state / "ready").is_file())
+
+        (self.state / "contradictory-ready").write_text("yes\n", encoding="utf-8")
+        contradictory = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(
+            contradictory.returncode,
+            3,
+            contradictory.stdout + contradictory.stderr,
+        )
+        self.assertIn("contradictory task labels", contradictory.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={repaired_sha}", contradictory.stderr)
+
+        (self.state / "contradictory-ready").unlink()
+        normalized = self.run_activation(
+            recover_refresh_sha=repaired_sha, exclusive_first_refresh=True
+        )
+        self.assertEqual(normalized.returncode, 3, normalized.stdout + normalized.stderr)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_no_pr_orphan_claim_requires_exact_recovery(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        recorded_revision = self.package_sha
+        orphan_claim = self.create_orphan_refresh_claim()
+
+        (self.source / "AFTER_ORPHAN").write_text(
+            "newer approved package\n", encoding="utf-8"
+        )
+        self.git("add", "AFTER_ORPHAN", cwd=self.source)
+        self.git("commit", "-qm", "advance after orphan claim", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+        self.assertNotEqual(self.package_sha, recorded_revision)
+
+        refused = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
+        self.assertIn(f"claimed for recorded package revision {recorded_revision}", refused.stderr)
+        self.assertIn(f"recover it to {self.package_sha}", refused.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={orphan_claim}", refused.stderr)
+        self.assertEqual(self.remote_update_sha(), orphan_claim)
+        self.assertFalse((self.state / "pr-number").exists())
+        self.assertIsNone(self.remote_mutex_sha())
+
+        recovered = self.run_activation(
+            recover_refresh_sha=orphan_claim, exclusive_first_refresh=True
+        )
+
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertIn("owner selected exact orphan refresh claim", recovered.stderr)
+        self.assertNotEqual(self.remote_update_sha(), orphan_claim)
+        recovered_metadata = self.origin_output(
+            "log", "-1", "--format=%B", self.remote_update_sha()
+        )
+        self.assertIn(f"AI-Team-Package-Revision: {self.package_sha}", recovered_metadata)
+        self.assertTrue((self.state / "ready").is_file())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_same_tree_new_revision_can_recover_an_older_orphan(self):
+        self.git(
+            "subtree",
+            "add",
+            "--prefix=docs/ai-team",
+            str(self.source_bare),
+            self.package_sha,
+            "--squash",
+        )
+        self.git("push", "-q", "origin", "main")
+        original_head = self.git_output("rev-parse", "HEAD")
+        recorded_revision = self.package_sha
+        orphan_claim = self.create_orphan_refresh_claim()
+
+        self.git("commit", "--allow-empty", "-qm", "publish same-tree revision", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        same_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+        self.assertNotEqual(self.package_sha, recorded_revision)
+        self.assertEqual(same_tree, self.package_tree)
+
+        refused = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
+        self.assertIn(f"exact generated refresh {orphan_claim}", refused.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={orphan_claim}", refused.stderr)
+        self.assertEqual(self.remote_update_sha(), orphan_claim)
+
+        recovered = self.run_activation(
+            recover_refresh_sha=orphan_claim, exclusive_first_refresh=True
+        )
+
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertIn(f"recorded revision {recorded_revision}", recovered.stderr)
+        recovered_metadata = self.origin_output(
+            "log", "-1", "--format=%B", self.remote_update_sha()
+        )
+        self.assertIn(f"AI-Team-Package-Revision: {self.package_sha}", recovered_metadata)
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
+
+    def test_verified_no_pr_refresh_requires_exact_recovery(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        created = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(created.returncode, 3, created.stdout + created.stderr)
+        verified_sha = self.remote_update_sha()
+        self.assertIsNotNone(verified_sha)
+
+        # Simulate a verified generated branch whose PR was deleted/closed
+        # without a merge. It is not deletion-safe, but an owner can select
+        # the exact immutable branch tip and rebuild its draft lane.
+        for state_name in (
+            "pr-number",
+            "pr-draft",
+            "pr-body",
+            "ready",
+            "pr-create-success",
+        ):
+            (self.state / state_name).unlink(missing_ok=True)
+
+        refused = self.run_activation(exclusive_first_refresh=True)
+        self.assertEqual(refused.returncode, 3, refused.stdout + refused.stderr)
+        self.assertIn("has no open or matching merged PR", refused.stderr)
+        self.assertIn(f"AI_TEAM_RECOVER_REFRESH_SHA={verified_sha}", refused.stderr)
+        self.assertEqual(self.remote_update_sha(), verified_sha)
+
+        recovered = self.run_activation(
+            recover_refresh_sha=verified_sha, exclusive_first_refresh=True
+        )
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertIn("selected exact verified refresh", recovered.stderr)
+        self.assertTrue((self.state / "ready").is_file())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assert_caller_unchanged(original_head)
 
     def test_main_sourced_mount_migrates_exactly_to_package_mount(self):
         # Rebuild the adopter default with the supported legacy subtree mount.
@@ -571,7 +1412,7 @@ class ActivationRefreshTest(unittest.TestCase):
         conflicting_head = self.git_output("rev-parse", "HEAD")
         self.assertTrue((self.checkout / "docs" / "ai-team" / ".github").is_dir())
 
-        conflict = self.run_activation()
+        conflict = self.run_activation(exclusive_first_refresh=True)
 
         self.assertEqual(conflict.returncode, 1, conflict.stdout + conflict.stderr)
         self.assertIn("git subtree pull conflicted", conflict.stderr)
@@ -602,7 +1443,7 @@ class ActivationRefreshTest(unittest.TestCase):
         self.git("clone", "-q", str(self.origin), str(safe_checkout), cwd=self.root)
         original_head = self.git_output("rev-parse", "HEAD", cwd=safe_checkout)
 
-        result = self.run_activation(checkout=safe_checkout)
+        result = self.run_activation(checkout=safe_checkout, exclusive_first_refresh=True)
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assert_caller_unchanged(original_head, checkout=safe_checkout)

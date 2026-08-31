@@ -50,6 +50,133 @@ repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || {
   exit 2
 }
 
+ACTIVATION_MUTEX_BRANCH=ai-team/activation-mutex
+ACTIVATION_MUTEX_REF="refs/heads/$ACTIVATION_MUTEX_BRANCH"
+AI_TEAM_ACTIVATION_MUTEX_PROTOCOL=1
+activation_mutex_sha=
+activation_mutex_held=0
+body=
+
+# Activation and ordinary claims both cross the same short, atomic remote-ref
+# boundary before either can make a lane visible. A unique commit makes an
+# empty-ref force-with-lease decisive even when contenders share a clock.
+acquire_activation_mutex() {
+  local nonce parent tree message observed_lines observed
+  nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || {
+    echo "cannot generate a unique activation mutex claim" >&2
+    return 2
+  }
+  [[ "$nonce" =~ ^[0-9a-fA-F]{32}$ ]] || {
+    echo "cannot generate a valid activation mutex claim" >&2
+    return 2
+  }
+  parent=$(git rev-parse HEAD) || return 2
+  tree=$(git rev-parse 'HEAD^{tree}') || return 2
+  message=$(printf 'AI Team activation/claim mutex\n\nAI-Team-Activation-Mutex: true\nAI-Team-Activation-Mutex-Base: %s\nAI-Team-Activation-Mutex-Owner: claim:%s:#%s\nAI-Team-Activation-Mutex-Nonce: %s\n' \
+    "$parent" "$agent" "$issue" "$nonce")
+  activation_mutex_sha=$(git -c user.name=ai-team-activation-mutex \
+    -c user.email=ai-team-activation-mutex@users.noreply.github.com \
+    commit-tree "$tree" -p "$parent" <<<"$message") || {
+    echo "cannot create the activation mutex commit" >&2
+    return 2
+  }
+
+  if ! git push --quiet --force-with-lease="$ACTIVATION_MUTEX_REF:" \
+    origin "$activation_mutex_sha:$ACTIVATION_MUTEX_REF"; then
+    observed_lines=$(git ls-remote --heads origin "$ACTIVATION_MUTEX_REF" 2>/dev/null) || {
+      echo "activation mutex push failed and its remote state cannot be inspected" >&2
+      return 2
+    }
+    observed=$(awk 'NF { print $1; exit }' <<<"$observed_lines")
+    if [[ "$observed" == "$activation_mutex_sha" ]]; then
+      echo "claim: activation mutex push response was uncertain, but this claimant owns it" >&2
+    elif [[ -n "$observed" ]]; then
+      if [[ "${AI_TEAM_RECOVER_MUTEX_SHA:-}" == "$observed" ]]; then
+        local stale_message stale_managed stale_base stale_owner stale_nonce stale_parent_line stale_parent stale_tree stale_base_tree recovered_lines recovered_observed
+        git fetch -q --no-tags origin "$ACTIVATION_MUTEX_BRANCH" || {
+          echo "cannot fetch the exact mutex selected for recovery" >&2
+          return 2
+        }
+        stale_message=$(git show -s --format=%B "$observed" 2>/dev/null || true)
+        stale_managed=$(awk -F': ' '/^AI-Team-Activation-Mutex: / { value=$2 } END { print value }' <<<"$stale_message")
+        stale_base=$(awk -F': ' '/^AI-Team-Activation-Mutex-Base: / { value=$2 } END { print value }' <<<"$stale_message")
+        stale_owner=$(awk -F': ' '/^AI-Team-Activation-Mutex-Owner: / { value=$2 } END { print value }' <<<"$stale_message")
+        stale_nonce=$(awk -F': ' '/^AI-Team-Activation-Mutex-Nonce: / { value=$2 } END { print value }' <<<"$stale_message")
+        stale_parent_line=$(git rev-list --parents -n 1 "$observed" 2>/dev/null || true)
+        stale_parent=$(awk 'NF == 2 { print $2 }' <<<"$stale_parent_line")
+        stale_tree=$(git rev-parse "$observed^{tree}" 2>/dev/null || true)
+        stale_base_tree=$(git rev-parse "$stale_base^{tree}" 2>/dev/null || true)
+        if [[ "$stale_managed" != "true" || "$stale_base" != "$stale_parent" || \
+              -z "$stale_tree" || "$stale_tree" != "$stale_base_tree" || \
+              ! "$stale_base" =~ ^[0-9a-fA-F]{40,64}$ || \
+              ! "$stale_nonce" =~ ^[0-9a-fA-F]{32}$ || \
+              ! "$stale_owner" =~ ^(claim:[a-z0-9]+([._-][a-z0-9]+)*:#[0-9]+|package-refresh:[0-9a-fA-F]{40,64})$ ]]; then
+          echo "selected mutex is malformed or not generated state; refusing recovery" >&2
+          return 2
+        fi
+        if ! git push --quiet --force-with-lease="$ACTIVATION_MUTEX_REF:$observed" \
+          origin ":$ACTIVATION_MUTEX_REF"; then
+          recovered_lines=$(git ls-remote --heads origin "$ACTIVATION_MUTEX_REF" 2>/dev/null) || return 2
+          recovered_observed=$(awk 'NF { print $1; exit }' <<<"$recovered_lines")
+          [[ -z "$recovered_observed" ]] || {
+            echo "activation mutex changed during exact recovery; refusing to delete $recovered_observed" >&2
+            return 2
+          }
+        fi
+        echo "recovered exact stale generated mutex $observed after owner verification" >&2
+        acquire_activation_mutex
+        return $?
+      fi
+      echo "refusing to claim: another activation or claim owns origin/$ACTIVATION_MUTEX_BRANCH" >&2
+      echo "if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=$observed; this script never steals it" >&2
+      return 1
+    else
+      echo "cannot acquire origin/$ACTIVATION_MUTEX_BRANCH (check push permission or protection)" >&2
+      return 2
+    fi
+  fi
+  activation_mutex_held=1
+}
+
+release_activation_mutex() {
+  local observed_lines observed
+  [[ $activation_mutex_held -eq 1 ]] || return 0
+  if git push --quiet --force-with-lease="$ACTIVATION_MUTEX_REF:$activation_mutex_sha" \
+    origin ":$ACTIVATION_MUTEX_REF"; then
+    activation_mutex_held=0
+    return 0
+  fi
+  observed_lines=$(git ls-remote --heads origin "$ACTIVATION_MUTEX_REF" 2>/dev/null) || {
+    echo "cannot release the activation mutex or inspect its remote state" >&2
+    return 2
+  }
+  observed=$(awk 'NF { print $1; exit }' <<<"$observed_lines")
+  if [[ -z "$observed" ]]; then
+    activation_mutex_held=0
+    return 0
+  fi
+  if [[ "$observed" != "$activation_mutex_sha" ]]; then
+    echo "activation mutex ownership changed unexpectedly; refusing to delete $observed" >&2
+  else
+    echo "cannot release origin/$ACTIVATION_MUTEX_BRANCH; delete only that exact generated ref after verifying no activation or claim is running" >&2
+  fi
+  return 2
+}
+
+claim_exit_cleanup() {
+  local cleanup_status=$?
+  trap - EXIT HUP INT TERM
+  [[ -z "$body" ]] || rm -f -- "$body"
+  if ! release_activation_mutex; then
+    [[ $cleanup_status -ne 0 ]] || cleanup_status=2
+  fi
+  exit "$cleanup_status"
+}
+trap claim_exit_cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+acquire_activation_mutex || exit $?
+
 # Activation refresh owns a repository-wide baseline. A task claim must never
 # start while that fixed remote lock exists, including the short interval
 # before its draft PR is visible on GitHub.
@@ -125,6 +252,9 @@ fi
 finish_claim_labels() {
   local pr="$1"
   local pr_labels="" issue_labels="" missing=""
+  local pr_task_count=0 pr_task_conflict="" pr_label
+  local issue_task_count=0 issue_task_conflict="" issue_label
+  local -a pr_label_array=() issue_label_array=()
 
   gh pr edit "$pr" --repo "$repo" --add-label "agent:$agent" --add-label task:active || true
   gh issue edit "$issue" --repo "$repo" --add-label "agent:$agent" --add-label task:active || true
@@ -144,13 +274,31 @@ finish_claim_labels() {
   # missing label proven on the other.
   if [[ $pr_read -eq 1 ]]; then
     case ",$pr_labels," in *",agent:$agent,"*) ;; *) missing+="PR #$pr agent:$agent; " ;; esac
-    case ",$pr_labels," in *",task:active,"*) ;; *) missing+="PR #$pr task:active; " ;; esac
+    IFS=',' read -r -a pr_label_array <<<"$pr_labels"
+    for pr_label in "${pr_label_array[@]}"; do
+      if [[ "$pr_label" == task:* ]]; then
+        pr_task_count=$((pr_task_count + 1))
+        [[ "$pr_label" == "task:active" ]] || pr_task_conflict="$pr_label"
+      fi
+    done
+    if [[ $pr_task_count -ne 1 || -n "$pr_task_conflict" ]]; then
+      missing+="PR #$pr task state must be exactly task:active (read: ${pr_labels:-none}); "
+    fi
   else
     unread+="PR #$pr; "
   fi
   if [[ $issue_read -eq 1 ]]; then
     case ",$issue_labels," in *",agent:$agent,"*) ;; *) missing+="issue #$issue agent:$agent; " ;; esac
-    case ",$issue_labels," in *",task:active,"*) ;; *) missing+="issue #$issue task:active; " ;; esac
+    IFS=',' read -r -a issue_label_array <<<"$issue_labels"
+    for issue_label in "${issue_label_array[@]}"; do
+      if [[ "$issue_label" == task:* ]]; then
+        issue_task_count=$((issue_task_count + 1))
+        [[ "$issue_label" == "task:active" ]] || issue_task_conflict="$issue_label"
+      fi
+    done
+    if [[ $issue_task_count -ne 1 || -n "$issue_task_conflict" ]]; then
+      missing+="issue #$issue task state must be exactly task:active (read: ${issue_labels:-none}); "
+    fi
   else
     unread+="issue #$issue; "
   fi
@@ -291,6 +439,8 @@ fi
 
 local_branch=0
 remote_branch=0
+pushed_branch_sha=
+fresh_local_sha=
 git show-ref --verify --quiet "refs/heads/$branch" && local_branch=1
 git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1 && remote_branch=1
 
@@ -302,15 +452,51 @@ if [[ $local_branch -eq 1 || $remote_branch -eq 1 ]]; then
 fi
 
 rollback_partial_claim() {
-  # Best-effort undo after a post-push failure so the board stays empty.
-  git push origin --delete "$branch" >/dev/null 2>&1 || true
-  if git worktree list --porcelain 2>/dev/null | grep -qx "worktree $worktree"; then
-    git worktree remove --force "$worktree" >/dev/null 2>&1 || true
-  elif [[ -d "$worktree" ]]; then
-    rm -rf "$worktree"
-    git worktree prune >/dev/null 2>&1 || true
+  local current_local_tip worktree_status observed_lines observed
+  # Undo only the fresh branch SHA created by this invocation. Never erase a
+  # concurrently advanced branch or an existing resume branch.
+  [[ $resume -eq 0 ]] || return 0
+
+  current_local_tip=$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null || true)
+  if [[ -z "$fresh_local_sha" || "$current_local_tip" != "$fresh_local_sha" ]]; then
+    [[ -z "$current_local_tip" ]] || \
+      echo "local claim branch changed to $current_local_tip during rollback; preserving its worktree and remote" >&2
+    return 0
   fi
-  git branch -D "$branch" >/dev/null 2>&1 || true
+
+  if git worktree list --porcelain 2>/dev/null | grep -qx "worktree $worktree"; then
+    worktree_status=$(git -C "$worktree" status --porcelain --untracked-files=normal 2>/dev/null) || {
+      echo "cannot verify fresh claim worktree $worktree; preserving it and its refs" >&2
+      return 0
+    }
+    if [[ -n "$worktree_status" ]]; then
+      echo "fresh claim worktree $worktree changed during rollback; preserving it and its refs" >&2
+      return 0
+    fi
+    if ! git worktree remove "$worktree" >/dev/null 2>&1; then
+      echo "fresh claim worktree $worktree changed while rollback removed it; preserving its refs" >&2
+      return 0
+    fi
+  elif [[ -d "$worktree" ]]; then
+    echo "unregistered claim path $worktree exists; refusing recursive rollback and preserving refs" >&2
+    return 0
+  fi
+
+  if [[ -n "$pushed_branch_sha" ]] && \
+     ! git push --quiet --force-with-lease="refs/heads/$branch:$pushed_branch_sha" \
+       origin ":refs/heads/$branch" >/dev/null 2>&1; then
+    observed_lines=$(git ls-remote --heads origin "refs/heads/$branch" 2>/dev/null || true)
+    observed=$(awk 'NF { print $1; exit }' <<<"$observed_lines")
+    if [[ -n "$observed" ]]; then
+      echo "remote claim branch is $observed after rollback refusal; preserving the exact local ref" >&2
+      return 0
+    fi
+  fi
+  if ! git update-ref -d "refs/heads/$branch" "$fresh_local_sha" >/dev/null 2>&1; then
+    current_local_tip=$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null || true)
+    [[ -z "$current_local_tip" ]] || \
+      echo "local claim branch changed to $current_local_tip during final rollback; preserving it" >&2
+  fi
 }
 
 # Old claim.sh left the shared root on the claim branch after a failed
@@ -377,11 +563,15 @@ refuse_package_refresh_lock || exit $?
 if [[ $resume -eq 0 ]]; then
   restore_root_off_claim
   git worktree add -b "$branch" "$worktree" "origin/$base_branch"
-  (
-    cd "$worktree"
-    git commit --allow-empty -m "claim: #$issue"
-    git push -u origin "$branch"
-  ) || {
+  fresh_local_sha=$(git -C "$worktree" rev-parse HEAD)
+  git -C "$worktree" commit --allow-empty -m "claim: #$issue" || {
+    echo "claim commit failed for #$issue — rolling back" >&2
+    rollback_partial_claim
+    exit 1
+  }
+  pushed_branch_sha=$(git -C "$worktree" rev-parse HEAD)
+  fresh_local_sha=$pushed_branch_sha
+  git -C "$worktree" push -u origin "$branch" || {
     echo "claim push failed for #$issue — rolling back" >&2
     rollback_partial_claim
     exit 1
@@ -405,7 +595,6 @@ else
 fi
 
 body=$(mktemp)
-trap 'rm -f "$body"' EXIT
 # Closes #N must ship in the claim body: authors rewrite descriptions at handoff
 # and forget the keyword, leaving merged PRs with open issues and a lying board.
 # ready.sh re-asserts the same line when the PR leaves draft.
@@ -446,6 +635,8 @@ if ! finish_claim_labels "$pr"; then
 fi
 
 restore_root_off_claim
+
+release_activation_mutex || exit 2
 
 echo "claimed #$issue in draft PR #$pr ($pr_url) as agent:$agent"
 echo "worktree: $worktree"
