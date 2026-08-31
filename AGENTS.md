@@ -1,9 +1,11 @@
 # Working in this repository
 
-`README.md` is the operating guide, and it applies here first: this repository
-is the package other repositories mount at `docs/ai-team/`, so the team that
-maintains it works the way the guide describes. Read it, then run
-`package/scripts/orient.sh` to see the board.
+`package/README.md` is the operating guide, and it applies here first: this
+repository is the package other repositories mount at `docs/ai-team/`, so the
+team that maintains it works the way the guide describes. It lives under
+`package/` rather than at the repository root because it ships to every
+adopter as `docs/ai-team/README.md` — the same reason `package/LICENSE` does.
+Read it, then run `package/scripts/orient.sh` to see the board.
 
 Two things are specific to this repository:
 
