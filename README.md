@@ -12,17 +12,21 @@ The board is the durable record. Use direct agent messaging when the runtime
 offers it for fast coordination, but record every durable claim, hold, decision,
 appointment, halt, and blocker on its owning Issue or pull request.
 
-This package's scripts live at `scripts/`. An adopter mounts the package at
-`docs/ai-team/`, where the same scripts are at `docs/ai-team/scripts/`. For
-project-specific orientation, copy `templates/project-orient.sh` to the
-adopter-owned `.ai-team/project-orient.sh`; it sits outside the mount, so
-package updates do not overwrite it.
+This repository's own scripts live at `package/scripts/`. A `package-split`
+workflow republishes `package/` as the standalone `package-mount` branch on
+every push to `main` — an adopter mounts *that* branch, not `main`, so this
+repository's own root-level CI, hook, and `AGENTS.md` never enter the mount.
+In an adopter, the mounted scripts are at `docs/ai-team/scripts/`. For
+project-specific orientation, copy `package/templates/project-orient.sh` (from the
+mount, so `docs/ai-team/templates/project-orient.sh`) to the adopter-owned
+`.ai-team/project-orient.sh`; it sits outside the mount, so package updates do
+not overwrite it.
 
 Mount the package with:
 
 ```bash
 git subtree add --prefix=docs/ai-team \
-  https://github.com/BelimbingApp/ai-team.git main --squash
+  https://github.com/BelimbingApp/ai-team.git package-mount --squash
 ```
 
 At the same mount-time change, copy the adopter-owned workflow templates into
@@ -43,6 +47,22 @@ manual dispatch and is the only job granted `issues: write`. The independent
 review workflow reads the trusted default-branch grammar and is the check to
 require for the review rule.
 
+An adopter that mounted before `package-mount` existed still pulls from
+`main` at its current prefix. Point the same command at the new branch
+instead of the old one:
+
+```bash
+git subtree pull --prefix=docs/ai-team \
+  https://github.com/BelimbingApp/ai-team.git package-mount --squash
+```
+
+This is a normal pull, not a delete-and-re-add: `git subtree` merges onto
+whatever is already at the prefix, so this one run both drops this
+repository's own root-level files that a `main`-sourced mount carried and
+picks up the current `scripts/`/`templates/`/`LICENSE` layout. It needs
+doing exactly once, on whichever pull first points at `package-mount`; every
+pull after that is routine again.
+
 Its intended permanent home is `.agents/skills/ai-team/`, where compatible
 agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
 loads skills from that standard location; that future move is a path change, not
@@ -56,7 +76,7 @@ Orient before acting:
 
 ```bash
 # Package repository
-scripts/orient.sh
+package/scripts/orient.sh
 
 # Adopting repository
 docs/ai-team/scripts/orient.sh
@@ -69,7 +89,7 @@ or unqueued task without asking permission.
 Claim by opening a draft PR **before** changing task-owned files:
 
 ```bash
-CLAIM_AGENT=<stable-agent-id> scripts/claim.sh <issue-number>
+CLAIM_AGENT=<stable-agent-id> package/scripts/claim.sh <issue-number>
 ```
 
 `claim.sh` is the collision boundary. It accepts an unowned `task:ready` issue,
@@ -87,8 +107,8 @@ refresh it from `main` before requesting review.
 Hand off with the script so the closing reference remains intact:
 
 ```bash
-CLAIM_AGENT=<stable-agent-id> scripts/ready.sh <pr-number>
-LAND_AGENT=<stable-agent-id> scripts/land.sh <pr-number> <reviewed-full-sha>
+CLAIM_AGENT=<stable-agent-id> package/scripts/ready.sh <pr-number>
+LAND_AGENT=<stable-agent-id> package/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
 `land.sh` gates, merges, attributes the actor, and finalizes the task. Re-run it
@@ -97,7 +117,7 @@ green, independently reviewed, unheld peer PR is everyone's duty to land.
 
 Declare dependencies as `Blocked-By: #<issue-number>, #<issue-number>` or prose
 ending its reference list. Code blocks, quotes, and HTML comments are
-documentation, not declarations. `scripts/blocked_by_sweep.py` owns parsing
+documentation, not declarations. `package/scripts/blocked_by_sweep.py` owns parsing
 through `safe_lines` and `parse_blockers`; adopters import it instead of
 maintaining another parser.
 
@@ -208,12 +228,12 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 to verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
 
-`scripts/review_gate.sh` is the canonical review grammar here, and `gate.sh`
+`package/scripts/review_gate.sh` is the canonical review grammar here, and `gate.sh`
 uses it. It counts only the newest review on the exact head from a stable
 `From` identity distinct from the single author lane; a newer `changes required`
 verdict revokes that reviewer's earlier acceptance. To make the same rule a
 required GitHub check in an adopter, copy
-`templates/independent-review.yml` to `.github/workflows/independent-review.yml`
+`package/templates/independent-review.yml` to `.github/workflows/independent-review.yml`
 and require its `Independent review` check. In an adopter mount, those paths
 are `docs/ai-team/scripts/review_gate.sh` and
 `docs/ai-team/templates/independent-review.yml`. The initial installation PR
@@ -245,8 +265,8 @@ After merge, explicitly delete your remote branch and clean up:
 
 ```bash
 # Package repository
-scripts/cleanup.sh
-scripts/cleanup.sh --yes
+package/scripts/cleanup.sh
+package/scripts/cleanup.sh --yes
 
 # Adopting repository
 docs/ai-team/scripts/cleanup.sh
@@ -265,8 +285,8 @@ ship in the current lane.
 | Tasks and state | GitHub Issues with `agent:<id>` and `task:*` labels |
 | Claims, handoffs, blockers, and review findings | The owning issue or PR |
 | Holds | `hold:author`, `hold:review:<agent>`, and `hold.sh` |
-| Mechanisms | `scripts/` here; `docs/ai-team/scripts/` in an adopter |
-| Project hook | `.ai-team/project-orient.sh`, copied from `templates/project-orient.sh` |
+| Mechanisms | `package/scripts/` here; `docs/ai-team/scripts/` in an adopter |
+| Project hook | `.ai-team/project-orient.sh`, copied from `package/templates/project-orient.sh` |
 | Halt | An open `ops:halt` issue, shown first by `orient.sh` |
 | Active steward | One open `ops:steward` issue with one `agent:<id>` label |
 | Product and architecture decisions | `decide.sh propose`, vote, and close on the owning issue |

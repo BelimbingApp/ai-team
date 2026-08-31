@@ -40,8 +40,8 @@ class ProjectOrientCountsTest(unittest.TestCase):
             ["git", "init", "-q", "-b", "main", str(self.checkout)], check=True
         )
 
-        scripts = self.checkout / "scripts"
-        scripts.mkdir()
+        scripts = self.checkout / "package" / "scripts"
+        scripts.mkdir(parents=True)
         # A tree the counts can be checked against: shell mechanisms, test
         # modules, and one file that is neither.
         for name in ("orient.sh", "gate.sh", "claim.sh"):
@@ -49,12 +49,13 @@ class ProjectOrientCountsTest(unittest.TestCase):
         for name in ("test_gate.py", "test_claim.py"):
             (scripts / name).write_text("", encoding="utf-8")
         (scripts / "README.md").write_text("", encoding="utf-8")
-        # A path outside scripts/ must not be counted.
+        # A path outside package/scripts/ must not be counted.
         (self.checkout / "README.md").write_text("", encoding="utf-8")
 
-        # Placed outside scripts/, matching the real mechanism (#8): the hook
-        # lives at .ai-team/ in the adopting repository's own root, copied
-        # from templates/project-orient.sh, never inside the mounted package.
+        # Placed outside package/, matching the real mechanism (#8, #26): the
+        # hook lives at .ai-team/ in the adopting repository's own root,
+        # copied from templates/project-orient.sh, never inside the mounted
+        # package.
         dot_ai_team = self.checkout / ".ai-team"
         dot_ai_team.mkdir()
         hook = dot_ai_team / "project-orient.sh"
@@ -77,8 +78,8 @@ class ProjectOrientCountsTest(unittest.TestCase):
         environment = os.environ.copy()
         # orient.sh resolves the branch once and exports it; the hook no
         # longer sources _default_branch.sh itself (it has no relative path
-        # back to scripts/ once copied out to .ai-team/), so this is what a
-        # real invocation via orient.sh supplies.
+        # back to package/scripts/ once copied out to .ai-team/), so this is
+        # what a real invocation via orient.sh supplies.
         environment["AI_TEAM_DEFAULT_BRANCH"] = "main"
         stubs = Path(self.workspace.name) / "stubs"
         stubs.mkdir(exist_ok=True)
@@ -102,11 +103,11 @@ class ProjectOrientCountsTest(unittest.TestCase):
     def test_the_counts_agree_with_git(self):
         tracked = [
             path
-            for path in git(self.checkout, "ls-files", "scripts").splitlines()
+            for path in git(self.checkout, "ls-files", "package/scripts").splitlines()
             if path
         ]
         expected_tests = [
-            path for path in tracked if path.startswith("scripts/test_")
+            path for path in tracked if path.startswith("package/scripts/test_")
         ]
 
         output = self.run_hook()

@@ -2,9 +2,9 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[2]
 PACKAGE_WORKFLOW = ROOT / ".github" / "workflows" / "independent-review.yml"
-ADOPTER_TEMPLATE = ROOT / "templates" / "independent-review.yml"
+ADOPTER_TEMPLATE = ROOT / "package" / "templates" / "independent-review.yml"
 
 
 class IndependentReviewWorkflowTest(unittest.TestCase):
@@ -27,9 +27,9 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             self.assertIn('echo "present=true" >> "$GITHUB_OUTPUT"', workflow)
             self.assertIn('echo "present=false" >> "$GITHUB_OUTPUT"', workflow)
 
-        self.assertIn('run: scripts/review_gate.sh', package)
+        self.assertIn('run: package/scripts/review_gate.sh', package)
         self.assertIn('run: docs/ai-team/scripts/review_gate.sh', adopter)
-        self.assertIn("if [ -x scripts/review_gate.sh ]; then", package)
+        self.assertIn("if [ -x package/scripts/review_gate.sh ]; then", package)
         self.assertIn("if [ -x docs/ai-team/scripts/review_gate.sh ]; then", adopter)
 
 

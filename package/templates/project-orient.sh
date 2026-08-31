@@ -8,7 +8,7 @@
 
 # orient.sh exports AI_TEAM_DEFAULT_BRANCH before invoking this hook — copied
 # out to .ai-team/ at the repository root (#8), this file has no relative path
-# back to scripts/_default_branch.sh, so it cannot resolve the branch itself.
+# back to package/scripts/_default_branch.sh, so it cannot resolve the branch itself.
 # The fallback covers a direct run of this hook outside orient.sh.
 set -u
 BASE="${AI_TEAM_DEFAULT_BRANCH:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
@@ -43,16 +43,16 @@ echo "== ai-team project: what ships from origin/$BASE =="
 # -r, or ls-tree reports the `scripts` tree entry itself rather than its
 # contents: the first count is then always 1 and the second always 0, which is
 # what this hook printed to every agent that ran orient.sh (#10).
-shipped=$(git ls-tree -r --name-only "origin/$BASE" -- scripts 2>/dev/null)
-printf '  scripts/  %s tracked file(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^scripts/')"
-printf '  tests     %s test module(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^scripts/test_')"
+shipped=$(git ls-tree -r --name-only "origin/$BASE" -- package/scripts 2>/dev/null)
+printf '  scripts/  %s tracked file(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^package/scripts/')"
+printf '  tests     %s test module(s)\n' "$(printf '%s\n' "$shipped" | grep -c '^package/scripts/test_')"
 
 cat <<'TXT'
 
 == ai-team project: commands worth knowing ==
-  python3 -m unittest discover -s scripts -p 'test_*.py'   run the mechanism suite
-  scripts/orient.sh                                        read the board
-  scripts/gate.sh <pr> <full-sha>                          gate a merge
+  python3 -m unittest discover -s package/scripts -p 'test_*.py'   run the mechanism suite
+  package/scripts/orient.sh                                        read the board
+  package/scripts/gate.sh <pr> <full-sha>                          gate a merge
 
 Every change here lands in the repositories that mount this package at
 docs/ai-team/, so a mechanism change is a change to how other teams work.
