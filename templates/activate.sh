@@ -15,6 +15,7 @@ MUTEX_SHA=
 MUTEX_HELD=0
 TEMP_PARENT=
 TEMP_WORKTREE=
+TEMP_SUITE_REPO=
 BODY_FILE=
 WORKTREE_ADDED=0
 PUBLISHED_CLAIM_SHA=
@@ -25,6 +26,20 @@ fail() {
   printf 'activation: %s\n' "$*" >&2
   exit 1
 }
+
+# Repository-selection environment can redirect even `git -C` and `git init`
+# into adopter-owned Git state. Activation never guesses through it: enter the
+# intended checkout normally, with all selectors unset.
+[ -z "${GIT_DIR:-}" ] || fail "GIT_DIR must be unset before activation"
+[ -z "${GIT_WORK_TREE:-}" ] || fail "GIT_WORK_TREE must be unset before activation"
+[ -z "${GIT_COMMON_DIR:-}" ] || fail "GIT_COMMON_DIR must be unset before activation"
+[ -z "${GIT_OBJECT_DIRECTORY:-}" ] || fail "GIT_OBJECT_DIRECTORY must be unset before activation"
+[ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] || \
+  fail "GIT_ALTERNATE_OBJECT_DIRECTORIES must be unset before activation"
+[ -z "${GIT_INDEX_FILE:-}" ] || fail "GIT_INDEX_FILE must be unset before activation"
+[ -z "${GIT_NAMESPACE:-}" ] || fail "GIT_NAMESPACE must be unset before activation"
+[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || fail "GIT_CONFIG_PARAMETERS must be unset before activation"
+[ -z "${GIT_CONFIG_COUNT:-}" ] || fail "GIT_CONFIG_COUNT must be unset before activation"
 
 stop_for_pr() {
   printf 'activation: %s\n' "$*" >&2
@@ -60,9 +75,9 @@ EOF
     return 2
   }
 
-  if ! git push --quiet --force-with-lease="$MUTEX_REF:" \
-    origin "$MUTEX_SHA:$MUTEX_REF"; then
-    mutex_observed_lines=$(git ls-remote --heads origin "$MUTEX_REF" 2>/dev/null) || {
+  if ! git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:" \
+    "$ORIGIN_PUSH_URL" "$MUTEX_SHA:$MUTEX_REF"; then
+    mutex_observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || {
       printf 'activation: mutex push failed and its remote state cannot be inspected\n' >&2
       return 2
     }
@@ -92,9 +107,9 @@ EOF
           printf 'activation: selected mutex is malformed or not generated state; refusing recovery\n' >&2
           return 2
         }
-        if ! git push --quiet --force-with-lease="$MUTEX_REF:$mutex_observed" \
-          origin ":$MUTEX_REF"; then
-          recovered_lines=$(git ls-remote --heads origin "$MUTEX_REF" 2>/dev/null) || return 2
+        if ! git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:$mutex_observed" \
+          "$ORIGIN_PUSH_URL" ":$MUTEX_REF"; then
+          recovered_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || return 2
           recovered_observed=$(printf '%s\n' "$recovered_lines" | awk 'NF { print $1; exit }')
           [ -z "$recovered_observed" ] || {
             printf 'activation: mutex changed during exact recovery; refusing to delete %s\n' "$recovered_observed" >&2
@@ -114,7 +129,7 @@ EOF
       while [ "$mutex_waited" -lt "$mutex_wait_limit" ]; do
         sleep 1
         mutex_waited=$((mutex_waited + 1))
-        waited_lines=$(git ls-remote --heads origin "$MUTEX_REF" 2>/dev/null) || return 2
+        waited_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || return 2
         waited_observed=$(printf '%s\n' "$waited_lines" | awk 'NF { print $1; exit }')
         if [ -z "$waited_observed" ]; then
           printf 'activation: the short mutex cleared after %s second(s); observing the durable lane\n' "$mutex_waited" >&2
@@ -159,12 +174,12 @@ EOF
 
 release_activation_mutex() {
   [ "$MUTEX_HELD" -eq 1 ] || return 0
-  if git push --quiet --force-with-lease="$MUTEX_REF:$MUTEX_SHA" \
-    origin ":$MUTEX_REF"; then
+  if git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:$MUTEX_SHA" \
+    "$ORIGIN_PUSH_URL" ":$MUTEX_REF"; then
     MUTEX_HELD=0
     return 0
   fi
-  mutex_observed_lines=$(git ls-remote --heads origin "$MUTEX_REF" 2>/dev/null) || {
+  mutex_observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || {
     printf 'activation: cannot release the activation mutex or inspect its remote state\n' >&2
     return 2
   }
@@ -183,7 +198,7 @@ release_activation_mutex() {
 
 mark_failed_refresh_claim() {
   [ "$PUBLISHED_CLAIM_ACTIVE" -eq 1 ] && [ -n "$PUBLISHED_CLAIM_SHA" ] || return 0
-  failed_observed_lines=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || return 1
+  failed_observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || return 1
   failed_observed=$(printf '%s\n' "$failed_observed_lines" | awk 'NF { print $1; exit }')
   [ "$failed_observed" = "$PUBLISHED_CLAIM_SHA" ] || return 1
   failed_tree=$(git rev-parse "$base_sha^{tree}" 2>/dev/null) || return 1
@@ -195,13 +210,13 @@ mark_failed_refresh_claim() {
 $failed_message
 EOF
   ) || return 1
-  if git push --quiet --force-with-lease="refs/heads/$UPDATE_BRANCH:$PUBLISHED_CLAIM_SHA" \
-    origin "$failed_sha:refs/heads/$UPDATE_BRANCH"; then
+  if git -c core.hooksPath=/dev/null push --quiet --force-with-lease="refs/heads/$UPDATE_BRANCH:$PUBLISHED_CLAIM_SHA" \
+    "$ORIGIN_PUSH_URL" "$failed_sha:refs/heads/$UPDATE_BRANCH"; then
     PUBLISHED_CLAIM_ACTIVE=0
     printf 'activation: recorded a recoverable failed refresh marker at %s\n' "$failed_sha" >&2
     return 0
   fi
-  failed_after_lines=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || return 1
+  failed_after_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || return 1
   failed_after=$(printf '%s\n' "$failed_after_lines" | awk 'NF { print $1; exit }')
   [ "$failed_after" = "$failed_sha" ] || return 1
   PUBLISHED_CLAIM_ACTIVE=0
@@ -216,6 +231,12 @@ activation_cleanup() {
   fi
   if [ "$WORKTREE_ADDED" -eq 1 ]; then
     git -C "$ROOT" worktree remove --force "$TEMP_WORKTREE" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$TEMP_SUITE_REPO" ] && [ -n "$TEMP_PARENT" ]; then
+    case "$TEMP_SUITE_REPO" in
+      "$TEMP_PARENT"/suite-repo) rm -rf -- "$TEMP_SUITE_REPO" ;;
+      *) printf 'activation: refusing cleanup of unexpected suite path %s\n' "$TEMP_SUITE_REPO" >&2 ;;
+    esac
   fi
   [ -z "$BODY_FILE" ] || [ ! -f "$BODY_FILE" ] || rm -f -- "$BODY_FILE"
   [ -z "$TEMP_PARENT" ] || rmdir "$TEMP_PARENT" >/dev/null 2>&1 || true
@@ -263,6 +284,8 @@ git check-ref-format "refs/heads/$REF" >/dev/null 2>&1 || \
   fail "$CONFIG contains an unsafe ref"
 
 ORIGIN_URL=$(git remote get-url origin 2>/dev/null) || fail "origin remote is missing"
+ORIGIN_PUSH_URL=$(git remote get-url --push origin 2>/dev/null) || \
+  fail "origin has no writable push URL"
 repo_info=$(gh repo view "$ORIGIN_URL" --json nameWithOwner,defaultBranchRef \
   --jq '[.nameWithOwner, .defaultBranchRef.name] | @tsv' 2>/dev/null) || \
   fail "cannot resolve origin through gh"
@@ -271,6 +294,10 @@ $repo_info
 EOF
 [ -n "${REPO:-}" ] || fail "gh returned no repository for origin"
 [ -n "${BASE:-}" ] || fail "gh returned no default branch for origin"
+push_repo=$(gh repo view "$ORIGIN_PUSH_URL" --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) || \
+  fail "cannot resolve origin's push URL through gh"
+[ "$push_repo" = "$REPO" ] || \
+  fail "origin fetch and push URLs resolve to different repositories"
 
 upstream_lines=$(git ls-remote --exit-code "$SOURCE" "refs/heads/$REF" 2>/dev/null) || \
   fail "cannot resolve approved package ref $REF from $SOURCE"
@@ -302,8 +329,70 @@ run_mounted_suite() {
     "$suite_python" -B -m unittest discover -s "$PREFIX/scripts" -p 'test_*.py')
 }
 
+remove_isolated_suite_repo() {
+  [ -n "$TEMP_SUITE_REPO" ] && [ -n "$TEMP_PARENT" ] || return 0
+  case "$TEMP_SUITE_REPO" in
+    "$TEMP_PARENT"/suite-repo) rm -rf -- "$TEMP_SUITE_REPO" || return 1 ;;
+    *) return 1 ;;
+  esac
+  TEMP_SUITE_REPO=
+}
+
+# Run package tests in a standalone repository, never a linked worktree. This
+# prevents a passing suite from changing the caller/build repository's shared
+# hooks, config, refs, index, or object namespace. Return 1 for an ordinary
+# failing suite and 2 for setup, mutation, or cleanup violations.
+run_isolated_mounted_suite() {
+  isolated_revision=$1
+  isolated_tree=$2
+  isolated_source_checkout=$3
+  TEMP_SUITE_REPO="$TEMP_PARENT/suite-repo"
+  [ ! -e "$TEMP_SUITE_REPO" ] || return 2
+  git init -q "$TEMP_SUITE_REPO" || return 2
+  git -C "$TEMP_SUITE_REPO" config user.name ai-team-suite || return 2
+  git -C "$TEMP_SUITE_REPO" config user.email ai-team-suite@users.noreply.github.com || return 2
+  git -C "$TEMP_SUITE_REPO" -c protocol.file.allow=always \
+    fetch -q --no-tags "$isolated_source_checkout" HEAD || return 2
+  git -C "$TEMP_SUITE_REPO" -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD || return 2
+  git -C "$TEMP_SUITE_REPO" remote add origin "$ORIGIN_URL" || return 2
+  git -C "$TEMP_SUITE_REPO" remote set-url --push origin "$TEMP_PARENT/non-writable-origin" || return 2
+
+  isolated_before_head=$(git -C "$TEMP_SUITE_REPO" rev-parse HEAD 2>/dev/null || true)
+  isolated_before_tree=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD^{tree}" 2>/dev/null || true)
+  isolated_before_prefix=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
+  isolated_config_before=$(git -C "$TEMP_SUITE_REPO" config --local --list 2>/dev/null | LC_ALL=C sort)
+  isolated_refs_before=$(git -C "$TEMP_SUITE_REPO" for-each-ref --format='%(refname)%09%(objectname)' 2>/dev/null | LC_ALL=C sort)
+  isolated_hooks_before=$(find "$TEMP_SUITE_REPO/.git/hooks" -type f ! -name '*.sample' -print 2>/dev/null | LC_ALL=C sort)
+  [ "$isolated_before_head" = "$isolated_revision" ] && \
+    [ "$isolated_before_tree" = "$isolated_tree" ] && \
+    [ "$isolated_before_prefix" = "$UPSTREAM_TREE" ] && \
+    [ -z "$(git -C "$TEMP_SUITE_REPO" status --porcelain --untracked-files=all)" ] || \
+    return 2
+
+  run_mounted_suite "$TEMP_SUITE_REPO"
+  isolated_suite_status=$?
+  [ "$isolated_suite_status" -eq 0 ] || return 1
+
+  isolated_after_head=$(git -C "$TEMP_SUITE_REPO" rev-parse HEAD 2>/dev/null || true)
+  isolated_after_tree=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD^{tree}" 2>/dev/null || true)
+  isolated_after_prefix=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
+  isolated_config_after=$(git -C "$TEMP_SUITE_REPO" config --local --list 2>/dev/null | LC_ALL=C sort)
+  isolated_refs_after=$(git -C "$TEMP_SUITE_REPO" for-each-ref --format='%(refname)%09%(objectname)' 2>/dev/null | LC_ALL=C sort)
+  isolated_hooks_after=$(find "$TEMP_SUITE_REPO/.git/hooks" -type f ! -name '*.sample' -print 2>/dev/null | LC_ALL=C sort)
+  [ "$isolated_after_head" = "$isolated_revision" ] && \
+    [ "$isolated_after_tree" = "$isolated_tree" ] && \
+    [ "$isolated_after_prefix" = "$UPSTREAM_TREE" ] && \
+    [ "$isolated_config_after" = "$isolated_config_before" ] && \
+    [ "$isolated_refs_after" = "$isolated_refs_before" ] && \
+    [ "$isolated_hooks_after" = "$isolated_hooks_before" ] && \
+    [ -z "$(git -C "$TEMP_SUITE_REPO" status --porcelain --untracked-files=all)" ] || \
+    return 2
+  remove_isolated_suite_repo || return 2
+  return 0
+}
+
 refresh_remote_update_sha() {
-  remote_update_line=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  remote_update_line=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     return 1
   REMOTE_UPDATE_SHA=$(printf '%s\n' "$remote_update_line" | awk 'NF { print $1; exit }')
 }
@@ -332,7 +421,7 @@ scan_active_lanes() {
 # labels prove it is generated state already present on the default branch.
 # The caller must own the activation mutex.
 cleanup_proven_merged_refresh() {
-  lingering_line=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  lingering_line=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "cannot inspect origin/$UPDATE_BRANCH"
   lingering_sha=$(printf '%s\n' "$lingering_line" | awk 'NF { print $1; exit }')
   [ -n "$lingering_sha" ] || return 0
@@ -441,9 +530,9 @@ EOF
   [ "$merged_labels" = "task:done" ] || \
     fail "merged package refresh PR #$merged_number did not reach exact task:done state"
 
-  if ! git push --quiet --force-with-lease="refs/heads/$UPDATE_BRANCH:$lingering_sha" \
-    origin ":refs/heads/$UPDATE_BRANCH"; then
-    lingering_after=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  if ! git -c core.hooksPath=/dev/null push --quiet --force-with-lease="refs/heads/$UPDATE_BRANCH:$lingering_sha" \
+    "$ORIGIN_PUSH_URL" ":refs/heads/$UPDATE_BRANCH"; then
+    lingering_after=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
       fail "cannot delete or inspect the merged origin/$UPDATE_BRANCH"
     lingering_after_sha=$(printf '%s\n' "$lingering_after" | awk 'NF { print $1; exit }')
     if [ -n "$lingering_after_sha" ]; then
@@ -490,7 +579,7 @@ terminalize_deleted_refreshes() {
     # The reusable branch name and mutable body/labels are only a candidate
     # index. Fetch GitHub's immutable PR head and prove the generated commit,
     # package tree, outside-prefix diff, and merge ancestry before editing it.
-    pull_head_lines=$(git ls-remote origin "refs/pull/$deleted_number/head" 2>/dev/null || true)
+    pull_head_lines=$(git ls-remote "$ORIGIN_URL" "refs/pull/$deleted_number/head" 2>/dev/null || true)
     pull_head_count=$(printf '%s\n' "$pull_head_lines" | awk 'NF { count++ } END { print count + 0 }')
     pull_head=$(printf '%s\n' "$pull_head_lines" | awk 'NF { print $1; exit }')
     if [ "$pull_head_count" -ne 1 ] || [ "$pull_head" != "$deleted_head" ] || \
@@ -577,7 +666,7 @@ EOF
 }
 
 finalize_current_refresh_if_needed() {
-  current_lingering=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  current_lingering=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "cannot inspect origin/$UPDATE_BRANCH"
   AUTO_MERGED_ROWS=
   [ -n "$current_lingering" ] || find_unterminalized_deleted_refreshes
@@ -585,7 +674,7 @@ finalize_current_refresh_if_needed() {
   current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ "$current_branch" = "$BASE" ] || \
     fail "the package is current, but $UPDATE_BRANCH remains; finalize it from a clean $BASE checkout"
-  [ -z "$(git status --porcelain --untracked-files=normal)" ] || \
+  [ -z "$(git status --porcelain --untracked-files=all)" ] || \
     fail "the package is current, but $UPDATE_BRANCH remains; finalize it from a clean checkout"
   git fetch -q origin "$BASE" || fail "cannot refresh origin/$BASE while finalizing the refresh lane"
   local_sha=$(git rev-parse HEAD)
@@ -603,7 +692,7 @@ finalize_current_refresh_if_needed() {
     fail "package refresh refuses active task lanes: $(printf '%s' "$active_lanes" | tr '\n' ' ')"
   cleanup_proven_merged_refresh
   terminalize_deleted_refreshes
-  current_lingering=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  current_lingering=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "cannot recheck origin/$UPDATE_BRANCH"
   current_lingering_sha=$(printf '%s\n' "$current_lingering" | awk 'NF { print $1; exit }')
   [ -z "$current_lingering_sha" ] || \
@@ -614,7 +703,7 @@ finalize_current_refresh_if_needed() {
 mounted_tree=$(git rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
 RECOVER_CURRENT_REFRESH=0
 if [ -n "${AI_TEAM_RECOVER_REFRESH_SHA:-}" ]; then
-  selected_recovery_lines=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  selected_recovery_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "cannot inspect the exact refresh selected for recovery"
   selected_recovery_sha=$(printf '%s\n' "$selected_recovery_lines" | awk 'NF { print $1; exit }')
   [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" != "$selected_recovery_sha" ] || \
@@ -629,9 +718,35 @@ if [ "$mounted_tree" = "$UPSTREAM_TREE" ] && [ "$RECOVER_CURRENT_REFRESH" -eq 0 
     fail "the mounted package has staged changes; refusing to execute it"
   [ -z "$(git ls-files --others --exclude-standard -- "$PREFIX")" ] || \
     fail "the mounted package has untracked files; refusing to execute it"
-  run_mounted_suite "$ROOT" || \
+
+  # Tests run in a standalone repository even when the package is current. A
+  # linked worktree would share hooks, config, refs, and objects with the caller
+  # and therefore would not be an isolation boundary.
+  current_suite_head=$(git rev-parse HEAD) || fail "cannot capture the current checkout before verification"
+  current_suite_tree=$(git rev-parse "HEAD^{tree}") || fail "cannot capture the current tree before verification"
+  TEMP_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/ai-team-current-verify.XXXXXX") || \
+    fail "cannot create an isolated current-package verification directory"
+  trap activation_cleanup EXIT
+  trap 'exit 130' HUP INT TERM
+  current_suite_status=0
+  run_isolated_mounted_suite "$current_suite_head" "$current_suite_tree" "$ROOT" || current_suite_status=$?
+  [ "$current_suite_status" -ne 1 ] || \
     fail "current package matches $UPSTREAM_SHA but its mounted mechanism suite failed"
+  [ "$current_suite_status" -eq 0 ] || \
+    fail "current mounted mechanism suite modified its standalone repository; refusing onboarding"
+  rmdir "$TEMP_PARENT" >/dev/null 2>&1 || \
+    fail "cannot remove the current-package verification directory"
+  TEMP_PARENT=
+  trap - EXIT HUP INT TERM
+
   finalize_current_refresh_if_needed
+  [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$current_suite_head" ] && \
+    [ "$(git rev-parse "HEAD:$PREFIX" 2>/dev/null || true)" = "$UPSTREAM_TREE" ] && \
+    git diff --quiet -- "$PREFIX" && \
+    git diff --cached --quiet -- "$PREFIX" && \
+    [ -z "$(git ls-files --others --exclude-standard -- "$PREFIX")" ] && \
+    [ -x "$ORIENT" ] || \
+    fail "the caller's mounted package changed after verification; refusing to execute it"
   printf 'activation: package is current at %s (%s)\n' "$UPSTREAM_SHA" "$REF"
   exec "$ORIENT"
 fi
@@ -654,7 +769,7 @@ current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
   fail "package refresh requires the checked-out default branch, not detached HEAD"
 [ "$current_branch" = "$BASE" ] || \
   fail "package refresh requires $BASE; current branch is $current_branch"
-[ -z "$(git status --porcelain --untracked-files=normal)" ] || \
+[ -z "$(git status --porcelain --untracked-files=all)" ] || \
   fail "package refresh refuses a dirty checkout"
 
 for operation_marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
@@ -882,7 +997,7 @@ TEMP_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/ai-team-package-refresh.XXXXXX") || \
 TEMP_WORKTREE="$TEMP_PARENT/worktree"
 BODY_FILE="$TEMP_PARENT/pr-body.md"
 
-git worktree add --quiet --detach "$TEMP_WORKTREE" "origin/$BASE" || \
+git -c core.hooksPath=/dev/null worktree add --quiet --detach "$TEMP_WORKTREE" "origin/$BASE" || \
   fail "cannot create the isolated package refresh worktree"
 WORKTREE_ADDED=1
 
@@ -977,13 +1092,15 @@ resolve_pr_by_head() {
   return 1
 }
 
-claim_message | git -C "$TEMP_WORKTREE" commit --allow-empty --quiet --file=- || \
+claim_message | git -C "$TEMP_WORKTREE" \
+  -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+  commit --allow-empty --no-verify --quiet --file=- || \
   fail "cannot create the package refresh claim commit"
 claim_sha=$(git -C "$TEMP_WORKTREE" rev-parse HEAD)
-if ! git -C "$TEMP_WORKTREE" push --quiet \
+if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null push --quiet \
   --force-with-lease="refs/heads/$UPDATE_BRANCH:$REMOTE_UPDATE_SHA" \
-  origin "$claim_sha:refs/heads/$UPDATE_BRANCH"; then
-  observed_lines=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  "$ORIGIN_PUSH_URL" "$claim_sha:refs/heads/$UPDATE_BRANCH"; then
+  observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "claim push failed and origin/$UPDATE_BRANCH cannot be inspected"
   observed=$(printf '%s\n' "$observed_lines" | awk 'NF { print $1; exit }')
   if [ "$observed" = "$claim_sha" ]; then
@@ -1056,11 +1173,13 @@ release_activation_mutex || \
 # PR is generated state, so replacing its obsolete tree under a lease cannot
 # discard task-owned work.
 if git -C "$TEMP_WORKTREE" rev-parse "HEAD:$PREFIX" >/dev/null 2>&1; then
-  if ! git -C "$TEMP_WORKTREE" subtree pull --prefix="$PREFIX" "$SOURCE" "$UPSTREAM_SHA" --squash; then
+  if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+    subtree pull --prefix="$PREFIX" "$SOURCE" "$UPSTREAM_SHA" --squash; then
     fail "git subtree pull conflicted; origin/$UPDATE_BRANCH remains draft and the caller checkout is unchanged"
   fi
 else
-  if ! git -C "$TEMP_WORKTREE" subtree add --prefix="$PREFIX" "$SOURCE" "$UPSTREAM_SHA" --squash; then
+  if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+    subtree add --prefix="$PREFIX" "$SOURCE" "$UPSTREAM_SHA" --squash; then
     fail "git subtree add failed; origin/$UPDATE_BRANCH remains draft and the caller checkout is unchanged"
   fi
 fi
@@ -1068,18 +1187,48 @@ fi
 result_tree=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
 [ "$result_tree" = "$UPSTREAM_TREE" ] || \
   fail "subtree result does not exactly match package revision $UPSTREAM_SHA"
+BUILD_SHA=$(git -C "$TEMP_WORKTREE" rev-parse HEAD 2>/dev/null || true)
+BUILD_TREE=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD^{tree}" 2>/dev/null || true)
+[ -n "$BUILD_SHA" ] && [ -n "$BUILD_TREE" ] && \
+  [ -z "$(git -C "$TEMP_WORKTREE" status --porcelain --untracked-files=all)" ] && \
+  git -C "$TEMP_WORKTREE" diff --quiet "$base_sha" "$BUILD_SHA" -- . ":(exclude)$PREFIX" || \
+  fail "isolated subtree build did not produce exact clean package-only generated state"
 
-if ! run_mounted_suite "$TEMP_WORKTREE"; then
+isolated_suite_status=0
+run_isolated_mounted_suite "$BUILD_SHA" "$BUILD_TREE" "$TEMP_WORKTREE" || isolated_suite_status=$?
+[ "$isolated_suite_status" -ne 1 ] || \
   fail "mounted mechanism tests failed; origin/$UPDATE_BRANCH remains draft and the caller checkout is unchanged"
-fi
+[ "$isolated_suite_status" -eq 0 ] || \
+  fail "mounted mechanism suite modified its standalone repository; refusing publication"
+post_suite_head=$(git -C "$TEMP_WORKTREE" rev-parse HEAD 2>/dev/null || true)
+post_suite_tree=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD^{tree}" 2>/dev/null || true)
+post_suite_prefix=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
+  [ "$post_suite_head" = "$BUILD_SHA" ] && [ "$post_suite_tree" = "$BUILD_TREE" ] && \
+  [ "$post_suite_prefix" = "$UPSTREAM_TREE" ] && \
+  [ -z "$(git -C "$TEMP_WORKTREE" status --porcelain --untracked-files=all)" ] && \
+  git -C "$TEMP_WORKTREE" diff --quiet "$base_sha" "$post_suite_head" -- . ":(exclude)$PREFIX" || \
+  fail "mounted mechanism suite modified the isolated refresh result; refusing publication"
 
-metadata_message | git -C "$TEMP_WORKTREE" commit --allow-empty --quiet --file=- || \
+expected_metadata=$(metadata_message)
+printf '%s\n' "$expected_metadata" | git -C "$TEMP_WORKTREE" \
+  -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+  commit --allow-empty --no-verify --quiet --file=- || \
   fail "cannot record the verified package revision"
 FINAL_SHA=$(git -C "$TEMP_WORKTREE" rev-parse HEAD)
-if ! git -C "$TEMP_WORKTREE" push --quiet \
+final_parent_line=$(git -C "$TEMP_WORKTREE" rev-list --parents -n 1 "$FINAL_SHA" 2>/dev/null || true)
+final_parent=$(printf '%s\n' "$final_parent_line" | awk 'NF == 2 { print $2 }')
+final_tree=$(git -C "$TEMP_WORKTREE" rev-parse "$FINAL_SHA^{tree}" 2>/dev/null || true)
+final_prefix=$(git -C "$TEMP_WORKTREE" rev-parse "$FINAL_SHA:$PREFIX" 2>/dev/null || true)
+final_message=$(git -C "$TEMP_WORKTREE" show -s --format=%B "$FINAL_SHA" 2>/dev/null || true)
+[ "$final_parent" = "$BUILD_SHA" ] && [ "$final_tree" = "$BUILD_TREE" ] && \
+  [ "$final_prefix" = "$UPSTREAM_TREE" ] && [ "$final_message" = "$expected_metadata" ] && \
+  [ -z "$(git -C "$TEMP_WORKTREE" status --porcelain --untracked-files=all)" ] && \
+  git -C "$TEMP_WORKTREE" diff --quiet "$base_sha" "$FINAL_SHA" -- . ":(exclude)$PREFIX" || \
+  fail "verified refresh metadata commit was not exact generated package-only state"
+if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null push --quiet \
   --force-with-lease="refs/heads/$UPDATE_BRANCH:$lease_sha" \
-  origin "$FINAL_SHA:refs/heads/$UPDATE_BRANCH"; then
-  observed_lines=$(git ls-remote --heads origin "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  "$ORIGIN_PUSH_URL" "$FINAL_SHA:refs/heads/$UPDATE_BRANCH"; then
+  observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "verified-result push failed and origin/$UPDATE_BRANCH cannot be inspected"
   observed=$(printf '%s\n' "$observed_lines" | awk 'NF { print $1; exit }')
   if [ "$observed" = "$FINAL_SHA" ]; then
@@ -1090,6 +1239,12 @@ if ! git -C "$TEMP_WORKTREE" push --quiet \
     fail "cannot publish the verified package refresh; origin/$UPDATE_BRANCH remains on the claim (check push permission or protection)"
   fi
 fi
+published_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
+  fail "cannot read back the verified origin/$UPDATE_BRANCH publication"
+published_count=$(printf '%s\n' "$published_lines" | awk 'NF { count++ } END { print count + 0 }')
+published_sha=$(printf '%s\n' "$published_lines" | awk 'NF { print $1; exit }')
+[ "$published_count" -eq 1 ] && [ "$published_sha" = "$FINAL_SHA" ] || \
+  stop_for_pr "origin/$UPDATE_BRANCH did not retain this exact verified result after publication"
 PUBLISHED_CLAIM_ACTIVE=0
 REMOTE_UPDATE_SHA=$FINAL_SHA
 

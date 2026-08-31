@@ -35,6 +35,7 @@ class ActivationRefreshTest(unittest.TestCase):
         self.gh_log = self.state / "gh.log"
         self.suite_marker = self.root / "suite-ran"
         self.orient_marker = self.root / "orient-ran"
+        self.hook_marker = self.root / "metadata-hook-ran"
         self.activation_tmp = self.root / "activation-tmp"
         self.activation_tmp.mkdir()
 
@@ -117,11 +118,56 @@ class ActivationRefreshTest(unittest.TestCase):
             textwrap.dedent(
                 """\
                 import os
+                import stat
+                import subprocess
                 import unittest
                 from pathlib import Path
 
                 class MountedSuiteTest(unittest.TestCase):
                     def test_mounted_suite_runs(self):
+                        mutation = os.environ.get("ACTIVATION_TEST_SUITE_MUTATION")
+                        if mutation in {"install-hook-only", "commit-outside"}:
+                            common_dir = Path(
+                                subprocess.run(
+                                    ["git", "rev-parse", "--git-common-dir"],
+                                    text=True,
+                                    capture_output=True,
+                                    check=True,
+                                ).stdout.strip()
+                            )
+                            if not common_dir.is_absolute():
+                                common_dir = (Path.cwd() / common_dir).resolve()
+                            hook = common_dir / "hooks" / "post-commit"
+                            hook.parent.mkdir(parents=True, exist_ok=True)
+                            hook.write_text(
+                                r'''#!/usr/bin/env bash
+                                body=$(git log -1 --format=%B)
+                                if printf '%s\\n' "$body" | grep -q '^chore(ai-team): refresh package' && ! printf '%s\\n' "$body" | grep -q '^AI-Team-Activation-Claim:'; then
+                                  printf 'metadata hook ran\\n' > "$ACTIVATION_TEST_HOOK_MARKER"
+                                fi
+                                ''',
+                                encoding="utf-8",
+                            )
+                            hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+                        if mutation == "commit-outside":
+                            sentinel = Path.cwd() / "ADOPTER_SUITE_SENTINEL"
+                            sentinel.write_text("must never publish\\n", encoding="utf-8")
+                            subprocess.run(["git", "add", sentinel.name], check=True)
+                            subprocess.run(
+                                ["git", "commit", "-qm", "suite mutated adopter root"],
+                                check=True,
+                            )
+                        elif mutation == "rewrite-current":
+                            orient = Path.cwd() / "docs" / "ai-team" / "scripts" / "orient.sh"
+                            orient.write_text(
+                                r'''#!/usr/bin/env bash
+                                printf 'mutated orient ran\\n' > "$ACTIVATION_TEST_ORIENT_MARKER"
+                                ''',
+                                encoding="utf-8",
+                            )
+                            (Path.cwd() / "docs" / "ai-team" / "UNTRACKED_EXECUTION_TARGET").write_text(
+                                "must never execute\\n", encoding="utf-8"
+                            )
                         with Path(os.environ["ACTIVATION_TEST_SUITE_MARKER"]).open(
                             "a", encoding="utf-8"
                         ) as marker:
@@ -231,10 +277,13 @@ class ActivationRefreshTest(unittest.TestCase):
                           fi
                         fi
                         if [ -f "$state/valid-older-merged" ] && printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
+                          older_head=$(cat "$state/older-valid-head")
+                          older_merge=$(cat "$state/older-valid-merge")
+                          older_revision=$(cat "$state/older-valid-revision")
                           older_tasks=task:review
                           [ ! -f "$state/pr-terminal-48" ] || older_tasks=task:done
                           printf '48\\t%s\\t%s\\texample/adopter\\tfalse\\tmain\\tai-team/package-refresh\\tagent:package-bootstrap\\t%s\\ttrue\\ttrue\\t- Source: `%s`\\t- Ref: `package-mount`\\t- Resolved revision: `%s`\\n' \\
-                            "$head" "$merge" "$older_tasks" "$ACTIVATION_TEST_SOURCE" "$revision"
+                            "$older_head" "$older_merge" "$older_tasks" "$ACTIVATION_TEST_SOURCE" "$older_revision"
                         fi
                         if printf '%s\\n' "$*" | grep -q -- 'Resolved revision'; then
                           tasks=task:review
@@ -342,7 +391,7 @@ class ActivationRefreshTest(unittest.TestCase):
                     printf 'https://example.test/pull/%s\\n' "$number"
                     ;;
                   "pr view")
-                    if [ "${3:-}" = "52" ]; then
+                    if [ "${3:-}" = "52" ] && [ -f "$state/claim-pr-visible" ]; then
                       printf 'agent:race-claimant,task:active\\n'
                       exit 0
                     fi
@@ -510,6 +559,8 @@ class ActivationRefreshTest(unittest.TestCase):
         recover_refresh_sha: str | None = None,
         mutex_wait_seconds: int | None = None,
         mutex_winner_delay: int | None = None,
+        suite_mutation: str | None = None,
+        git_dir: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         checkout = checkout or self.checkout
         environment = self.git_env()
@@ -521,6 +572,7 @@ class ActivationRefreshTest(unittest.TestCase):
             ACTIVATION_TEST_SOURCE=bash_path(self.source_bare),
             ACTIVATION_TEST_SUITE_MARKER=str(self.suite_marker),
             ACTIVATION_TEST_ORIENT_MARKER=str(self.orient_marker),
+            ACTIVATION_TEST_HOOK_MARKER=str(self.hook_marker),
             TMPDIR=bash_path(self.activation_tmp),
             ACTIVATION_TEST_REAL_GIT=bash_path(Path(shutil.which("git") or "git")),
         )
@@ -540,6 +592,10 @@ class ActivationRefreshTest(unittest.TestCase):
             environment["AI_TEAM_MUTEX_WAIT_SECONDS"] = str(mutex_wait_seconds)
         if mutex_winner_delay is not None:
             environment["ACTIVATION_TEST_MUTEX_WINNER_DELAY"] = str(mutex_winner_delay)
+        if suite_mutation is not None:
+            environment["ACTIVATION_TEST_SUITE_MUTATION"] = suite_mutation
+        if git_dir is not None:
+            environment["GIT_DIR"] = str(git_dir)
         return run_with_bash_path(
             ["bash", str(checkout / ".ai-team" / "activate.sh")],
             stub_directory=self.bin,
@@ -951,6 +1007,55 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertIsNone(self.remote_mutex_sha())
 
     def test_auto_deleted_merge_is_terminalized_before_a_newer_refresh(self):
+        # Model a genuinely older refresh before the current one. Historical
+        # PRs on the reusable head name must retain distinct immutable heads;
+        # sharing one head would correctly be rejected as ambiguous.
+        older_revision = self.package_sha
+        older_base = self.git_output("rev-parse", "HEAD")
+        self.git(
+            "subtree",
+            "add",
+            "--prefix=docs/ai-team",
+            str(self.source_bare),
+            older_revision,
+            "--squash",
+        )
+        older_message = (
+            "AI Team package refresh\n\n"
+            "AI-Team-Activation-Managed: true\n"
+            f"AI-Team-Activation-Base: {older_base}\n"
+            f"AI-Team-Package-Source: {bash_path(self.source_bare)}\n"
+            "AI-Team-Package-Ref: package-mount\n"
+            f"AI-Team-Package-Revision: {older_revision}\n"
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "--allow-empty", "--file=-"],
+            cwd=self.checkout,
+            env=self.git_env(),
+            input=older_message,
+            text=True,
+            check=True,
+        )
+        older_refresh_sha = self.git_output("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", "HEAD:main")
+        (self.state / "older-valid-head").write_text(
+            f"{older_refresh_sha}\n", encoding="utf-8"
+        )
+        (self.state / "older-valid-merge").write_text(
+            f"{older_refresh_sha}\n", encoding="utf-8"
+        )
+        (self.state / "older-valid-revision").write_text(
+            f"{older_revision}\n", encoding="utf-8"
+        )
+        self.assertEqual(self.git_output("status", "--porcelain"), "")
+
+        (self.source / "VERSION").write_text("first package revision\n", encoding="utf-8")
+        self.git("add", "VERSION", cwd=self.source)
+        self.git("commit", "-qm", "publish first package revision", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+
         original = self.run_activation(exclusive_first_refresh=True)
         self.assertEqual(original.returncode, 3, original.stdout + original.stderr)
         refresh_sha = self.remote_update_sha()
@@ -979,7 +1084,7 @@ class ActivationRefreshTest(unittest.TestCase):
                 str(self.origin),
                 "update-ref",
                 "refs/pull/48/head",
-                refresh_sha,
+                older_refresh_sha,
             ],
             env=self.git_env(),
             check=True,
@@ -1099,6 +1204,7 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertIn("first activation/migration is not mutex-compatible", unacknowledged.stderr)
         self.assertIsNone(self.remote_update_sha())
         self.assertIsNone(self.remote_mutex_sha())
+
         self.assert_caller_unchanged(original_head)
 
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{UPDATE_BRANCH}")
@@ -1220,6 +1326,39 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertIsNone(self.remote_update_sha())
         self.assertEqual(self.git_output("rev-parse", "HEAD"), original_head)
         self.assertFalse((self.state / "pr-number").exists())
+
+    def test_distinct_same_repository_pushurl_drives_all_activation_writes(self):
+        fetch_url = self.git_output("remote", "get-url", "origin")
+        push_url = self.origin.resolve().as_uri()
+        self.assertNotEqual(fetch_url, push_url)
+        self.git("remote", "set-url", "--push", "origin", push_url)
+
+        activated = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(activated.returncode, 3, activated.stdout + activated.stderr)
+        self.assertIsNotNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertTrue((self.state / "ready").is_file())
+        self.assertEqual(
+            self.git_output("remote", "get-url", "--push", "origin"), push_url
+        )
+
+    def test_repository_selector_environment_fails_before_any_git_or_remote_state(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        original_config = self.git_output("config", "--local", "--list")
+        common_dir = Path(self.git_output("rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = (self.checkout / common_dir).resolve()
+
+        rejected = self.run_activation(git_dir=common_dir)
+
+        self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
+        self.assertIn("GIT_DIR must be unset", rejected.stderr)
+        self.assertEqual(self.git_output("config", "--local", "--list"), original_config)
+        self.assert_caller_unchanged(original_head)
+        self.assertIsNone(self.remote_update_sha())
+        self.assertIsNone(self.remote_mutex_sha())
+        self.assertFalse(self.gh_log.exists())
 
     def test_issue_half_claim_and_pr_only_lane_each_refuse_the_update(self):
         original_head = self.git_output("rev-parse", "HEAD")
@@ -1491,6 +1630,158 @@ class ActivationRefreshTest(unittest.TestCase):
         self.assertTrue((self.state / "ready").is_file())
         self.assertIsNone(self.remote_mutex_sha())
         self.assert_caller_unchanged(original_head)
+
+    def test_passing_suite_cannot_mutate_git_state_publish_orient_or_adopter_paths(self):
+        original_head = self.git_output("rev-parse", "HEAD")
+        common_dir = Path(self.git_output("rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = (self.checkout / common_dir).resolve()
+        post_commit = common_dir / "hooks" / "post-commit"
+        pre_push = common_dir / "hooks" / "pre-push"
+        post_checkout = common_dir / "hooks" / "post-checkout"
+        config_before = self.git_output("config", "--local", "--list")
+        refs_before = self.git_output(
+            "for-each-ref", "--format=%(refname)%09%(objectname)"
+        )
+
+        hook_only = self.run_activation(
+            exclusive_first_refresh=True, suite_mutation="install-hook-only"
+        )
+
+        self.assertEqual(hook_only.returncode, 1, hook_only.stdout + hook_only.stderr)
+        self.assertIn("modified its standalone repository", hook_only.stderr)
+        self.assertFalse(post_commit.exists())
+        self.assertFalse(pre_push.exists())
+        self.assertFalse(post_checkout.exists())
+        self.assertEqual(self.git_output("config", "--local", "--list"), config_before)
+        self.assertEqual(
+            self.git_output("for-each-ref", "--format=%(refname)%09%(objectname)"),
+            refs_before,
+        )
+        self.assert_caller_unchanged(original_head)
+        failed_sha = self.remote_update_sha()
+        self.assertIsNotNone(failed_sha)
+        failed_message = self.origin_output("log", "-1", "--format=%B", failed_sha)
+        self.assertIn("AI-Team-Activation-Failed: true", failed_message)
+        self.assertFalse((self.state / "ready").exists())
+
+        # Owner-installed hooks are adopter state. Activation neither deletes
+        # nor executes them for its generated commits and leased pushes.
+        hook_body = textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf 'activation hook ran\n' > "$ACTIVATION_TEST_HOOK_MARKER"
+            """
+        )
+        for hook in (post_commit, pre_push, post_checkout):
+            hook.write_text(hook_body, encoding="utf-8")
+            hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+        post_commit_bytes = post_commit.read_bytes()
+        pre_push_bytes = pre_push.read_bytes()
+        post_checkout_bytes = post_checkout.read_bytes()
+
+        recovered = self.run_activation(exclusive_first_refresh=True)
+
+        self.assertEqual(recovered.returncode, 3, recovered.stdout + recovered.stderr)
+        self.assertFalse(self.hook_marker.exists())
+        self.assertEqual(post_commit.read_bytes(), post_commit_bytes)
+        self.assertEqual(pre_push.read_bytes(), pre_push_bytes)
+        self.assertEqual(post_checkout.read_bytes(), post_checkout_bytes)
+        verified_sha = self.remote_update_sha()
+        self.assertIsNotNone(verified_sha)
+        verified_message = self.origin_output("log", "-1", "--format=%B", verified_sha)
+        self.assertIn("AI-Team-Activation-Managed: true", verified_message)
+        self.assertIn(f"AI-Team-Activation-Base: {original_head}", verified_message)
+        self.assertIn(f"AI-Team-Package-Revision: {self.package_sha}", verified_message)
+        self.assertNotIn("AI-Team-Activation-Claim:", verified_message)
+        self.assertNotIn("AI-Team-Activation-Failed:", verified_message)
+        verified_parents = self.origin_output(
+            "rev-list", "--parents", "-n", "1", verified_sha
+        ).split()
+        self.assertEqual(len(verified_parents), 2)
+        self.assertEqual(
+            self.origin_output("rev-parse", f"{verified_sha}^{{tree}}"),
+            self.origin_output("rev-parse", f"{verified_parents[1]}^{{tree}}"),
+        )
+        self.assertEqual(
+            self.origin_output("rev-parse", f"{verified_sha}:docs/ai-team"),
+            self.package_tree,
+        )
+        self.assertEqual(
+            self.origin_output(
+                "diff",
+                "--name-only",
+                original_head,
+                verified_sha,
+                "--",
+                ".",
+                ":(exclude)docs/ai-team",
+            ),
+            "",
+        )
+
+        subprocess.run(
+            ["git", "--git-dir", str(self.origin), "update-ref", "refs/heads/main", verified_sha],
+            env=self.git_env(),
+            check=True,
+        )
+        (self.state / "pr-merged").write_text("yes\n", encoding="utf-8")
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        merged_head = self.git_output("rev-parse", "HEAD")
+        orient = self.checkout / "docs" / "ai-team" / "scripts" / "orient.sh"
+        orient_bytes = orient.read_bytes()
+
+        current_mutation = self.run_activation(suite_mutation="rewrite-current")
+
+        self.assertEqual(
+            current_mutation.returncode,
+            1,
+            current_mutation.stdout + current_mutation.stderr,
+        )
+        self.assertIn("modified its standalone repository", current_mutation.stderr)
+        self.assertFalse(self.orient_marker.exists())
+        self.assertEqual(orient.read_bytes(), orient_bytes)
+        self.assertFalse((self.checkout / "docs" / "ai-team" / "UNTRACKED_EXECUTION_TARGET").exists())
+        self.assertFalse(self.hook_marker.exists())
+        self.assertEqual(post_commit.read_bytes(), post_commit_bytes)
+        self.assertEqual(pre_push.read_bytes(), pre_push_bytes)
+        self.assertEqual(post_checkout.read_bytes(), post_checkout_bytes)
+        self.assert_caller_unchanged(merged_head)
+
+        self.advance_package_source("POST_SUITE_MUTATION")
+        outside_mutation = self.run_activation(suite_mutation="commit-outside")
+
+        self.assertEqual(
+            outside_mutation.returncode,
+            1,
+            outside_mutation.stdout + outside_mutation.stderr,
+        )
+        self.assertIn("modified its standalone repository", outside_mutation.stderr)
+        self.assertFalse((self.checkout / "ADOPTER_SUITE_SENTINEL").exists())
+        self.assertFalse(self.hook_marker.exists())
+        self.assertEqual(post_commit.read_bytes(), post_commit_bytes)
+        self.assertEqual(pre_push.read_bytes(), pre_push_bytes)
+        self.assertEqual(post_checkout.read_bytes(), post_checkout_bytes)
+        self.assert_caller_unchanged(merged_head)
+        rejected_sha = self.remote_update_sha()
+        self.assertIsNotNone(rejected_sha)
+        rejected_message = self.origin_output("log", "-1", "--format=%B", rejected_sha)
+        self.assertIn("AI-Team-Activation-Failed: true", rejected_message)
+        missing_sentinel = subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(self.origin),
+                "cat-file",
+                "-e",
+                f"{rejected_sha}:ADOPTER_SUITE_SENTINEL",
+            ],
+            env=self.git_env(),
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(missing_sentinel.returncode, 0)
+        self.assertEqual((self.state / "pr-draft").read_text(encoding="utf-8").strip(), "true")
 
     def test_final_push_and_label_failures_require_exact_recovery(self):
         original_head = self.git_output("rev-parse", "HEAD")
