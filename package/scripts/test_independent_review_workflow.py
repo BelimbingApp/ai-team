@@ -1,13 +1,54 @@
+import subprocess
 import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[2]
+SCRIPT_DIRECTORY = Path(__file__).parent.resolve()
+# `Path(__file__).parents[2]` reached the repository root only by coincidence
+# in the home layout (scripts -> package -> root, two hops). Mounted, the
+# package root sits one hop deeper (scripts -> ai-team -> docs -> root, three
+# hops) — a fixed parent count cannot reach "the repository root" from a
+# depth that differs between the two contexts (#26 review, codex-fasttrack:
+# this resolved to <adopter>/docs and errored trying to open
+# <adopter>/docs/.github/workflows/independent-review.yml).
+ROOT = Path(
+    subprocess.run(
+        ["git", "-C", str(SCRIPT_DIRECTORY), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+).resolve()
+PACKAGE_DIRECTORY = SCRIPT_DIRECTORY.parent
+PACKAGE_PATHSPEC = PACKAGE_DIRECTORY.relative_to(ROOT).as_posix()
 PACKAGE_WORKFLOW = ROOT / ".github" / "workflows" / "independent-review.yml"
-ADOPTER_TEMPLATE = ROOT / "package" / "templates" / "independent-review.yml"
+ADOPTER_TEMPLATE = PACKAGE_DIRECTORY / "templates" / "independent-review.yml"
 
 
 class IndependentReviewWorkflowTest(unittest.TestCase):
+    """Compares this package's own real CI workflow against the template it
+    ships adopters — a self-consistency check for the repository that owns
+    both files, meaningful only in the source repository. `.github/workflows/`
+    at a repository's own root is never part of what a mount carries (#26),
+    so an adopter's own root `.github/workflows/independent-review.yml`, if
+    they installed one, is *their* copy of the adopter template — asserting
+    it still contains this repository's own `package/scripts/...` form would
+    be wrong, not merely inapplicable, for exactly the repositories where the
+    file happens to exist. `PACKAGE_PATHSPEC == "package"` is this package's
+    actual, fixed name for its own directory; nothing but the source
+    repository can be running from a directory with that name at that depth,
+    so it is a sound (if convention-based, matching how every other path in
+    this test suite already works) way to gate a check with no meaning once
+    mounted, without erroring on the file this test never expects to find
+    outside its own repository."""
+
+    def setUp(self):
+        if PACKAGE_PATHSPEC != "package":
+            self.skipTest(
+                f"running from '{PACKAGE_PATHSPEC}', not the source repository's 'package' — "
+                "this self-consistency check has no meaning once mounted"
+            )
+
     def test_package_and_adopter_workflows_share_the_trusted_shape(self):
         package = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
         adopter = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
