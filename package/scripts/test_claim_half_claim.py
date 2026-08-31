@@ -203,7 +203,10 @@ class ClaimHalfClaimTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("HALF-CLAIM", result.stderr)
         self.assertIn(f"PR #99 agent:opus-5", result.stderr)
-        self.assertIn("issue #42 task:active", result.stderr)
+        self.assertIn(
+            "issue #42 task state must be exactly task:active (read: none)",
+            result.stderr,
+        )
         self.assertNotIn("could not read back", result.stderr)
 
     def test_one_unreadable_side_does_not_hide_a_missing_label_on_the_other(self):
@@ -217,7 +220,10 @@ class ClaimHalfClaimTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("issue #42 agent:opus-5", result.stderr)
-        self.assertIn("issue #42 task:active", result.stderr)
+        self.assertIn(
+            "issue #42 task state must be exactly task:active (read: none)",
+            result.stderr,
+        )
         self.assertNotIn("PR #99 agent:opus-5", result.stderr)
         self.assertIn("could not read back the labels for PR #99", result.stderr)
 

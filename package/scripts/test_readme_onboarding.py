@@ -48,6 +48,43 @@ class ReadmeOnboardingTest(unittest.TestCase):
             f"bare (non-package-prefixed) templates/ reference(s) survive the #26 move: {stale_templates}",
         )
 
+    def test_activation_install_and_legacy_exclusion_are_owner_actionable(self):
+        document = README.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "cp docs/ai-team/templates/activate.sh .ai-team/activate.sh", document
+        )
+        self.assertIn(
+            "cp docs/ai-team/templates/package-refresh.conf ", document
+        )
+        self.assertIn("`.ai-team/activate.sh` instead of calling", document)
+        self.assertIn("`ai-team/activation-mutex` compare-and-swap lease", document)
+        self.assertIn("`ai-team/package-refresh` and `ai-team/activation-mutex` refs", document)
+        self.assertIn("missing push, delete, PR, or label permission", document)
+        self.assertIn("does **not** observe either", document)
+        self.assertIn("no technical mutual-exclusion guarantee", document)
+        self.assertIn("Stop every legacy claim/activation process", document)
+        self.assertIn("no open PR exists", document)
+        self.assertIn("owner-reviewed-full-package-mount-sha", document)
+        self.assertIn(
+            'git show "$package_revision:templates/activate.sh"', document
+        )
+        self.assertIn("Commit, review, and merge both adopter-owned files", document)
+        self.assertIn("pull the clean,", document)
+        self.assertIn("AI_TEAM_EXCLUSIVE_FIRST_REFRESH=1 .ai-team/activate.sh", document)
+        self.assertIn("Keep every legacy client stopped", document)
+        self.assertIn("update/pull the adopter's default branch", document)
+        self.assertIn("AI_TEAM_RECOVER_MUTEX_SHA=<exact-sha>", document)
+        self.assertIn("AI_TEAM_RECOVER_REFRESH_SHA=<exact-sha>", document)
+        self.assertIn("never steal an unknown", document)
+
+    def test_start_work_routes_adopters_through_the_activation_boundary(self):
+        document = README.read_text(encoding="utf-8")
+        start_work = document.split("## Start work", 1)[1].split("---", 1)[0]
+
+        self.assertIn("# Adopting repository\n.ai-team/activate.sh", start_work)
+        self.assertNotIn("docs/ai-team/scripts/orient.sh", start_work)
+
 
 class ScriptsReadmeOnboardingTest(unittest.TestCase):
     def test_the_windows_test_command_has_both_the_package_and_adopter_forms(self):
