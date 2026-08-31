@@ -22,7 +22,7 @@ source "$SCRIPT_DIR/_default_branch.sh"
 BASE=$(ai_team_default_branch)
 # Exported so the project hook (#8) can use the branch orient.sh already
 # resolved instead of re-sourcing _default_branch.sh — a hook copied out to
-# .ai-team/ at the repository root has no relative path back to scripts/.
+# .ai-team/ at the repository root has no relative path back to package/scripts/.
 export AI_TEAM_DEFAULT_BRANCH="$BASE"
 
 # A halt must reach every agent regardless of tool, so it lives on the board and

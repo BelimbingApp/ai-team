@@ -26,11 +26,23 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       # The first PR that installs this workflow also installs its grammar.
-      # The trusted default branch cannot evaluate it until that first PR lands.
+      # The trusted default branch cannot evaluate it until that first PR
+      # lands, so "not found at all" genuinely means "nothing to evaluate
+      # yet." A relocation PR (#26 review, codex-fasttrack/codex-gpt-5-b) is
+      # a different case: trusted main has a working grammar, just at its
+      # pre-relocation path, until this exact PR merges — checking only the
+      # new path made the required check vacuously pass every PR in that
+      # window, including this one, without evaluating anything. Try the
+      # current path first, fall back to the legacy path, and only call it
+      # "not yet on the default branch" when neither exists.
       - name: Resolve trusted review grammar
         id: resolve
         run: |
-          if [ -x scripts/review_gate.sh ]; then
+          if [ -x package/scripts/review_gate.sh ]; then
+            echo "path=package/scripts/review_gate.sh" >> "$GITHUB_OUTPUT"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ -x scripts/review_gate.sh ]; then
+            echo "path=scripts/review_gate.sh" >> "$GITHUB_OUTPUT"
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -40,7 +52,7 @@ jobs:
         if: steps.resolve.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/review_gate.sh "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
+        run: ${{ steps.resolve.outputs.path }} "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}"
 
       - name: Grammar not yet on the default branch
         if: steps.resolve.outputs.present == 'false'
