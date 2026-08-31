@@ -63,6 +63,94 @@ picks up the current `scripts/`/`templates/`/`LICENSE` layout. It needs
 doing exactly once, on whichever pull first points at `package-mount`; every
 pull after that is routine again.
 
+### Activate and refresh the mount
+
+After the initial mount, install the adopter-owned activation entry point in
+the same owner-reviewed change:
+
+```bash
+mkdir -p .ai-team
+cp docs/ai-team/templates/activate.sh .ai-team/activate.sh
+cp docs/ai-team/templates/package-refresh.conf .ai-team/package-refresh.conf
+chmod +x .ai-team/activate.sh
+```
+
+Commit these files with the mount, have that adopter-owned change reviewed and
+merged, then pull a clean default branch that exactly matches `origin` before
+the first activation. Activation deliberately refuses an uncommitted install,
+a feature branch, or a behind/diverged default checkout.
+
+Review the plain `source=` and `ref=` values in
+`.ai-team/package-refresh.conf`, then start team sessions with
+`.ai-team/activate.sh` instead of calling `docs/ai-team/scripts/orient.sh`
+directly. Activation resolves the approved ref to an immutable revision. If
+the mount is behind, it creates one isolated draft `ai-team/package-refresh`
+PR, verifies the exact mounted tree and full mechanism suite away from the
+caller's checkout, and pauses onboarding until that PR merges and the updated
+default branch is pulled. It never changes adopter-owned paths outside
+`docs/ai-team/`.
+
+The activation identity needs permission to create/update the reserved
+`ai-team/package-refresh` and `ai-team/activation-mutex` refs, delete those
+exact refs after verified cleanup, create/edit PRs, and create/apply labels.
+Branch or token policy may grant that narrowly to an owner-controlled bot;
+missing push, delete, PR, or label permission is a hard failure, never a
+reason to bypass review protection.
+
+Current `activate.sh` and `claim.sh` clients share the short remote
+`ai-team/activation-mutex` compare-and-swap lease. A normal claim holds it only
+until its branch, PR, and labels are visible; activation holds it until the
+durable refresh branch and draft PR are visible. The refresh branch then
+remains the claim barrier through merge. Two current clients therefore cannot
+cross the claim/refresh boundary together, and concurrent activations observe
+the same refresh lane.
+
+A legacy `claim.sh` that predates this protocol does **not** observe either
+lease. The first migration has no technical mutual-exclusion guarantee, so
+activation fails closed by default. The repository owner must perform this
+one exclusive boundary:
+
+1. Stop every legacy claim/activation process and verify that no
+   `task:active`/`task:review` issue and no open PR exists.
+2. If the old mount does not contain the templates, copy them from one exact,
+   owner-reviewed `package-mount` revision instead of from a moving checkout:
+
+   ```bash
+   package_source=https://github.com/BelimbingApp/ai-team.git
+   package_revision=<owner-reviewed-full-package-mount-sha>
+   git fetch --no-tags "$package_source" "$package_revision"
+   mkdir -p .ai-team
+   git show "$package_revision:templates/activate.sh" > .ai-team/activate.sh
+   git show "$package_revision:templates/package-refresh.conf" > .ai-team/package-refresh.conf
+   chmod +x .ai-team/activate.sh
+   ```
+
+   Commit, review, and merge both adopter-owned files; then pull the clean,
+   up-to-date default branch. Run the one bootstrap as an explicit owner
+   attestation:
+
+   ```bash
+   AI_TEAM_EXCLUSIVE_FIRST_REFRESH=1 .ai-team/activate.sh
+   ```
+
+3. Keep every legacy client stopped while the refresh PR is built and
+   reviewed. Merge it, update/pull the adopter's default branch, and only then
+   resume sessions with the newly mounted clients.
+
+`AI_TEAM_EXCLUSIVE_FIRST_REFRESH=1` cannot stop an old process; it records that
+the owner already established this external exclusion. Never set it merely to
+bypass the refusal.
+
+Recovery is exact and owner-guided. First prove that no activation or claim is
+running and inspect the reported immutable SHA. Recover a validated stale
+short lease with `AI_TEAM_RECOVER_MUTEX_SHA=<exact-sha> .ai-team/activate.sh`
+(or pass the same variable to the intended `claim.sh` command). Resume a
+validated pending/failed/verified refresh with
+`AI_TEAM_RECOVER_REFRESH_SHA=<exact-sha> .ai-team/activate.sh`. Both scripts
+use that SHA as a deletion/update lease; they never steal an unknown,
+malformed, or concurrently changed ref. Do not delete either fixed branch by
+name as a shortcut.
+
 Its intended permanent home is `.agents/skills/ai-team/`, where compatible
 agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
 loads skills from that standard location; that future move is a path change, not
@@ -79,7 +167,7 @@ Orient before acting:
 package/scripts/orient.sh
 
 # Adopting repository
-docs/ai-team/scripts/orient.sh
+.ai-team/activate.sh
 ```
 
 It reports a halt first, then `main`, lanes, holds, claimable work, blockers,
