@@ -78,5 +78,11 @@ jobs:
           REVIEW_GATE_REPOSITORY: ${{ github.repository }}
           REVIEW_GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Accounts no agent lane ever posts through, as <numeric-id>:<login>
+          # separated by whitespace or commas. Their exact-head APPROVED review
+          # counts as one independent acceptance with no body markers. Empty
+          # means the exception is off, which is the default. Keep this in step
+          # with .ai-team/principals so CI and a local gate.sh pre-flight agree.
+          AI_TEAM_HUMAN_PRINCIPALS: ""
         run: |
           "$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"
