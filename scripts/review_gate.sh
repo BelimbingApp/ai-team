@@ -34,7 +34,8 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # The trusted-author boundary is shared with gate.sh and land.sh. The trusted
 # workflow fetches this helper alongside review_gate.sh from the same pinned
 # commit, so a standalone copy still finds it next to itself.
-# shellcheck source=package/scripts/_trusted_author.sh (package layout)
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
 # shellcheck disable=SC1091
 source "$here/_trusted_author.sh"
 input="${REVIEW_GATE_INPUT:-}"

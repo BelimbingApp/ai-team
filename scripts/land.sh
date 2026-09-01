@@ -23,7 +23,8 @@ source "$here/_lane_issue.sh"
 # shellcheck source=docs/ai-team/scripts/_default_branch.sh
 # shellcheck disable=SC1091
 source "$here/_default_branch.sh"
-# shellcheck source=package/scripts/_trusted_author.sh (package layout)
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
 # shellcheck disable=SC1091
 source "$here/_trusted_author.sh"
 
