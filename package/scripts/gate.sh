@@ -194,6 +194,22 @@ bad=$(printf '%s' "$latest" | jq -r \
 expected_n=$(printf '%s' "$expected_names" | jq -r 'length' 2>/dev/null || echo 0)
 missing=$(jq -nc --argjson expected "$expected_names" --argjson present "$present_names" \
   '$expected - $present' 2>/dev/null || echo '[]')
+# A change that intentionally removes a workflow can make its historical check
+# names impossible to report on the reviewed head.  The operator may provide a
+# comma-separated, explicitly recorded exception; every name is printed and
+# removed from the blocking set, never silently ignored.
+override_raw="${GATE_ALLOW_MISSING_CHECKS:-}"
+if [[ -n "$override_raw" ]]; then
+  override_json=$(printf '%s' "$override_raw" | jq -Rcs 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')
+  if [[ "$override_json" != "[]" ]]; then
+    overridden=$(jq -nc --argjson missing "$missing" --argjson allowed "$override_json" '$missing - $allowed')
+    waived=$(jq -nc --argjson missing "$missing" --argjson allowed "$override_json" '$missing - ($missing - $allowed)')
+    if [[ "$waived" != "[]" ]]; then
+      echo "  WARN    operator override allows missing checks: $(printf '%s' "$waived" | jq -r 'join(", ")')"
+      missing="$overridden"
+    fi
+  fi
+fi
 missing_n=$(printf '%s' "$missing" | jq -r 'length' 2>/dev/null || echo 0)
 if [[ "${n:-0}" -lt 1 ]]; then
   say_bad "no checks reported yet on ${REVIEWED:0:8}"

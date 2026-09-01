@@ -161,6 +161,7 @@ class GateMechanismTest(unittest.TestCase):
         title: str | None = None,
         review_gate_body: str | None = None,
         branch_rules: list[dict[str, object]] | None = None,
+        allow_missing_checks: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         base = Path(self.dir.name)
         checkout = base / "checkout"
@@ -241,6 +242,8 @@ class GateMechanismTest(unittest.TestCase):
         env["GATE_TEST_BRANCH_RULES"] = json.dumps(
             [] if branch_rules is None else branch_rules
         )
+        if allow_missing_checks is not None:
+            env["GATE_ALLOW_MISSING_CHECKS"] = allow_missing_checks
 
         script = SCRIPT
         if review_gate_body is not None:
@@ -587,6 +590,28 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
         self.assertIn("1 distinct checks", result.stdout)
         self.assertNotIn("path-filtered", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_operator_override_allows_intentionally_removed_checks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            check_runs=[{
+                "name": "ci",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "1",
+                "completed_at": "2",
+            }],
+            merged_heads=["merged-pr-head-1"],
+            baseline_check_runs_by_head={"merged-pr-head-1": [
+                {"name": "ci", "status": "completed", "conclusion": "success"},
+                {"name": "removed workflow", "status": "completed", "conclusion": "success"},
+            ]},
+            allow_missing_checks="removed workflow",
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("operator override allows missing checks: removed workflow", result.stdout)
         self.assertIn("GATE: PASS", result.stdout)
 
     def test_first_pull_request_bootstraps_from_passing_reviewed_sha(self):
