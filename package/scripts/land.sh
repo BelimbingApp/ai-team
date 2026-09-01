@@ -6,9 +6,9 @@
 #
 # The gate is always the merge precondition. Once the PR is merged, the script
 # moves both the PR and its lane issue to task:done and records the acting agent.
-# A rerun against an already-merged PR only retries terminalization, which makes
-# a transient label or comment failure recoverable without attempting a second
-# merge.
+# A trusted automated issue-less lane terminalizes only its PR. A rerun against
+# an already-merged PR only retries terminalization, which makes a transient
+# label or comment failure recoverable without attempting a second merge.
 #
 set -euo pipefail
 
@@ -23,11 +23,16 @@ source "$here/_lane_issue.sh"
 # shellcheck source=docs/ai-team/scripts/_default_branch.sh
 # shellcheck disable=SC1091
 source "$here/_default_branch.sh"
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
+# shellcheck disable=SC1091
+source "$here/_trusted_author.sh"
 
 if [[ $# -ne 2 || ! "$pr" =~ ^[0-9]+$ || ! "$reviewed" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "usage: LAND_AGENT=<stable-agent-id> $0 <pr-number> <reviewed-full-sha>" >&2
   exit 2
 fi
+reviewed="${reviewed,,}"
 
 if [[ ! "$agent" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
   echo "LAND_AGENT must be a lower-case stable agent id (without agent:)" >&2
@@ -45,11 +50,20 @@ pr_json=$(gh pr view "$pr" --repo "$repo" \
   echo "cannot read PR #$pr from $repo" >&2
   exit 2
 }
+pr_identity=$(gh api "repos/$repo/pulls/$pr" 2>/dev/null) || {
+  echo "cannot read immutable PR identity for #$pr from $repo" >&2
+  exit 2
+}
 
 title=$(jq -r '.title // ""' <<<"$pr_json")
 branch=$(jq -r '.headRefName // ""' <<<"$pr_json")
 body=$(jq -r '.body // ""' <<<"$pr_json")
-lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$body" "")
+automated_author=$(ai_team_trusted_automated_author_lane "$pr_identity")
+if [[ -n "$automated_author" ]]; then
+  lane_issue="none"
+else
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$body" "")
+fi
 if [[ "$lane_issue" == error:* ]]; then
   echo "refusing #$pr: ${lane_issue#error:}" >&2
   exit 1
@@ -67,7 +81,8 @@ if [[ "$state" == "OPEN" ]]; then
   # cannot waive GitHub branch protections. Keep GitHub's response visible on
   # an endpoint failure, then name that boundary so a shared account is not
   # mistaken for a native approving reviewer (#35).
-  if ! merge_json=$(gh api -X PUT "repos/$repo/pulls/$pr/merge" -f merge_method=merge 2>&1); then
+  if ! merge_json=$(gh api -X PUT "repos/$repo/pulls/$pr/merge" \
+    -f merge_method=merge -f sha="$reviewed" 2>&1); then
     echo "merge request failed for PR #$pr" >&2
     if [[ -n "$merge_json" ]]; then
       printf '%s\n' "$merge_json" >&2
@@ -117,10 +132,17 @@ terminalize() {
     --add-label task:done >/dev/null
 }
 
-terminalize pr "$pr" || {
-  echo "PR #$pr merged, but its terminal label transition failed; rerun land.sh to retry" >&2
-  exit 1
-}
+if [[ -n "$automated_author" ]]; then
+  gh pr edit "$pr" --repo "$repo" --add-label task:done >/dev/null || {
+    echo "PR #$pr merged, but its automated terminal label transition failed; rerun land.sh to retry" >&2
+    exit 1
+  }
+else
+  terminalize pr "$pr" || {
+    echo "PR #$pr merged, but its terminal label transition failed; rerun land.sh to retry" >&2
+    exit 1
+  }
+fi
 
 if [[ "$lane_issue" != "none" ]]; then
   terminalize issue "$lane_issue" || {
@@ -140,7 +162,11 @@ if [[ "$already_attributed" == "0" ]]; then
 fi
 
 if [[ "$lane_issue" == "none" ]]; then
-  echo "PR #$pr merged at $merge_sha (issue-less lane; task:done applied to PR)"
+  if [[ -n "$automated_author" ]]; then
+    echo "PR #$pr merged at $merge_sha (trusted automated lane; task:done applied to PR)"
+  else
+    echo "PR #$pr merged at $merge_sha (issue-less lane; task:done applied to PR)"
+  fi
 else
   echo "PR #$pr merged at $merge_sha; PR and issue #$lane_issue are task:done"
 fi

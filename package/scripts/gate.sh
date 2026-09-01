@@ -8,12 +8,15 @@
 # Run it as its OWN command and chain the merge to it:
 #
 #   REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-#   docs/ai-team/scripts/gate.sh 408 abc1234 \
-#     && gh api -X PUT "repos/$REPO/pulls/408/merge" -f merge_method=merge
+#   REVIEWED=<full-reviewed-sha>
+#   docs/ai-team/scripts/gate.sh 408 "$REVIEWED" \
+#     && gh api -X PUT "repos/$REPO/pulls/408/merge" \
+#          -f merge_method=merge -f sha="$REVIEWED"
 #
 # Never put the checks and the merge inside one compound command where the merge
-# can still run when a check fails. That is exactly how #382 reached main while
-# BEHIND it: the check printed its warning and the merge went ahead anyway.
+# can still run when a check fails, and always bind the merge request to the
+# reviewed SHA. That is exactly how #382 reached main while BEHIND it: the check
+# printed its warning and the merge went ahead anyway.
 #
 # Why both: Protect Main now requires the six repository/Sonar contexts with
 # strict_required_status_checks_policy and no merge bypass actors. This gate is
@@ -32,6 +35,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=docs/ai-team/scripts/_lane_issue.sh
 # shellcheck disable=SC1091
 source "$here/_lane_issue.sh"
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
+# shellcheck disable=SC1091
+source "$here/_trusted_author.sh"
 # shellcheck source=docs/ai-team/scripts/_default_branch.sh
 # shellcheck disable=SC1091
 source "$here/_default_branch.sh"
@@ -65,6 +72,10 @@ origin_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https://github\.com/|git@g
 pr=$(gh pr view "$PR" --repo "$REPO" \
        --json headRefOid,headRefName,title,body,isDraft,state,mergeable,labels 2>/dev/null)
 [[ -n "$pr" ]] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
+pr_identity=$(gh api "repos/$REPO/pulls/$PR" 2>/dev/null) || {
+  echo "cannot read immutable PR identity for #$PR from $REPO" >&2
+  exit 2
+}
 
 remote_head=$(printf '%s' "$pr" | jq -r .headRefOid)
 
@@ -264,23 +275,44 @@ case ",$labels," in
 esac
 
 # 5. Ready state and independent exact-head review. GitHub accounts are shared,
-# so account identity is only corroboration: the stable **From:** marker must
-# differ from the PR's one agent:<id> lane. Native APPROVED reviews count; a
-# shared-account COMMENTED review carries an explicit **Verdict:** accept marker.
-case ",$labels," in
-  *",task:review,"*) say_ok "task:review is set" ;;
-  *)                 say_bad "task:review is not set — the author has not handed off a final head" ;;
-esac
-
+# so ordinary account identity is only corroboration: the stable **From:**
+# marker must differ from the PR's one agent:<id> lane. The exact immutable
+# numeric identity of a trusted GitHub App service account is the narrow
+# exception: Dependabot opens a non-draft PR directly and cannot participate in
+# claim.sh or rewrite its generated body. It gets the stable author lane
+# "github-dependabot" without pretending a human claim exists. Titles, branches,
+# display logins, and ordinary labels never qualify.
+automated_author=$(ai_team_trusted_automated_author_lane "$pr_identity")
 author_agents=$(printf '%s' "$pr" | jq -c \
   '[.labels[].name | select(startswith("agent:")) | ltrimstr("agent:")] | unique' \
   2>/dev/null || echo '[]')
 author_count=$(printf '%s' "$author_agents" | jq -r 'length' 2>/dev/null || echo 0)
 author_agent=$(printf '%s' "$author_agents" | jq -r '.[0] // ""' 2>/dev/null)
-if [[ "$author_count" = "1" ]]; then
-  say_ok "author lane is agent:$author_agent"
+
+if [[ -n "$automated_author" ]]; then
+  task_labels=$(printf '%s' "$pr" | jq -r \
+    '[.labels[].name | select(startswith("task:"))] | join(",")')
+  if [[ -n "$task_labels" ]]; then
+    say_bad "trusted automated PR must not carry task:* claim metadata ($task_labels)"
+  else
+    say_ok "trusted automated PR is ready without task:* claim metadata"
+  fi
+  if [[ "$author_count" = "0" ]]; then
+    author_agent="$automated_author"
+    say_ok "trusted automated author is $author_agent"
+  else
+    say_bad "trusted automated author $automated_author must not carry agent:<id> labels"
+  fi
 else
-  say_bad "expected exactly one agent:<id> author lane, found $author_count"
+  case ",$labels," in
+    *",task:review,"*) say_ok "task:review is set" ;;
+    *)                 say_bad "task:review is not set — the author has not handed off a final head" ;;
+  esac
+  if [[ "$author_count" = "1" ]]; then
+    say_ok "author lane is agent:$author_agent"
+  else
+    say_bad "expected exactly one agent:<id> author lane, found $author_count"
+  fi
 fi
 
 # 5b. Issue-closing reference (#354). claim.sh / ready.sh write Closes #N; the
@@ -291,13 +323,21 @@ fi
 title=$(printf '%s' "$pr" | jq -r '.title // ""')
 branch=$(printf '%s' "$pr" | jq -r '.headRefName // ""')
 pr_body=$(printf '%s' "$pr" | jq -r '.body // ""')
-lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "")
+if [ -n "$automated_author" ]; then
+  lane_issue="none"
+else
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "")
+fi
 case "$lane_issue" in
   error:*)
     say_bad "${lane_issue#error:}"
     ;;
   none)
-    say_ok "issue-less lane (AI-Team-Lane-Issue: none)"
+    if [ -n "$automated_author" ]; then
+      say_ok "issue-less trusted automated lane"
+    else
+      say_ok "issue-less lane (AI-Team-Lane-Issue: none)"
+    fi
     ;;
   *)
     if ai_team_body_has_closing_reference "$pr_body" "$lane_issue"; then

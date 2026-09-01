@@ -126,6 +126,12 @@ class BoardMechanismTest(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertIn("invisible to gate.sh", result.stderr)
             self.assertIn("gh pr review", result.stderr)
+            self.assertIn(
+                "reviewed_head=$(gh pr view 42 --json headRefOid --jq .headRefOid)",
+                result.stderr,
+            )
+            self.assertIn("**HEAD reviewed:** %s", result.stderr)
+            self.assertIn('"$reviewed_head"', result.stderr)
             self.assertFalse((directory / "captured-body").exists(), "nothing may be posted")
 
     def test_post_requires_an_agent_identity(self):

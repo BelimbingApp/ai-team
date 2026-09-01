@@ -17,8 +17,13 @@
 # mounted copy has the helper and always treats origin as authoritative; an
 # inherited override cannot split review reads from gate.sh's repository.
 #
-# Fixture input has `reviewed`, `labels`, and `reviews` fields. `labels` may be
-# an array of label names or GitHub label objects; `reviews` uses the API shape.
+# Fixture input has `reviewed`, `head_sha`, `labels`, `identity`, and `reviews`
+# fields. `labels` may be an array of label names or GitHub label objects;
+# `identity` is the REST pull-request shape and `reviews` uses the GitHub API
+# shape. Every attributable review must name the reviewed full SHA in a
+# `**HEAD reviewed:**` marker. GitHub's review `commit_id` remains required as
+# corroboration, but is insufficient by itself because a Dependabot rebase can
+# rewrite that field on an older review to the replacement head.
 # Exit 0 means an independent acceptance exists and no independent
 # changes-required verdict supersedes it. Exit 1 is a review failure; exit 2 is
 # an invocation or GitHub-read failure.
@@ -26,6 +31,13 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# The trusted-author boundary is shared with gate.sh and land.sh. The trusted
+# workflow fetches this helper alongside review_gate.sh from the same pinned
+# commit, so a standalone copy still finds it next to itself.
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
+# shellcheck disable=SC1091
+source "$here/_trusted_author.sh"
 input="${REVIEW_GATE_INPUT:-}"
 cleanup_paths=()
 
@@ -75,46 +87,69 @@ if [[ -z "$input" ]]; then
     echo "ERROR: REVIEW_GATE_REPOSITORY must be an owner/repository name" >&2
     exit 2
   fi
-  pr_json_file=$(mktemp) || {
-    echo "ERROR: cannot create temporary review input" >&2
+  # The immutable REST pull payload supplies head state, labels, and the
+  # author identity the trusted-author boundary classifies. REST pull payloads
+  # routinely exceed Windows/MSYS process argument limits, so GitHub JSON stays
+  # file-backed all the way into jq; never reintroduce it via --argjson or
+  # command arguments.
+  # All temporaries are allocated before the first network read, so a failed
+  # later allocation exits with every earlier one already registered for the
+  # EXIT-trap cleanup — nothing is left behind on the partial path.
+  input=$(mktemp) || {
+    echo "ERROR: cannot allocate temporary review input" >&2
     exit 2
   }
-  cleanup_paths+=("$pr_json_file")
-  if ! gh pr view "$pr" --repo "$repo" --json headRefOid,labels >"$pr_json_file" 2>/dev/null; then
-    echo "ERROR: cannot read PR #$pr from $repo" >&2
+  cleanup_paths+=("$input")
+  identity_file=$(mktemp) || {
+    echo "ERROR: cannot allocate temporary PR identity input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$identity_file")
+  reviews_file=$(mktemp) || {
+    echo "ERROR: cannot allocate temporary reviews input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$reviews_file")
+
+  if ! gh api "repos/$repo/pulls/$pr" >"$identity_file" 2>/dev/null; then
+    echo "ERROR: cannot read immutable PR identity for #$pr from $repo" >&2
+    exit 2
+  fi
+  head_sha=$(jq -r '.head.sha // "" | ascii_downcase' "$identity_file")
+  if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: current PR head is missing or malformed for #$pr from $repo" >&2
     exit 2
   fi
   if [[ -z "$reviewed" ]]; then
-    reviewed=$(jq -r '.headRefOid // ""' "$pr_json_file")
+    reviewed="$head_sha"
   fi
   if [[ ! "$reviewed" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: reviewed SHA must be a full 40-character lowercase SHA" >&2
     exit 2
   fi
 
-  reviews_file=$(mktemp) || {
-    echo "ERROR: cannot create temporary review input" >&2
-    exit 2
-  }
-  cleanup_paths+=("$reviews_file")
   if ! gh api "repos/$repo/pulls/$pr/reviews" --paginate 2>/dev/null \
     | jq -s 'add // []' >"$reviews_file" 2>/dev/null; then
     echo "ERROR: cannot read reviews for PR #$pr from $repo" >&2
     exit 2
   fi
 
-  input=$(mktemp) || {
-    echo "ERROR: cannot create temporary review input" >&2
-    exit 2
-  }
-  cleanup_paths+=("$input")
   jq -n --arg reviewed "$reviewed" \
-    --slurpfile pr "$pr_json_file" \
+    --arg head_sha "$head_sha" \
+    --slurpfile identity "$identity_file" \
     --slurpfile reviews "$reviews_file" \
-    '{reviewed: $reviewed, labels: ($pr[0].labels // []), reviews: ($reviews[0] // [])}' >"$input"
+    '($identity[0] // {}) as $pr
+     | {reviewed: $reviewed,
+        head_sha: $head_sha,
+        labels: ($pr.labels // []),
+        identity: $pr,
+        reviews: ($reviews[0] // [])}' >"$input"
 fi
 
-result=$(jq -r '
+identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
+automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
+
+result=$(jq -r --arg automated_author "$automated_author" '
   def label_names:
     if (.labels | type) != "array" then []
     elif (.labels | length) == 0 then []
@@ -126,6 +161,11 @@ result=$(jq -r '
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
        | ascii_downcase)] | unique) as $agents
     | if ($agents | length) == 1 then $agents[0] else "" end;
+  def reviewed_head:
+    ([((.body // "") | split("\n")[]
+       | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
+       | ascii_downcase)] | unique) as $heads
+    | if ($heads | length) == 1 then $heads[0] else "" end;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
        | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
@@ -144,22 +184,27 @@ result=$(jq -r '
   . as $input
   | (label_names) as $labels
   | ([$labels[] | select(startswith("agent:")) | ltrimstr("agent:")] | unique) as $authors
-  | if ($authors | length) != 1 then
+  | if ($input.head_sha // "") != $input.reviewed then
+      ["FAIL: reviewed SHA is not the current PR head; re-review the new head"]
+    elif $automated_author != "" and ($authors | length) != 0 then
+      ["FAIL: trusted automated author \($automated_author) must not carry agent:<id> labels"]
+    elif $automated_author == "" and ($authors | length) != 1 then
       ["FAIL: expected exactly one agent:<id> author lane, found \($authors | length)"]
     else
-      ($authors[0]) as $author
+      (if $automated_author != "" then $automated_author else $authors[0] end) as $author
       | [$input.reviews[]
          | select(.commit_id == $input.reviewed)
-         | . + {agent: from_agent, verdict: review_verdict}
+         | . + {agent: from_agent, verdict: review_verdict, reviewed_head: reviewed_head}
          | select(.agent != "")]
         | sort_by(.agent, .submitted_at, .id)
         | group_by(.agent)
         | map(last) as $latest
-      | ([$latest[] | select(.agent != $author and .verdict == "accept") | .agent] | unique | join(", ")) as $accepted
-      | ([$latest[] | select(.agent != $author and .verdict == "changes required") | .agent] | unique | join(", ")) as $blocking
+      | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "accept") | .agent] | unique | join(", ")) as $accepted
+      | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "changes required") | .agent] | unique | join(", ")) as $blocking
       | ([$latest[] | select(.agent != $author and .verdict == "") | .agent] | unique) as $malformed
+      | ([$latest[] | select(.agent != $author and .reviewed_head != $input.reviewed) | .agent] | unique) as $unbound
       | [if $accepted == "" then
-           "FAIL: no independent exact-head acceptance; require **From:** <reviewer> plus APPROVED or **Verdict:** accept"
+           "FAIL: no independent exact-head acceptance; require **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
            "PASS: independent exact-head acceptance from \($accepted)"
          end,
@@ -168,6 +213,7 @@ result=$(jq -r '
          else
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
+        + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"]
     end
   | .[]
