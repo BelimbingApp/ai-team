@@ -348,11 +348,34 @@ case "$lane_issue" in
     ;;
 esac
 
+# A pure, verifiable subtree pull is a trusted SHAPE (#61): its content
+# already passed the package repository's own gate upstream, so no
+# adopter-side agent review is required. The adopter opts in by committing
+# `.ai-team/subtree-pull` containing `<upstream-repo> <branch> <prefix>`;
+# the same shape decision runs in CI, so the two paths cannot disagree. Any
+# non-trusted outcome — including "cannot judge" — falls through to the
+# ordinary review requirement below.
+trusted_pull=0
+if [[ -r "$ROOT/.ai-team/subtree-pull" ]]; then
+  read -r pull_upstream pull_branch pull_prefix < "$ROOT/.ai-team/subtree-pull" || true
+  if [[ -n "${pull_upstream:-}" && -n "${pull_branch:-}" && -n "${pull_prefix:-}" ]]; then
+    pull_base=$(git merge-base "origin/$BASE" "$REVIEWED" 2>/dev/null)
+    if [[ -n "$pull_base" ]] && "$here/subtree_pull_gate.sh" \
+        "$pull_base" "$REVIEWED" "$pull_prefix" "$pull_upstream" "$pull_branch" >/dev/null 2>&1; then
+      trusted_pull=1
+    fi
+  fi
+fi
+
 # The review grammar has one canonical implementation. Both this local
 # pre-flight and the required CI workflow call review_gate.sh, so an author
 # cannot get a different verdict by switching landing paths.
 review_exit=0
-review_output=$("$here/review_gate.sh" "$PR" "$REVIEWED" 2>&1) || review_exit=$?
+if [[ "$trusted_pull" == "1" ]]; then
+  review_output="PASS: trusted subtree pull — content reviewed upstream behind the package gate (#61)"
+else
+  review_output=$("$here/review_gate.sh" "$PR" "$REVIEWED" 2>&1) || review_exit=$?
+fi
 while IFS= read -r review_line; do
   [[ -n "$review_line" ]] || continue
   case "$review_line" in
@@ -419,7 +442,7 @@ fi
 # Keep the comment-stream diagnostic below focused on the case where a review
 # was not already accepted. Comments are informational only and never count.
 accepted_agents=""
-if grep -q '^PASS: independent exact-head acceptance' <<< "$review_output"; then
+if grep -qE '^PASS: (independent exact-head acceptance|trusted subtree pull)' <<< "$review_output"; then
   accepted_agents="present"
 elif ! grep -q '^FAIL:' <<< "$review_output"; then
   # A malformed or partially shipped delegate must not turn the review
