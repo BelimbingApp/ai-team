@@ -112,7 +112,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
         env["CLAIM_TEST_ISSUE_JSON"] = json.dumps(issue_json)
         env["CLAIM_TEST_PR_LIST"] = pr_list
         env["CLAIM_TEST_REMOVE_READY_EXIT"] = remove_ready_exit
-        env["CLAIM_TEST_BODY_CAPTURE"] = str(self.bin / "captured-pr-body")
+        env["CLAIM_TEST_BODY_CAPTURE"] = bash_path(self.bin / "captured-pr-body")
         return run_with_bash_path(
             ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin,
@@ -206,7 +206,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
                 "CLAIM_TEST_ISSUE_JSON": json.dumps(self.issue(["task:ready"])),
                 "CLAIM_TEST_PR_LIST": "[]",
                 "CLAIM_TEST_REMOVE_READY_EXIT": "0",
-                "CLAIM_TEST_BODY_CAPTURE": str(self.bin / "captured-pr-body"),
+                "CLAIM_TEST_BODY_CAPTURE": bash_path(self.bin / "captured-pr-body"),
                 "CLAIM_REACHABLE": "session R2 Fable",
             }
         )

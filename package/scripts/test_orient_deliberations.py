@@ -115,9 +115,9 @@ class OrientDeliberationsTest(unittest.TestCase):
         agents_file.write_text(agents, encoding="utf-8")
         env = os.environ.copy()
         env.update(
-            ORIENT_TEST_AGENTS=str(agents_file),
-            ORIENT_TEST_COMMENTS=str(self.comments),
-            ORIENT_TEST_COUNTER=str(self.counter),
+            ORIENT_TEST_AGENTS=bash_path(agents_file),
+            ORIENT_TEST_COMMENTS=bash_path(self.comments),
+            ORIENT_TEST_COUNTER=bash_path(self.counter),
             AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
         )

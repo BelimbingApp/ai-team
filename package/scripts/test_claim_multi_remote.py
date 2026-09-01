@@ -323,7 +323,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         worktree = Path(self.dir.name) / "wt-fresh"
         result = self.run_claim(worktree=worktree)
         self.assert_claim_success(result)
-        self.assertIn(f"worktree: {worktree}", result.stdout)
+        self.assertIn(f"worktree: {bash_path(worktree)}", result.stdout)
         self.assertIn("root checkout left on main", result.stdout)
         self.assertEqual(self.git_out(["rev-parse", "--abbrev-ref", "HEAD"]), "main")
         self.assertRegex(self.gh_log.read_text(encoding="utf-8"), r"pr create .*--head agent/composer-issue-42")

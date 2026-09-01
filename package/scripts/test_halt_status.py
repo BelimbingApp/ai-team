@@ -6,7 +6,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _test_support import run_with_bash_path
+from _test_support import bash_path, run_with_bash_path
 
 
 SCRIPT = Path(__file__).with_name("halt_status.sh")
@@ -33,7 +33,7 @@ class HaltStatusTest(unittest.TestCase):
             env = os.environ.copy()
             env["HALT_TEST_MODE"] = mode
             return run_with_bash_path(
-                ["bash", str(SCRIPT), "example/repository"],
+                ["bash", bash_path(SCRIPT), "example/repository"],
                 stub_directory=Path(directory),
                 env=env,
                 text=True,

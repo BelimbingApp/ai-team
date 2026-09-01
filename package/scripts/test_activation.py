@@ -667,7 +667,7 @@ class ActivationRefreshTest(unittest.TestCase):
         if mutex_transition_sha is not None:
             environment["ACTIVATION_TEST_MUTEX_TRANSITION_SHA"] = mutex_transition_sha
         return run_with_bash_path(
-            ["bash", str(checkout / ".ai-team" / "activate.sh")],
+            ["bash", bash_path(checkout / ".ai-team" / "activate.sh")],
             stub_directory=self.bin,
             cwd=checkout,
             env=environment,
