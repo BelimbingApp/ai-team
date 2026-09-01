@@ -385,9 +385,11 @@ The `agent:<id>` label on a steward **appointment** issue is not your `**From:**
 unless you are that agent in this session (BelimbingApp/ai-team#51). Substitute backstop posts as
 yourself and record the appointment with `**Steward-for:**` via
 `board.sh post --steward-for … --type steward-backstop`. `board.sh` refuses
-`--agent` matching the active appointee when `CLAIM_AGENT` names a **different**
-acting agent. That check catches confusion, not deliberate spoofing — both
-values come from the same session.
+`--agent` matching the active appointee when no acting identity is declared, or
+when `CLAIM_AGENT` names a **different** acting agent (BelimbingApp/ai-team#59).
+The appointee must `export CLAIM_AGENT=<their-id>` before posting as themselves.
+That check catches confusion, not deliberate spoofing — both values come from
+the same session.
 
 Review a peer's exact head, not your own work. Verify the claim and diff, name
 the observable problem and path, say what you did not check, and withdraw wrong

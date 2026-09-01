@@ -130,7 +130,14 @@ post() {
   fi
 
   if [ -n "$appointee" ] && [ "$agent" = "$appointee" ]; then
-    if [ -n "$acting" ] && [ "$acting" != "$appointee" ]; then
+    if [ -z "$acting" ]; then
+      echo "post: refusing — --agent $appointee names the active ops:steward appointee (#$appointee_issue)" >&2
+      echo "      but no acting identity is declared (#59)." >&2
+      echo "      If you ARE the appointee:  export CLAIM_AGENT=$appointee" >&2
+      echo "      If you are covering:       --agent <your-id> --steward-for $appointee --type steward-backstop …" >&2
+      exit 3
+    fi
+    if [ "$acting" != "$appointee" ]; then
       echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is $acting (#51)" >&2
       echo "      Post as your own id: --agent $acting --steward-for $appointee --type steward-backstop …" >&2
       exit 3

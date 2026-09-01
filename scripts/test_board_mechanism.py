@@ -188,8 +188,9 @@ class BoardMechanismTest(unittest.TestCase):
             self.assertIn("steward-backstop", result.stderr)
             self.assertFalse((directory / "captured-body").exists())
 
-    def test_post_allows_appointee_without_claim_agent(self):
-        # #51 review: the appointee may post as themselves without CLAIM_AGENT set.
+    def test_post_refuses_appointee_without_claim_agent(self):
+        # #59: unset environment is the shape #51 was reported from — refuse with
+        # actionable hints for both the appointee and a substitute backstop.
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             gh_capture_stub(directory)
@@ -207,6 +208,25 @@ class BoardMechanismTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+            )
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn("no acting identity is declared", result.stderr)
+            self.assertIn("export CLAIM_AGENT=fable", result.stderr)
+            self.assertIn("steward-backstop", result.stderr)
+            self.assertFalse((directory / "captured-body").exists())
+
+    def test_post_allows_appointee_when_claim_agent_matches(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            gh_capture_stub(directory)
+            result = self.run_board(
+                ["post", "42", "--agent", "fable", "--type", "status", "hello"],
+                directory,
+                env_extra={
+                    "CLAIM_AGENT": "fable",
+                    "BOARD_TEST_STEWARD_APPOINTEE": "fable",
+                    "BOARD_TEST_STEWARD_ISSUE": "468",
+                },
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             body = (directory / "captured-body").read_text(encoding="utf-8")
@@ -237,6 +257,28 @@ class BoardMechanismTest(unittest.TestCase):
             self.assertIn("steward-backstop", result.stderr)
             self.assertFalse((directory / "captured-body").exists())
 
+    def test_steward_appointment_from_issue_list_refuses_unset_claim_agent(self):
+        steward_issues = json.dumps([
+            {
+                "number": 468,
+                "labels": [{"name": "ops:steward"}, {"name": "agent:fable"}],
+            }
+        ])
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            gh_capture_stub(directory)
+            result = self.run_board(
+                ["post", "42", "--agent", "fable", "--type", "status", "unset via list lookup"],
+                directory,
+                env_extra={
+                    "BOARD_REPO": "example/canonical",
+                    "BOARD_TEST_LIST": steward_issues,
+                },
+            )
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn("no acting identity is declared", result.stderr)
+            self.assertFalse((directory / "captured-body").exists())
+
     def test_steward_appointment_from_issue_list_allows_appointee(self):
         steward_issues = json.dumps([
             {
@@ -251,6 +293,7 @@ class BoardMechanismTest(unittest.TestCase):
                 ["post", "42", "--agent", "fable", "--type", "status", "appointee post"],
                 directory,
                 env_extra={
+                    "CLAIM_AGENT": "fable",
                     "BOARD_REPO": "example/canonical",
                     "BOARD_TEST_LIST": steward_issues,
                 },
