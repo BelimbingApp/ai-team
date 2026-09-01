@@ -35,14 +35,20 @@ class SubtreePullGateTest(unittest.TestCase):
         self.git(self.upstream, "add", "-A")
         self.git(self.upstream, "commit", "-qm", "package v1")
         self.upstream_v1_tree = self.git_out(self.upstream, "rev-parse", "HEAD^{tree}")
+        (self.upstream / "scripts" / "tool.sh").write_text(
+            "#!/bin/sh\n# v2 fixed\n", encoding="utf-8"
+        )
+        self.git(self.upstream, "add", "-A")
+        self.git(self.upstream, "commit", "-qm", "package v2")
 
         # The adopter repository with a mount whose tree matches upstream v1.
         self.adopter = base / "adopter"
         self.adopter.mkdir()
         self.git(self.adopter, "init", "-q", "-b", "main")
         (self.adopter / "app.txt").write_text("app\n", encoding="utf-8")
+        self.write_mount(version=1)
         self.git(self.adopter, "add", "-A")
-        self.git(self.adopter, "commit", "-qm", "initial")
+        self.git(self.adopter, "commit", "-qm", "initial (mounted at v1)")
         self.base_sha = self.git_out(self.adopter, "rev-parse", "HEAD")
 
     def tearDown(self):
@@ -59,26 +65,29 @@ class SubtreePullGateTest(unittest.TestCase):
             ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
         ).stdout.strip()
 
-    def commit_pull(self, message_prefix=True):
-        """Simulate `git subtree pull --squash`: a squash commit whose
-        subtree matches upstream, then a merge carrying it."""
-        squash_message = (
-            f"Squashed '{PREFIX}/' changes from aaa..bbb" if message_prefix
-            else "some ordinary commit"
-        )
-        self.git(self.adopter, "checkout", "-q", "-b", "pull-branch")
+    def write_mount(self, version):
         mount = self.adopter / PREFIX
-        (mount / "scripts").mkdir(parents=True)
-        (mount / "scripts" / "tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-        (mount / "templates").mkdir()
+        (mount / "scripts").mkdir(parents=True, exist_ok=True)
+        tool = "#!/bin/sh\n" if version == 1 else "#!/bin/sh\n# v2 fixed\n"
+        (mount / "scripts" / "tool.sh").write_text(tool, encoding="utf-8")
+        (mount / "templates").mkdir(exist_ok=True)
         (mount / "templates" / "independent-review.yml").write_text(
             "# template header\n# second line\non: x\nbody: same\n", encoding="utf-8"
         )
+
+    def commit_pull(self, to_version=2, branch="pull-branch"):
+        """Simulate `git subtree pull --squash`: a squash commit whose
+        subtree matches upstream, then a merge carrying it."""
+        self.git(self.adopter, "checkout", "-q", "-b", branch)
+        self.write_mount(version=to_version)
         self.git(self.adopter, "add", "-A")
-        self.git(self.adopter, "commit", "-qm", squash_message)
+        self.git(
+            self.adopter, "commit", "-qm",
+            f"Squashed '{PREFIX}/' changes from aaa..bbb",
+        )
         self.git(self.adopter, "checkout", "-q", "main")
         self.git(
-            self.adopter, "merge", "--no-ff", "-q", "pull-branch",
+            self.adopter, "merge", "--no-ff", "-q", branch,
             "-m", "chore: pull ai-team package-mount",
         )
         return self.git_out(self.adopter, "rev-parse", "HEAD")
@@ -106,7 +115,6 @@ class SubtreePullGateTest(unittest.TestCase):
     def test_a_direct_mount_edit_is_not_trusted(self):
         self.git(self.adopter, "checkout", "-q", "-b", "edit-branch")
         mount = self.adopter / PREFIX / "scripts"
-        mount.mkdir(parents=True)
         (mount / "tool.sh").write_text("#!/bin/sh\nhand edit\n", encoding="utf-8")
         self.git(self.adopter, "add", "-A")
         self.git(self.adopter, "commit", "-qm", "feat: edit the mount directly")
@@ -184,6 +192,51 @@ class SubtreePullGateTest(unittest.TestCase):
         result = self.run_gate(self.base_sha, head)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("only for pulls", result.stderr)
+
+    def test_a_downgrade_pull_is_not_trusted(self):
+        # claude-opus-5's blocker: base is at v2, the pull-shaped PR sets the
+        # mount BACK to v1 — every tree involved genuinely exists upstream,
+        # so membership alone would exempt it. Red on the pre-fix gate by
+        # construction.
+        forward = self.commit_pull(to_version=2)
+        downgrade = self.commit_pull(to_version=1, branch="downgrade-branch")
+        result = self.run_gate(forward, downgrade)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("moves docs/ai-team/ backward", result.stderr)
+
+    def test_a_base_mount_deviating_from_upstream_is_not_trusted(self):
+        self.git(self.adopter, "checkout", "-q", "-b", "deviated-base")
+        tool = self.adopter / PREFIX / "scripts" / "tool.sh"
+        tool.write_text("#!/bin/sh\nlocal deviation\n", encoding="utf-8")
+        self.git(self.adopter, "add", "-A")
+        self.git(self.adopter, "commit", "-qm", "deviated base state")
+        deviated_base = self.git_out(self.adopter, "rev-parse", "HEAD")
+        self.git(self.adopter, "checkout", "-q", "main")
+        head = self.commit_pull()
+
+        result = self.run_gate(deviated_base, head)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("adopter deviation", result.stderr)
+
+    def test_an_initial_mount_is_not_the_pull_shape(self):
+        # An adopter whose base has no mount at all is doing a subtree ADD;
+        # installation gets an ordinary review.
+        bare = self.adopter.parent / "bare-adopter"
+        bare.mkdir()
+        self.git(bare, "init", "-q", "-b", "main")
+        (bare / "app.txt").write_text("app\n", encoding="utf-8")
+        self.git(bare, "add", "-A")
+        self.git(bare, "commit", "-qm", "no mount yet")
+        bare_base = self.git_out(bare, "rev-parse", "HEAD")
+        saved = self.adopter
+        self.adopter = bare
+        try:
+            head = self.commit_pull()
+            result = self.run_gate(bare_base, head)
+        finally:
+            self.adopter = saved
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("initial mount needs an ordinary review", result.stderr)
 
     def test_missing_objects_cannot_be_judged(self):
         head = self.commit_pull()
