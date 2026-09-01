@@ -17,24 +17,9 @@
 # mounted copy has the helper and always treats origin as authoritative; an
 # inherited override cannot split review reads from gate.sh's repository.
 #
-# A principal is an account, not a lane, so it is independent of every agent by
-# construction: the only exclusion it needs is that it did not author the pull
-# request. A principal objection blocks on every author path including the
-# automated one, because a rewritten commit_id can only make a block
-# over-strict and a fresh review clears that, where the opposite error lands a
-# change the principal objected to. An APPROVED review naming neither an agent
-# nor a principal is dropped before any verdict is computed, so it is named in
-# a WARN: an approval that does not count must never be silent, or its author
-# cannot learn why the gate ignored them.
-#
-# A human principal is a GitHub account that no agent lane ever speaks
-# through. Its exact-head APPROVED review counts as one independent acceptance
-# with no body markers, because the account itself is the identity that markers
-# exist to supply. The allow-list is empty unless an adopter configures one, so
-# this exception costs nothing until it is opted into. It never applies on a
-# trusted automated-author pull request: an automated rebase can rewrite an
-# older review's `commit_id` onto the replacement head, and a marker-less
-# approval has nothing else binding it to what was actually read.
+# An APPROVED review naming no agent is dropped before any verdict is
+# computed, so it is named in a WARN: an approval that does not count must
+# never be silent, or its author cannot learn why the gate ignored them.
 #
 # Fixture input has `reviewed`, `head_sha`, `labels`, `identity`, and `reviews`
 # fields. `labels` may be an array of label names or GitHub label objects;
@@ -168,55 +153,7 @@ fi
 identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
 automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
 
-# The allow-list is configuration, not a package constant: who counts as a
-# principal differs per adopter, where Dependabot's numeric id does not. It is
-# read from the environment first so the trusted workflow can supply it from
-# the same pinned commit that supplied this script, and from an adopter-owned
-# file outside the mount otherwise, so a local `gate.sh` pre-flight reaches the
-# same verdict as CI. Entries are `<numeric-id>:<login>`, separated by any
-# whitespace or commas; `#` starts a comment.
-principals_source="${AI_TEAM_HUMAN_PRINCIPALS:-}"
-if [[ -z "${principals_source//[[:space:]]/}" ]]; then
-  principals_source=""
-  if principals_root=$(git rev-parse --show-toplevel 2>/dev/null) && [[ -n "$principals_root" ]]; then
-    principals_file="$principals_root/.ai-team/principals"
-    if [[ -r "$principals_file" ]]; then
-      principals_source=$(cat "$principals_file") || {
-        echo "ERROR: cannot read $principals_file" >&2
-        exit 2
-      }
-    fi
-  fi
-fi
-
-# Parse fail-loud. A misconfigured allow-list must not quietly widen or quietly
-# vanish; either reading would be a silent change to who can clear a merge.
-principals='[]'
-principal_tokens=()
-while IFS= read -r principal_line; do
-  principal_line="${principal_line%%#*}"
-  for principal_token in $principal_line; do
-    principal_token="${principal_token%,}"
-    [[ -n "$principal_token" ]] || continue
-    if [[ ! "$principal_token" =~ ^([0-9]+):([A-Za-z0-9][A-Za-z0-9-]*)$ ]]; then
-      echo "ERROR: malformed human principal entry '$principal_token'; expected <numeric-id>:<login>" >&2
-      exit 2
-    fi
-    principal_tokens+=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")
-  done
-done <<<"${principals_source//,/ }"
-if ((${#principal_tokens[@]} > 0)); then
-  principals=$(jq -cn '
-    [range(0; ($ARGS.positional | length); 2)
-     | {id: ($ARGS.positional[.] | tonumber), login: ($ARGS.positional[. + 1])}]
-  ' --args "${principal_tokens[@]}") || {
-    echo "ERROR: cannot assemble the human principal allow-list" >&2
-    exit 2
-  }
-fi
-
-result=$(jq -r --arg automated_author "$automated_author" \
-  --argjson principals "$principals" '
+result=$(jq -r --arg automated_author "$automated_author" '
   def label_names:
     if (.labels | type) != "array" then []
     elif (.labels | length) == 0 then []
@@ -233,12 +170,6 @@ result=$(jq -r --arg automated_author "$automated_author" \
        | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
        | ascii_downcase)] | unique) as $heads
     | if ($heads | length) == 1 then $heads[0] else "" end;
-  def principal_login:
-    (.user.id? // null) as $id
-    | (.user.login? // "") as $login
-    | if $id == null or $login == "" then ""
-      else ([$principals[] | select(.id == $id and .login == $login) | .login] | first // "")
-      end;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
        | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
@@ -265,7 +196,6 @@ result=$(jq -r --arg automated_author "$automated_author" \
       ["FAIL: expected exactly one agent:<id> author lane, found \($authors | length)"]
     else
       (if $automated_author != "" then $automated_author else $authors[0] end) as $author
-      | ($input.identity.user.id? // null) as $author_id
       | [$input.reviews[] | select(.commit_id == $input.reviewed)] as $at_head
       | [$at_head[]
          | . + {agent: from_agent, verdict: review_verdict, reviewed_head: reviewed_head}
@@ -273,25 +203,16 @@ result=$(jq -r --arg automated_author "$automated_author" \
         | sort_by(.agent, .submitted_at, .id)
         | group_by(.agent)
         | map(last) as $latest
-      | ([$at_head[]
-          | . + {principal: principal_login, verdict: review_verdict}
-          | select(.principal != "" and ((.user.id? // null) != $author_id))]
-         | sort_by(.principal, .submitted_at, .id)
-         | group_by(.principal)
-         | map(last)) as $principals_latest
       | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "accept") | .agent]
-         + (if $automated_author != "" then []
-            else [$principals_latest[] | select(.verdict == "accept") | .principal] end)
          | unique | join(", ")) as $accepted
       | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "changes required") | .agent]
-         + [$principals_latest[] | select(.verdict == "changes required") | .principal]
          | unique | join(", ")) as $blocking
       | ([$latest[] | select(.agent != $author and .verdict == "") | .agent] | unique) as $malformed
       | ([$latest[] | select(.agent != $author and .reviewed_head != $input.reviewed) | .agent] | unique) as $unbound
       | ([$at_head[]
           | select(.state == "APPROVED")
-          | . + {agent: from_agent, principal: principal_login}
-          | select(.agent == "" and .principal == "")
+          | . + {agent: from_agent}
+          | select(.agent == "")
           | (.user.login? // "an unidentified account")]
          | unique) as $unattributed
       | [if $accepted == "" then
@@ -304,7 +225,7 @@ result=$(jq -r --arg automated_author "$automated_author" \
          else
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
-        + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker and the account is not a configured human principal"]
+        + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"]
     end

@@ -24,7 +24,6 @@ class GateHarness(unittest.TestCase):
         reviewed=SHA,
         head_sha=SHA,
         identity=None,
-        principals=None,
     ):
         if identity is None:
             identity = {
@@ -46,8 +45,6 @@ class GateHarness(unittest.TestCase):
             )
             env = os.environ.copy()
             env["REVIEW_GATE_INPUT"] = str(fixture)
-            if principals is not None:
-                env["AI_TEAM_HUMAN_PRINCIPALS"] = principals
             return run_with_bash_path(
                 ["bash", bash_path(SCRIPT)],
                 stub_directory=Path(directory),
@@ -172,7 +169,7 @@ esac
     def run_live_gate_with_argv_guard(
         self,
         review_body_size=50_000,
-        jq_arg_limit=8_192,
+        jq_arg_limit=5_120,
         *,
         malformed_reviews=False,
         interrupt_on_review_parse=False,
@@ -657,158 +654,34 @@ printf 'signal-exit=%s\n' "$rc"
         }
 
 
-PRINCIPAL = {"id": 4242, "login": "owner-account", "type": "User"}
-PRINCIPAL_LIST = "4242:owner-account"
-DEPENDABOT_IDENTITY = {
-    "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
-    "head": {"repo": {"id": 100}},
-    "base": {"repo": {"id": 100}},
-}
+class UnattributedApprovalTest(GateHarness):
+    """An approval the gate ignores must be named, never silently dropped.
 
-
-class HumanPrincipalTest(GateHarness):
-    """A configured human principal account clears the gate by approving.
-
-    The marker grammar exists because agents share one GitHub account, so API
-    review metadata cannot name the reviewer. That reasoning does not reach an
-    account no agent ever speaks through: there the account is the identity.
+    #55 reported this from belimbing#462: the owner approved at the exact head
+    with an empty body and the check produced no output about it at all. The
+    approval not counting is the design working; its being invisible was not.
     """
 
     def approval(self, **kwargs):
-        """A bare UI approval — no body, no markers, which is the whole point."""
+        """A bare UI approval — no body, no markers."""
         return self.review(state="APPROVED", body="", bind_head=False, **kwargs)
 
-    def test_principal_approval_alone_clears_the_gate(self):
-        result = self.run_gate(
-            [self.approval(user=PRINCIPAL)], principals=PRINCIPAL_LIST
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("acceptance from owner-account", result.stdout)
-
-    def test_principal_is_inert_until_configured(self):
-        """Default is an empty allow-list: the exception costs nothing unused."""
-        result = self.run_gate([self.approval(user=PRINCIPAL)])
+    def test_marker_less_approval_is_named_not_silent(self):
+        result = self.run_gate([self.approval(
+            user={"id": 4242, "login": "owner-account", "type": "User"})])
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no independent exact-head acceptance", result.stdout)
-
-    def test_unconfigured_approval_is_named_not_silent(self):
-        """The defect #55 reported: a dropped approval used to produce nothing."""
-        result = self.run_gate([self.approval(user=PRINCIPAL)])
         self.assertIn(
             "WARN: an APPROVED review from owner-account was ignored", result.stdout
         )
-
-    def test_login_must_corroborate_the_numeric_id(self):
-        """The id is the trust anchor; a mismatched login is not that account."""
-        result = self.run_gate(
-            [self.approval(user={"id": 4242, "login": "someone-else", "type": "User"})],
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("WARN: an APPROVED review from someone-else", result.stdout)
-
-    def test_principal_cannot_approve_a_pull_request_it_authored(self):
-        result = self.run_gate(
-            [self.approval(user=PRINCIPAL)],
-            identity={
-                "user": PRINCIPAL,
-                "head": {"repo": {"id": 100}},
-                "base": {"repo": {"id": 100}},
-            },
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
-
-    def test_principal_approval_must_name_the_current_head(self):
-        result = self.run_gate(
-            [self.approval(user=PRINCIPAL, commit_id=STALE_SHA)],
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
-
-    def test_principal_approval_is_withheld_on_an_automated_author(self):
-        """A rebase can rewrite commit_id, so a marker-less approval there is
-        bound to nothing. #52's grammar already covers Dependabot properly."""
-        result = self.run_gate(
-            [self.approval(user=PRINCIPAL)],
-            labels=(),
-            identity=DEPENDABOT_IDENTITY,
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
         self.assertIn("no independent exact-head acceptance", result.stdout)
 
-    def test_principal_changes_required_blocks_an_accepted_lane(self):
-        result = self.run_gate(
-            [
-                self.review(agent="reviewer", state="APPROVED"),
-                self.review(
-                    agent="ignored",
-                    state="CHANGES_REQUESTED",
-                    body="",
-                    bind_head=False,
-                    user=PRINCIPAL,
-                    at="2026-01-02T00:00:00Z",
-                ),
-            ],
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("changes required by owner-account", result.stdout)
-
-    def test_principal_changes_required_blocks_on_an_automated_author_too(self):
-        """Blocking is honoured on every path: over-strict is the safe error."""
-        result = self.run_gate(
-            [
-                self.review(agent="reviewer", state="APPROVED"),
-                self.review(
-                    agent="ignored",
-                    state="CHANGES_REQUESTED",
-                    body="",
-                    bind_head=False,
-                    user=PRINCIPAL,
-                ),
-            ],
-            labels=(),
-            identity=DEPENDABOT_IDENTITY,
-            principals=PRINCIPAL_LIST,
-        )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("changes required by owner-account", result.stdout)
-
-    def test_a_later_principal_approval_supersedes_its_own_objection(self):
-        result = self.run_gate(
-            [
-                self.review(
-                    agent="ignored",
-                    state="CHANGES_REQUESTED",
-                    body="",
-                    bind_head=False,
-                    user=PRINCIPAL,
-                    at="2026-01-01T00:00:00Z",
-                ),
-                self.approval(user=PRINCIPAL, at="2026-01-02T00:00:00Z"),
-            ],
-            principals=PRINCIPAL_LIST,
-        )
+    def test_a_marked_acceptance_still_clears_alongside_one(self):
+        result = self.run_gate([
+            self.approval(user={"id": 4242, "login": "owner-account", "type": "User"}),
+            self.review(agent="reviewer", state="APPROVED"),
+        ])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_malformed_allow_list_is_refused_loudly(self):
-        """Fail loud, not open and not closed: a misread list changes who merges."""
-        for entry in ("owner-account", "4242", "4242:", ":owner", "4242:owner:extra"):
-            with self.subTest(entry=entry):
-                result = self.run_gate(
-                    [self.approval(user=PRINCIPAL)], principals=entry
-                )
-                self.assertEqual(result.returncode, 2, result.stdout)
-                self.assertIn("malformed human principal entry", result.stderr)
-
-    def test_allow_list_accepts_comments_and_several_separators(self):
-        result = self.run_gate(
-            [self.approval(user=PRINCIPAL)],
-            principals="# owners\n7:someone-else, 4242:owner-account\n",
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("acceptance from reviewer", result.stdout)
 
 
 if __name__ == "__main__":
