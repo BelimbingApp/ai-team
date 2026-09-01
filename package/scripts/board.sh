@@ -91,9 +91,8 @@ post() {
     verdict*)
       echo "post: refusing — a verdict posted as an issue comment is invisible to gate.sh (#359)." >&2
       echo "      Record it as a PR review instead:" >&2
-      echo "      gh pr review $number --comment --body '**From:** $agent" >&2
-      echo "" >&2
-      echo "      **Verdict:** accept'" >&2
+      echo "      reviewed_head=\$(gh pr view $number --json headRefOid --jq .headRefOid)" >&2
+      echo "      gh pr review $number --comment --body \"\$(printf '**From:** $agent\\n\\n**HEAD reviewed:** %s\\n\\n**Verdict:** accept\\n' \"\$reviewed_head\")\"" >&2
       exit 3
       ;;
     *)

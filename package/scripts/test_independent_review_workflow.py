@@ -27,6 +27,7 @@ ADOPTER_TEMPLATE = PACKAGE_DIRECTORY / "templates" / "independent-review.yml"
 WORKFLOW_SHA = "c" * 40
 REPOSITORY = "example/project"
 VALID_SCRIPT = b"#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n"
+VALID_HELPER = b"#!/usr/bin/env bash\n# helper fixture\n"
 
 
 def run_block(workflow: str, step_name: str) -> str:
@@ -74,7 +75,7 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
     def run_materializer(
         self,
         workflow_path: Path,
-        gate_path: str,
+        gate_dir: str,
         response: str,
         *,
         gh_exit: int = 0,
@@ -90,18 +91,26 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
             runner_temp.mkdir()
             response_file = root / "response.json"
             response_file.write_text(response, encoding="utf-8")
+            helper_file = root / "helper-response.json"
+            helper_file.write_text(
+                contents_response(f"{gate_dir}/_trusted_author.sh", VALID_HELPER),
+                encoding="utf-8",
+            )
             calls_file = root / "gh-calls.txt"
 
             gh = root / "gh"
             gh.write_text(
                 """#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$@" > "$GH_CALLS"
+printf '%s\n' "$@" >> "$GH_CALLS"
 if [ "$GH_EXIT" -ne 0 ]; then
   echo "simulated API failure (HTTP 404)" >&2
   exit "$GH_EXIT"
 fi
-cat "$CONTENTS_RESPONSE"
+case "$*" in
+  *"/_trusted_author.sh"*) cat "$HELPER_RESPONSE" ;;
+  *) cat "$CONTENTS_RESPONSE" ;;
+esac
 """,
                 encoding="utf-8",
                 newline="\n",
@@ -111,12 +120,13 @@ cat "$CONTENTS_RESPONSE"
             env = os.environ.copy()
             env["AI_TEAM_TEST_STUB_PATH"] = bash_path(root)
             env["CONTENTS_RESPONSE"] = bash_path(response_file)
+            env["HELPER_RESPONSE"] = bash_path(helper_file)
             env["GH_CALLS"] = bash_path(calls_file)
             env["GH_EXIT"] = str(gh_exit)
             env["GH_TOKEN"] = "fixture-token"
             env["REVIEW_GATE_REPOSITORY"] = repository
             env["REVIEW_GATE_WORKFLOW_SHA"] = workflow_sha
-            env["REVIEW_GATE_PATH"] = gate_path
+            env["REVIEW_GATE_DIR"] = gate_dir
             env["RUNNER_TEMP"] = bash_path(runner_temp)
             result = subprocess.run(
                 [
@@ -147,6 +157,7 @@ cat "$CONTENTS_RESPONSE"
                 self.assertNotIn("actions/checkout@", workflow)
                 self.assertNotIn("present=false", workflow)
                 self.assertNotIn("default_branch", workflow)
+                self.assertNotIn("${{ github.actor }}", workflow)
 
     def test_workflows_pin_the_contents_request_and_quote_event_values(self):
         for name, path in self.workflows():
@@ -164,35 +175,37 @@ cat "$CONTENTS_RESPONSE"
 
     def test_source_and_adopter_paths_are_exact(self):
         adopter = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
-        self.assertIn("REVIEW_GATE_PATH: docs/ai-team/scripts/review_gate.sh", adopter)
-        self.assertNotIn("REVIEW_GATE_PATH: package/scripts/review_gate.sh", adopter)
+        self.assertIn("REVIEW_GATE_DIR: docs/ai-team/scripts", adopter)
+        self.assertNotIn("REVIEW_GATE_DIR: package/scripts", adopter)
 
         if PACKAGE_PATHSPEC != "package":
             self.skipTest("the source repository workflow is outside an adopter mount")
         package = PACKAGE_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("REVIEW_GATE_PATH: package/scripts/review_gate.sh", package)
-        self.assertNotIn("REVIEW_GATE_PATH: docs/ai-team/scripts/review_gate.sh", package)
+        self.assertIn("REVIEW_GATE_DIR: package/scripts", package)
+        self.assertNotIn("REVIEW_GATE_DIR: docs/ai-team/scripts", package)
 
     def test_materializer_fetches_and_verifies_the_exact_blob(self):
-        cases = [("adopter", ADOPTER_TEMPLATE, "docs/ai-team/scripts/review_gate.sh")]
+        cases = [("adopter", ADOPTER_TEMPLATE, "docs/ai-team/scripts")]
         if PACKAGE_PATHSPEC == "package":
-            cases.append(("package", PACKAGE_WORKFLOW, "package/scripts/review_gate.sh"))
+            cases.append(("package", PACKAGE_WORKFLOW, "package/scripts"))
 
-        for name, workflow, gate_path in cases:
+        for name, workflow, gate_dir in cases:
             with self.subTest(workflow=name):
                 result, content, calls = self.run_materializer(
                     workflow,
-                    gate_path,
-                    contents_response(gate_path),
+                    gate_dir,
+                    contents_response(f"{gate_dir}/review_gate.sh"),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(content, VALID_SCRIPT)
                 self.assertIn("--method", calls)
                 self.assertIn("GET", calls)
-                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_path}", calls)
+                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/review_gate.sh", calls)
+                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/_trusted_author.sh", calls)
                 self.assertIn(f"ref={WORKFLOW_SHA}", calls)
 
     def test_materializer_fails_closed_on_api_or_payload_errors(self):
+        gate_dir = "docs/ai-team/scripts"
         path = "docs/ai-team/scripts/review_gate.sh"
         malformed = [
             ("404", contents_response(path), 1, REPOSITORY, WORKFLOW_SHA),
@@ -215,7 +228,7 @@ cat "$CONTENTS_RESPONSE"
             with self.subTest(case=name):
                 result, _, _ = self.run_materializer(
                     ADOPTER_TEMPLATE,
-                    path,
+                    gate_dir,
                     response,
                     gh_exit=gh_exit,
                     repository=repository,

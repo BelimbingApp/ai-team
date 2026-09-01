@@ -211,6 +211,12 @@ state, or a task already held by an open PR. It creates the branch, empty claim
 commit, draft PR, labels, and `Closes #<issue-number>` reference. Do not bypass
 a refusal by editing labels yourself.
 
+Dependabot PRs opened inside the canonical repository are the sole automated
+exception. The gate recognizes the immutable REST account id plus bot type and
+same-repository identity; it never trusts the title, branch, dependency label,
+or workflow actor. Such an open PR is an implicit issue-less handoff only while
+it has no `agent:*` or `task:*` labels. Do not fabricate claim metadata for it.
+
 Only mutate work on a claimed task. Read-only inspection, triage, review,
 coordination, and a gated peer merge do not need a claim. Keep one writer per
 path and agree a split before overlapping a peer. Use a worktree for a lane;
@@ -228,9 +234,11 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
-`land.sh` gates, merges, attributes the actor, and finalizes the task. Re-run it
-after an interrupted finalization; never replace it with an ad-hoc merge. A
-green, independently reviewed, unheld peer PR is everyone's duty to land.
+`land.sh` gates, merges, attributes the actor, and finalizes the task. For a
+trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
+invents or edits an issue. Re-run it after an interrupted finalization; never
+replace it with an ad-hoc merge. A green, independently reviewed, unheld peer PR
+is everyone's duty to land.
 
 A passing AI Team gate is necessary but does not override an adopter's GitHub
 branch protections or other repository rules. If GitHub refuses the merge
@@ -335,10 +343,13 @@ independence, live holds, or actual platform permission gaps.
 
 ## Identity, review, and holds
 
-Shared GitHub accounts do not identify agents. Your stable identity is the
-`agent:<id>` label on both issue and PR. Check that another live lane does not
-use it, place `**From:** <your-agent-id>` in claims, handoffs, decisions, and
-reviews, and never infer an actor from GitHub metadata.
+Shared GitHub accounts do not identify human agents. Your stable identity is
+the `agent:<id>` label on both issue and PR. Check that another live lane does
+not use it, place `**From:** <your-agent-id>` in claims, handoffs, decisions,
+and reviews, and never infer a human actor from GitHub metadata. The only
+machine-author exception is the exact, same-repository Dependabot REST identity
+described above; it receives the reserved synthetic author lane
+`github-dependabot` solely for review-independence checks.
 
 Review a peer's exact head, not your own work. Verify the claim and diff, name
 the observable problem and path, say what you did not check, and withdraw wrong
@@ -349,19 +360,26 @@ checked.
 Post a verdict as a PR review, not an issue comment:
 
 ```bash
-gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n\n**Verdict:** accept\n')"
+reviewed_head=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
+gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n\n**HEAD reviewed:** %s\n\n**Verdict:** accept\n' "$reviewed_head")"
 ```
 
-`**Verdict:**` is alone on its line and is `accept`, `accept with follow-up`, or
-`changes required`. A shared account may record it as `COMMENTED`; the exact
-`From` marker and lane label establish independence. Run `gate.sh` after posting
-to verify it registered. Use `accept with follow-up` only for genuinely separate
+`**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
+you inspected. It is mandatory even for a native approval. `**Verdict:**` is
+also alone on its line and is `accept`, `accept with follow-up`, or `changes
+required`. A shared account may record it as `COMMENTED`; the exact `From`
+marker and lane label establish independence. Run `gate.sh` after posting to
+verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
 
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
-`gate.sh` uses it. It counts only the newest review on the exact head from a
-stable `From` identity distinct from the single author lane; a newer `changes
-required` verdict revokes that reviewer's earlier acceptance. To make the same
+`gate.sh` uses it. It counts only the newest review whose API `commit_id` and
+explicit `HEAD reviewed` marker both name the exact head, from a stable `From`
+identity distinct from the single author lane; a newer review revokes that
+reviewer's earlier acceptance. The explicit marker is durable proof: GitHub may
+rewrite an older Dependabot review's API `commit_id` when the bot rebases it.
+After upgrading the grammar, repost any marker-less review and rerun the check
+on already-reviewed PRs. To make the same
 rule a required GitHub check in an adopter, copy
 `package/templates/independent-review.yml` to `.github/workflows/independent-review.yml`
 and require its `Independent review` check. In an adopter mount, those paths

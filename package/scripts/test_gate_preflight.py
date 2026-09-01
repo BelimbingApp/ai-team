@@ -63,6 +63,9 @@ GH_STUB = textwrap.dedent(
       "api repos/$GATE_TEST_CANONICAL/pulls/1/reviews")
         printf '%s\\n' "$GATE_TEST_REVIEWS"
         ;;
+      "api repos/$GATE_TEST_CANONICAL/pulls/1")
+        printf '%s\\n' "$GATE_TEST_IDENTITY"
+        ;;
       "api repos/$GATE_TEST_CANONICAL/issues/1/comments")
         printf '%s\\n' "${GATE_TEST_ISSUE_COMMENTS:-[]}"
         ;;
@@ -140,6 +143,21 @@ class GateMechanismTest(unittest.TestCase):
         )
         return env
 
+    @staticmethod
+    def dependabot_identity(
+        *,
+        user_id=49699333,
+        login="dependabot[bot]",
+        user_type="Bot",
+        head_repo_id=100,
+        base_repo_id=100,
+    ) -> dict[str, object]:
+        return {
+            "user": {"id": user_id, "login": login, "type": user_type},
+            "head": {"repo": {"id": head_repo_id}},
+            "base": {"repo": {"id": base_repo_id}},
+        }
+
     def run_gate(
         self,
         *,
@@ -159,7 +177,9 @@ class GateMechanismTest(unittest.TestCase):
         body: str | None = None,
         branch: str | None = None,
         title: str | None = None,
+        identity: dict[str, object] | None = None,
         review_gate_body: str | None = None,
+        bind_review_heads: bool = True,
         branch_rules: list[dict[str, object]] | None = None,
         allow_missing_checks: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -199,6 +219,16 @@ class GateMechanismTest(unittest.TestCase):
         env["GATE_TEST_LABELS"] = json.dumps([
             {"name": label} for label in effective_labels
         ])
+        if identity is None:
+            identity = {
+                "user": {"id": 1, "login": "human-author", "type": "User"},
+                "head": {"repo": {"id": 100}},
+                "base": {"repo": {"id": 100}},
+            }
+        effective_identity = json.loads(json.dumps(identity))
+        effective_identity.setdefault("head", {})["sha"] = effective_head
+        effective_identity["labels"] = [{"name": label} for label in effective_labels]
+        env["GATE_TEST_IDENTITY"] = json.dumps(effective_identity)
         if reviews is None:
             reviews = [{
                 "id": 1,
@@ -208,7 +238,17 @@ class GateMechanismTest(unittest.TestCase):
                 "submitted_at": "2026-01-01T00:00:00Z",
                 "user": {"login": "reviewer"},
             }]
-        env["GATE_TEST_REVIEWS"] = json.dumps(reviews)
+        effective_reviews = json.loads(json.dumps(reviews))
+        if bind_review_heads:
+            for review in effective_reviews:
+                body_value = review.get("body")
+                body_text = body_value if isinstance(body_value, str) else ""
+                if "**HEAD reviewed:**" not in body_text:
+                    marker = review.get("commit_id", effective_head)
+                    review["body"] = (
+                        f"{body_text}\n\n**HEAD reviewed:** `{marker}`"
+                    )
+        env["GATE_TEST_REVIEWS"] = json.dumps(effective_reviews)
         env["GATE_TEST_ISSUE_COMMENTS"] = json.dumps(issue_comments if issue_comments is not None else [])
         if check_runs is None:
             check_runs = [{
@@ -249,7 +289,13 @@ class GateMechanismTest(unittest.TestCase):
         if review_gate_body is not None:
             mechanisms = base / "mechanisms"
             mechanisms.mkdir()
-            for name in ("gate.sh", "review_gate.sh", "_lane_issue.sh", "_default_branch.sh"):
+            for name in (
+                "gate.sh",
+                "review_gate.sh",
+                "_lane_issue.sh",
+                "_trusted_author.sh",
+                "_default_branch.sh",
+            ):
                 shutil.copy2(SCRIPT.with_name(name), mechanisms / name)
             review_gate = mechanisms / "review_gate.sh"
             review_gate.write_text(review_gate_body, encoding="utf-8")
@@ -738,6 +784,46 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no independent exact-head acceptance", result.stdout)
 
+    def test_current_api_commit_id_cannot_rewrite_a_stale_explicit_head_binding(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[{
+                "id": 1,
+                "state": "APPROVED",
+                "body": (
+                    "**From:** reviewer\n\n"
+                    f"**HEAD reviewed:** `{self.main_sha}`"
+                ),
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("**HEAD reviewed:** must name exact head", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_missing_explicit_head_binding_fails_the_gate(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[{
+                "id": 1,
+                "state": "APPROVED",
+                "body": "**From:** reviewer",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+            bind_review_heads=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("**HEAD reviewed:** must name exact head", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
     def test_shared_account_comment_with_explicit_acceptance_passes(self):
         result = self.run_gate(
             origin=CANONICAL_HTTPS,
@@ -1059,6 +1145,85 @@ class GateMechanismTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("expected exactly one agent:<id> author lane", result.stdout)
 
+    def test_exact_dependabot_identity_passes_without_claim_metadata(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            labels=[],
+            body="Generated dependency update; no claim marker or issue reference.",
+            branch="dependabot/npm_and_yarn/alpinejs-3.16.3",
+            title="Bump Alpine.js from 3.16.2 to 3.16.3",
+            identity=self.dependabot_identity(),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("trusted automated PR is ready without task:* claim metadata", result.stdout)
+        self.assertIn("trusted automated author is github-dependabot", result.stdout)
+        self.assertIn("issue-less trusted automated lane", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_dependabot_looking_metadata_cannot_spoof_the_trusted_identity(self):
+        for identity in (
+            self.dependabot_identity(user_id=1),
+            self.dependabot_identity(login="contributor"),
+            self.dependabot_identity(user_type="User"),
+            self.dependabot_identity(head_repo_id=200),
+            self.dependabot_identity(head_repo_id=None),
+        ):
+            with self.subTest(identity=identity):
+                result = self.run_gate(
+                    origin=CANONICAL_HTTPS,
+                    reviewed=self.head_sha,
+                    labels=[],
+                    body="Generated dependency update.",
+                    branch="dependabot/npm_and_yarn/alpinejs-3.16.3",
+                    title="Bump Alpine.js from 3.16.2 to 3.16.3",
+                    identity=identity,
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("expected exactly one agent:<id> author lane", result.stdout)
+                self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_dependabot_rejects_fake_claim_labels(self):
+        for labels, expected in (
+            (["task:ready"], "must not carry task:* claim metadata"),
+            (["task:active"], "must not carry task:* claim metadata"),
+            (["task:review"], "must not carry task:* claim metadata"),
+            (["task:blocked"], "must not carry task:* claim metadata"),
+            (["task:done"], "must not carry task:* claim metadata"),
+            (["agent:spoofed"], "must not carry agent:<id> labels"),
+        ):
+            with self.subTest(labels=labels):
+                result = self.run_gate(
+                    origin=CANONICAL_HTTPS,
+                    reviewed=self.head_sha,
+                    labels=labels,
+                    identity=self.dependabot_identity(),
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stdout)
+
+    def test_dependabot_changes_required_verdict_still_blocks(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            labels=[],
+            identity=self.dependabot_identity(),
+            reviews=[{
+                "id": 1,
+                "state": "COMMENTED",
+                "body": "**From:** reviewer\n\n**Verdict:** changes required",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("independent exact-head changes required by reviewer", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
     def test_short_abbreviation_refused(self):
         result = self.run_gate(origin=CANONICAL_HTTPS, reviewed=self.head_sha[:8])
         self.assertEqual(result.returncode, 2)
@@ -1182,6 +1347,30 @@ class GateMechanismTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("hold:review held by sol", result.stdout)
         self.assertIn("hold.sh review clear", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_named_hold_still_blocks_dependabot(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            labels=["hold:review:sol"],
+            identity=self.dependabot_identity(),
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("hold:review held by sol", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_legacy_hold_still_blocks_dependabot(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            labels=["hold:review"],
+            identity=self.dependabot_identity(),
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("hold:review (unattributed, pre-#385) is set", result.stdout)
         self.assertIn("GATE: FAIL", result.stdout)
 
     def test_two_named_holders_are_both_reported(self):
