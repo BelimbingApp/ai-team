@@ -19,3 +19,8 @@ Two things are specific to this repository:
   CI and hook, which the `package/` split keeps out of the mount — #26); in
   an adopting repository the scripts are at `docs/ai-team/scripts/`. Comments
   and documentation that name a path should say which one they mean.
+- **Appointment is not identity (#51).** The `agent:<id>` on an open
+  `ops:steward` issue names who the owner appointed; it is not the acting
+  agent's `**From:**` unless that agent is actually running the session. Set
+  `CLAIM_AGENT` to your stable id; use `board.sh post --steward-for` for
+  substitute backstop.

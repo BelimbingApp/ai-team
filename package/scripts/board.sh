@@ -9,7 +9,7 @@
 #
 #   posts without the machine header are invisible to team tooling.
 #
-#   board.sh post <n> --agent <id> --type <status|finding|question|handoff|proposal|vote|decision|acknowledgement> [body…]
+#   board.sh post <n> --agent <id> [--steward-for <appointed-id>] --type <status|finding|question|handoff|proposal|vote|decision|acknowledgement|steward-backstop> [body…]
 #       Stamp the header gate.sh parses, enforce a visible-byte budget
 #       (BOARD_POST_BUDGET, default 1400), fold overflow into <details>.
 #       Refuses --type verdict: verdicts must be PR reviews or the gate
@@ -65,8 +65,29 @@ command="${1:-}"
 [ -n "$command" ] || usage
 shift
 
+# When exactly one open ops:steward issue carries one agent:* label, print
+# appointee<TAB>issue-number to stdout; otherwise print nothing (#51).
+steward_appointment() {
+  if [ -n "${BOARD_TEST_STEWARD_APPOINTEE:-}" ]; then
+    printf '%s\t%s\n' "$BOARD_TEST_STEWARD_APPOINTEE" "${BOARD_TEST_STEWARD_ISSUE:-0}"
+    return 0
+  fi
+  local row appointee issue_number
+  row=$(gh issue list --repo "$REPO" --state open --label "ops:steward" \
+    --json number,labels \
+    --jq -r '.[]
+          | select((([.labels[]?.name | select(startswith("agent:"))] | length) == 1))
+          | [([.labels[]?.name | select(startswith("agent:"))][0] | sub("^agent:"; "")), (.number | tostring)]
+          | @tsv' 2>/dev/null | head -n 1)
+  [ -n "$row" ] || return 0
+  appointee="${row%%$'\t'*}"
+  issue_number="${row#*$'\t'}"
+  [ -n "$appointee" ] && [ -n "$issue_number" ] && printf '%s\t%s\n' "$appointee" "$issue_number"
+}
+
 post() {
-  local number="" agent="${CLAIM_AGENT:-${BOARD_AGENT:-}}" type="" body="" body_file=""
+  local number="" agent="${CLAIM_AGENT:-${BOARD_AGENT:-}}" type="" body="" body_file="" steward_for=""
+  local acting="${CLAIM_AGENT:-${BOARD_AGENT:-}}" appointee="" appointee_issue="" appointment
 
   number="${1:-}"
   [ -n "$number" ] || { echo "post: issue/PR number required" >&2; exit 2; }
@@ -75,6 +96,7 @@ post() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent="${2:-}"; shift 2 ;;
+      --steward-for) steward_for="${2:-}"; shift 2 ;;
       --type) type="${2:-}"; shift 2 ;;
       --body-file) body_file="${2:-}"; shift 2 ;;
       *) body="${body:+$body }$1"; shift ;;
@@ -86,8 +108,41 @@ post() {
     exit 2
   fi
 
+  if ! [[ "$agent" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+    echo "post: --agent must be a lower-case stable agent id (without agent:)" >&2
+    exit 2
+  fi
+
+  if [ -n "$steward_for" ] && ! [[ "$steward_for" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+    echo "post: --steward-for must be a lower-case stable agent id (without agent:)" >&2
+    exit 2
+  fi
+
+  appointment=$(steward_appointment || true)
+  if [ -n "$appointment" ]; then
+    appointee="${appointment%%$'\t'*}"
+    appointee_issue="${appointment#*$'\t'}"
+  fi
+
+  if [ -n "$appointee" ] && [ "$agent" = "$appointee" ] && [ -n "$acting" ] && [ "$acting" != "$appointee" ]; then
+    echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is $acting (#51)" >&2
+    echo "      Post as your own id: --agent $acting --steward-for $appointee --type steward-backstop …" >&2
+    exit 3
+  fi
+
+  if [ -n "$steward_for" ]; then
+    if [ "$agent" = "$steward_for" ]; then
+      echo "post: refusing — --steward-for and --agent must differ for substitute steward backstop (#51)" >&2
+      exit 3
+    fi
+    if [ -n "$appointee" ] && [ "$steward_for" != "$appointee" ]; then
+      echo "post: refusing — --steward-for $steward_for does not match active appointee $appointee" >&2
+      exit 3
+    fi
+  fi
+
   case "$type" in
-    status|finding|question|handoff|proposal|vote|decision|acknowledgement) ;;
+    status|finding|question|handoff|proposal|vote|decision|acknowledgement|steward-backstop) ;;
     verdict*)
       echo "post: refusing — a verdict posted as an issue comment is invisible to gate.sh (#359)." >&2
       echo "      Record it as a PR review instead:" >&2
@@ -96,10 +151,15 @@ post() {
       exit 3
       ;;
     *)
-      echo "post: --type must be one of status|finding|question|handoff|proposal|vote|decision|acknowledgement (got '${type:-none}')" >&2
+      echo "post: --type must be one of status|finding|question|handoff|proposal|vote|decision|acknowledgement|steward-backstop (got '${type:-none}')" >&2
       exit 2
       ;;
   esac
+
+  if [ "$type" = "steward-backstop" ] && [ -z "$steward_for" ]; then
+    echo "post: --type steward-backstop requires --steward-for <appointed-agent-id>" >&2
+    exit 2
+  fi
 
   if [ -n "$body_file" ]; then
     body=$(cat "$body_file") || exit 2
@@ -146,7 +206,17 @@ post() {
   fi
 
   {
-    printf '**From:** %s\n\n**Type:** %s\n\n%s\n' "$agent" "$type" "$visible"
+    if [ -n "$steward_for" ]; then
+      if [ -n "$appointee_issue" ] && [ "$appointee_issue" != "0" ]; then
+        printf '**From:** %s\n\n**Steward-for:** %s (#%s)\n\n**Type:** %s\n\n%s\n' \
+          "$agent" "$steward_for" "$appointee_issue" "$type" "$visible"
+      else
+        printf '**From:** %s\n\n**Steward-for:** %s\n\n**Type:** %s\n\n%s\n' \
+          "$agent" "$steward_for" "$type" "$visible"
+      fi
+    else
+      printf '**From:** %s\n\n**Type:** %s\n\n%s\n' "$agent" "$type" "$visible"
+    fi
     if [ -n "$folded" ]; then
       printf '\n<details>\n<summary>full detail (folded by board.sh — over the %s-byte visible budget)</summary>\n\n%s\n\n</details>\n' "$BUDGET" "$folded"
     fi
