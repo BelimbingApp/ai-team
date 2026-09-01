@@ -63,10 +63,14 @@ elif [ -z "$stewards" ]; then
   echo "  WARNING expected exactly one active ops:steward issue (found 0)"
 else
   steward_count=$(printf '%s\n' "$stewards" | awk 'NF {count++} END {print count + 0}')
+  steward_identity_note=""
   while IFS=$'\t' read -r steward_number agent_names agent_count steward_title; do
     [ -n "$steward_number" ] || continue
     if [ "$agent_count" -eq 1 ]; then
       printf '  #%s [%s] %s\n' "$steward_number" "$agent_names" "$steward_title"
+      if [ "$steward_count" -eq 1 ]; then
+        steward_identity_note="$steward_number|$agent_names"
+      fi
     elif [ "$agent_count" -eq 0 ]; then
       printf '  #%s [MISSING agent label] %s\n' "$steward_number" "$steward_title"
       printf '  WARNING #%s active steward must carry exactly one agent:* label (found 0)\n' "$steward_number"
@@ -77,6 +81,11 @@ else
   done <<< "$stewards"
   if [ "$steward_count" -ne 1 ]; then
     echo "  WARNING expected exactly one active ops:steward issue (found $steward_count)"
+  elif [ -n "$steward_identity_note" ]; then
+    _steward_issue="${steward_identity_note%%|*}"
+    _steward_agent="${steward_identity_note#*|}"
+    echo "  NOTE: $_steward_agent on #$_steward_issue is the APPOINTMENT, not your **From:** identity."
+    echo "        Set CLAIM_AGENT to your stable id before posting. Never borrow the appointee's id."
   fi
 fi
 
