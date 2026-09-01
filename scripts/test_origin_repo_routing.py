@@ -115,7 +115,18 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                     printf '  HALT #17 — ORIGIN ROUTING PROBE\\n'
                     ;;
                   "pr list") printf '' ;;
-                  "api") printf '[]\\n' ;;
+                  "api")
+                    # A REST pull read embeds the repository in the path, not
+                    # in --repo; the probe must still catch ambient scoping.
+                    for argument in "$@"; do
+                      case "$argument" in
+                        repos/*/pulls/*)
+                          [[ "$argument" == repos/example/origin/* ]] || exit 18
+                          ;;
+                      esac
+                    done
+                    printf '[]\\n'
+                    ;;
                   *) printf '' ;;
                 esac
                 """
