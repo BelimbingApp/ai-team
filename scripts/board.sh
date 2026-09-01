@@ -69,16 +69,20 @@ shift
 # appointee<TAB>issue-number to stdout; otherwise print nothing (#51).
 steward_appointment() {
   if [ -n "${BOARD_TEST_STEWARD_APPOINTEE:-}" ]; then
+    if [ "${BOARD_TEST_STEWARD_AMBIGUOUS:-0}" = "1" ]; then
+      return 0
+    fi
     printf '%s\t%s\n' "$BOARD_TEST_STEWARD_APPOINTEE" "${BOARD_TEST_STEWARD_ISSUE:-0}"
     return 0
   fi
   local row appointee issue_number
   row=$(gh issue list --repo "$REPO" --state open --label "ops:steward" \
     --json number,labels \
-    --jq -r '.[]
+    --jq -r '[.[]
           | select((([.labels[]?.name | select(startswith("agent:"))] | length) == 1))
           | [([.labels[]?.name | select(startswith("agent:"))][0] | sub("^agent:"; "")), (.number | tostring)]
-          | @tsv' 2>/dev/null | head -n 1)
+          | @tsv]
+          | if length == 1 then .[0] else empty end' 2>/dev/null)
   [ -n "$row" ] || return 0
   appointee="${row%%$'\t'*}"
   issue_number="${row#*$'\t'}"
@@ -124,10 +128,12 @@ post() {
     appointee_issue="${appointment#*$'\t'}"
   fi
 
-  if [ -n "$appointee" ] && [ "$agent" = "$appointee" ] && [ -n "$acting" ] && [ "$acting" != "$appointee" ]; then
-    echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is $acting (#51)" >&2
-    echo "      Post as your own id: --agent $acting --steward-for $appointee --type steward-backstop …" >&2
-    exit 3
+  if [ -n "$appointee" ] && [ "$agent" = "$appointee" ]; then
+    if [ -z "$acting" ] || [ "$acting" != "$appointee" ]; then
+      echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is ${acting:-unset} (#51)" >&2
+      echo "      Post as your own id: --agent ${acting:-<your-id>} --steward-for $appointee --type steward-backstop …" >&2
+      exit 3
+    fi
   fi
 
   if [ -n "$steward_for" ]; then
