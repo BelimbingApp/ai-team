@@ -386,6 +386,40 @@ and require its `Independent review` check. In an adopter mount, those paths
 are `docs/ai-team/scripts/review_gate.sh` and
 `docs/ai-team/templates/independent-review.yml`.
 
+### Human principals
+
+The marker grammar exists because agents share one GitHub account, so an API
+approval cannot name who reviewed. That reasoning stops at an account no agent
+ever speaks through. Such an account is a **human principal**: its `APPROVED`
+review on the exact head counts as one independent acceptance with no body
+markers, and its `CHANGES_REQUESTED` blocks. Nothing else about the gate moves.
+
+The allow-list is empty by default, so this changes nothing until an adopter
+opts in. Entries are `<numeric-id>:<login>`, separated by whitespace or commas,
+`#` starting a comment. The numeric id is the trust anchor and the login only
+corroborates it, the same shape `_trusted_author.sh` uses. Find an id with
+`gh api users/<login> --jq .id`.
+
+Configure it in the adopter-owned file `.ai-team/principals`, outside the
+mount, and in `AI_TEAM_HUMAN_PRINCIPALS` in the workflow so CI reaches the same
+verdict as a local `gate.sh` pre-flight:
+
+```
+# .ai-team/principals — accounts no agent ever posts through
+1234567:the-owner
+```
+
+List only accounts that **no agent ever posts through**. An account a lane
+speaks through is not a principal, however human its name looks — listing one
+lets that lane clear its own work.
+
+Two limits are deliberate. A principal cannot clear a pull request it authored.
+And the exception is withheld entirely on a trusted automated author's pull
+request, where a rebase can rewrite an older review's API `commit_id` onto the
+replacement head: a marker-less approval has nothing else binding it to what
+was read, and `_trusted_author.sh` already gives those pull requests a lane
+that ordinary marked reviews can clear.
+
 Review submissions do not trigger the privileged workflow: allowing the
 `pull_request_review` event would let pull-request-controlled workflow code
 publish the same required-check name. When a review is submitted, edited, or
