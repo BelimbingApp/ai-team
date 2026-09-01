@@ -153,6 +153,7 @@ esac
                 workflow = path.read_text(encoding="utf-8")
                 self.assertIn("pull_request_target:", workflow)
                 self.assertNotIn("pull_request_review:", workflow)
+                self.assertIn("Review submissions do not trigger the privileged workflow", workflow)
                 self.assertNotIn("  pull_request:\n", workflow)
                 self.assertNotIn("actions/checkout@", workflow)
                 self.assertNotIn("present=false", workflow)
