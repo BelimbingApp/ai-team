@@ -145,6 +145,10 @@ post() {
       echo "post: refusing — --steward-for $steward_for does not match active appointee $appointee" >&2
       exit 3
     fi
+    if [ -z "$appointee" ] && [ "$type" = "steward-backstop" ]; then
+      echo "post: refusing — --steward-for $steward_for does not match active appointee (no unambiguous ops:steward appointment) (#51)" >&2
+      exit 3
+    fi
   fi
 
   case "$type" in
