@@ -115,6 +115,14 @@ class OrientStewardMechanismTest(unittest.TestCase):
             "active steward must carry exactly one",
         )
 
+    def test_exactly_one_steward_prints_appointment_identity_note(self):
+        # #51: orient must remind substitutes that the appointment label is not
+        # their **From:** identity.
+        self.assert_orientation(
+            "468\tagent:fable\t1\tsteward appointment",
+            "NOTE: agent:fable on #468 is the APPOINTMENT, not your **From:** identity.",
+        )
+
     def test_multiple_active_stewards_are_reported(self):
         self.assert_orientation(
             "380\tagent:opus-5\t1\tfirst\n381\tagent:sol\t1\tsecond",

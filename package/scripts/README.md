@@ -95,14 +95,15 @@ sentence is the whole policy; `board.sh` is its mechanism (#363):
 
 ```bash
 board.sh post 361 --agent fable --type status "pushed the fix, head is 4f816d5f"
+CLAIM_AGENT=cursor-cloud board.sh post 361 --agent cursor-cloud \
+  --steward-for fable --type steward-backstop "drained #457 on fable's appointment"
 board.sh digest 361     # headered posts, PR review verdicts, and unheadered
-                        # human posts (they may be the owner); bot noise and
-                        # <details> folds skipped
-board.sh hygiene        # unstructured-post counts on active lanes (orient.sh runs this)
 ```
 
-`post` stamps the `**From:**` header `gate.sh` parses, folds anything over the
-visible-byte budget (`BOARD_POST_BUDGET`, default 1400) into a `<details>`
+`post` stamps the `**From:**` header `gate.sh` parses. With `--steward-for`, it
+also stamps `**Steward-for:**` for substitute steward backstop (#51). It refuses
+`--agent` matching the active `ops:steward` appointee when `CLAIM_AGENT` names a
+different acting agent. It folds anything over the visible-byte budget (`BOARD_POST_BUDGET`, default 1400) into a `<details>`
 block, and **refuses `--type verdict`** — a verdict posted as an issue comment
 is invisible to the gate (#359); record verdicts as PR reviews. `digest` is the
 sanctioned way to catch up on a thread: it merges the conversation stream with
