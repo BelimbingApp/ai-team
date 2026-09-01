@@ -117,16 +117,32 @@ git fetch -q --no-tags "$upstream_url" \
 mount_tree=$(git rev-parse "$head:$prefix" 2>/dev/null) \
   || say_err "cannot resolve $prefix/ tree at $head"
 
-tree_is_upstream=0
+# Membership is not enough: every historical upstream tree stays reachable
+# forever, so "matches some upstream commit" would exempt a DOWNGRADE — and a
+# downgraded mount carries downgraded templates, letting one unreviewed PR
+# reinstall a superseded review workflow (claude-opus-5's blocker on #61).
+# The pull must move FORWARD: the upstream commit matching the base mount must
+# be an ancestor of the one matching the head mount. A base mount that exists
+# nowhere upstream is an adopter deviation, and an absent base mount is an
+# initial add — both get an ordinary review.
+base_tree=$(git rev-parse "$base:$prefix" 2>/dev/null) \
+  || say_no "the base has no $prefix/ mount — an initial mount needs an ordinary review"
+
+head_commit=""
+base_commit=""
 while IFS= read -r upstream_commit; do
-  if [[ "$(git rev-parse "$upstream_commit^{tree}")" == "$mount_tree" ]]; then
-    tree_is_upstream=1
-    break
-  fi
+  upstream_tree=$(git rev-parse "$upstream_commit^{tree}")
+  [[ -z "$head_commit" && "$upstream_tree" == "$mount_tree" ]] && head_commit="$upstream_commit"
+  [[ -z "$base_commit" && "$upstream_tree" == "$base_tree" ]] && base_commit="$upstream_commit"
+  [[ -n "$head_commit" && -n "$base_commit" ]] && break
 done < <(git rev-list refs/subtree-pull-gate/upstream)
 
-[[ "$tree_is_upstream" == "1" ]] \
+[[ -n "$head_commit" ]] \
   || say_no "the pulled $prefix/ tree matches no commit on $upstream_repo@$upstream_branch"
+[[ -n "$base_commit" ]] \
+  || say_no "the base $prefix/ tree matches no commit on $upstream_repo@$upstream_branch — adopter deviation needs an ordinary review"
+git merge-base --is-ancestor "$base_commit" "$head_commit" 2>/dev/null \
+  || say_no "the pull moves $prefix/ backward: upstream $base_commit is not an ancestor of $head_commit"
 
 # 3. Every change outside the mount is a workflow file regenerated from a
 #    pulled template: identical after each side's leading comment block, so an
