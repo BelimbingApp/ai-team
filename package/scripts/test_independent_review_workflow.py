@@ -96,6 +96,11 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
                 contents_response(f"{gate_dir}/_trusted_author.sh", VALID_HELPER),
                 encoding="utf-8",
             )
+            shape_file = root / "shape-response.json"
+            shape_file.write_text(
+                contents_response(f"{gate_dir}/subtree_pull_gate.sh", VALID_HELPER),
+                encoding="utf-8",
+            )
             calls_file = root / "gh-calls.txt"
 
             gh = root / "gh"
@@ -109,6 +114,7 @@ if [ "$GH_EXIT" -ne 0 ]; then
 fi
 case "$*" in
   *"/_trusted_author.sh"*) cat "$HELPER_RESPONSE" ;;
+  *"/subtree_pull_gate.sh"*) cat "$SHAPE_RESPONSE" ;;
   *) cat "$CONTENTS_RESPONSE" ;;
 esac
 """,
@@ -121,6 +127,7 @@ esac
             env["AI_TEAM_TEST_STUB_PATH"] = bash_path(root)
             env["CONTENTS_RESPONSE"] = bash_path(response_file)
             env["HELPER_RESPONSE"] = bash_path(helper_file)
+            env["SHAPE_RESPONSE"] = bash_path(shape_file)
             env["GH_CALLS"] = bash_path(calls_file)
             env["GH_EXIT"] = str(gh_exit)
             env["GH_TOKEN"] = "fixture-token"
@@ -155,10 +162,28 @@ esac
                 self.assertNotIn("pull_request_review:", workflow)
                 self.assertIn("Review submissions do not trigger the privileged workflow", workflow)
                 self.assertNotIn("  pull_request:\n", workflow)
-                self.assertNotIn("actions/checkout@", workflow)
                 self.assertNotIn("present=false", workflow)
                 self.assertNotIn("default_branch", workflow)
                 self.assertNotIn("${{ github.actor }}", workflow)
+                # The ONLY permitted checkout in this privileged workflow is
+                # the trusted base at the event's base SHA (#61's shape
+                # check); a checkout of the PR head would execute-adjacent
+                # untrusted content into the workspace.
+                checkouts = [
+                    line for line in workflow.splitlines()
+                    if "actions/checkout@" in line
+                ]
+                self.assertLessEqual(len(checkouts), 1, checkouts)
+                if checkouts:
+                    self.assertIn(
+                        "ref: ${{ github.event.pull_request.base.sha }}",
+                        workflow,
+                    )
+                    self.assertNotIn(
+                        "ref: ${{ github.event.pull_request.head.sha }}",
+                        workflow,
+                    )
+                    self.assertNotIn("head.ref", workflow)
 
     def test_workflows_pin_the_contents_request_and_quote_event_values(self):
         for name, path in self.workflows():
@@ -185,6 +210,144 @@ esac
         self.assertIn("REVIEW_GATE_DIR: package/scripts", package)
         self.assertNotIn("REVIEW_GATE_DIR: docs/ai-team/scripts", package)
 
+    def run_pull_shape_step(self, *, opt_in_content=None, opt_in_on_pr_side_only=False,
+                            gate_exit=0):
+        """Execute the 'Recognize a trusted subtree pull' run block against a
+        fixture base checkout, with subtree_pull_gate.sh stubbed in
+        RUNNER_TEMP. Returns (result, outputs, gate_invocations)."""
+        workflow = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
+        script = run_block(workflow, "Recognize a trusted subtree pull")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "base-checkout"
+            repo.mkdir()
+
+            def git(*args):
+                subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+                    cwd=repo, check=True, capture_output=True, text=True,
+                )
+
+            git("init", "-q", "-b", "main")
+            (repo / "app.txt").write_text("base\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+
+            # The PR head lives on a branch published as a pull ref; the step
+            # fetches it as objects. Optionally the PR side carries the opt-in
+            # file — which must NOT enable the exemption.
+            git("checkout", "-q", "-b", "pr-side")
+            (repo / "change.txt").write_text("pr\n", encoding="utf-8")
+            if opt_in_on_pr_side_only:
+                (repo / ".ai-team").mkdir()
+                (repo / ".ai-team" / "subtree-pull").write_text(
+                    "Example/ai-team package-mount docs/ai-team\n", encoding="utf-8"
+                )
+            git("add", "-A")
+            git("commit", "-qm", "pr change")
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            git("update-ref", "refs/pull/9/head", head_sha)
+            git("checkout", "-q", "main")
+            git("remote", "add", "origin", str(repo))
+
+            # The trusted-base working tree optionally carries the opt-in.
+            if opt_in_content is not None:
+                (repo / ".ai-team").mkdir(exist_ok=True)
+                (repo / ".ai-team" / "subtree-pull").write_text(
+                    opt_in_content, encoding="utf-8"
+                )
+
+            runner_temp = root / "runner"
+            runner_temp.mkdir()
+            invocations = root / "gate-invocations.txt"
+            stub = runner_temp / "subtree_pull_gate.sh"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' \"$*\" >> '{bash_path(invocations)}'\n"
+                f"exit {gate_exit}\n",
+                encoding="utf-8", newline="\n",
+            )
+            stub.chmod(0o755)
+
+            outputs_file = root / "outputs.txt"
+            outputs_file.write_text("", encoding="utf-8")
+            env = os.environ.copy()
+            env["PULL_BASE_SHA"] = base_sha
+            env["PULL_HEAD_SHA"] = head_sha
+            env["PULL_NUMBER"] = "9"
+            env["RUNNER_TEMP"] = bash_path(runner_temp)
+            env["GITHUB_OUTPUT"] = bash_path(outputs_file)
+            result = subprocess.run(
+                [_bash_executable(), "-c", script],
+                cwd=repo,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            outputs = outputs_file.read_text(encoding="utf-8")
+            calls = (
+                invocations.read_text(encoding="utf-8").splitlines()
+                if invocations.is_file() else []
+            )
+        return result, outputs, calls
+
+    def test_exemption_requires_the_base_side_opt_in_file(self):
+        # No opt-in on the trusted base: the shape gate must not even run,
+        # and the step must end not-trusted (claude-opus-5's mutation B —
+        # deleting the opt-in gating from the template turns this red).
+        result, outputs, calls = self.run_pull_shape_step(opt_in_content=None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("exemption not enabled", result.stderr)
+        self.assertEqual(calls, [])
+        self.assertNotIn("trusted=true", outputs)
+
+    def test_a_pr_side_opt_in_file_cannot_enable_the_exemption(self):
+        # The opt-in must come from the TRUSTED BASE checkout. A PR that adds
+        # .ai-team/subtree-pull on its own side gets nothing.
+        result, outputs, calls = self.run_pull_shape_step(
+            opt_in_content=None, opt_in_on_pr_side_only=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls, [])
+        self.assertNotIn("trusted=true", outputs)
+
+    def test_base_side_opt_in_runs_the_gate_with_its_declared_source(self):
+        result, outputs, calls = self.run_pull_shape_step(
+            opt_in_content="Example/ai-team package-mount docs/ai-team\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("docs/ai-team Example/ai-team package-mount", calls[0])
+        self.assertIn("trusted=true", outputs)
+
+    def test_a_failing_gate_leaves_the_step_not_trusted(self):
+        result, outputs, calls = self.run_pull_shape_step(
+            opt_in_content="Example/ai-team package-mount docs/ai-team\n",
+            gate_exit=1,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertNotIn("trusted=true", outputs)
+
+    def test_a_malformed_opt_in_file_enables_nothing(self):
+        result, outputs, calls = self.run_pull_shape_step(
+            opt_in_content="only-two fields\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("malformed", result.stderr)
+        self.assertEqual(calls, [])
+        self.assertNotIn("trusted=true", outputs)
+
     def test_materializer_fetches_and_verifies_the_exact_blob(self):
         cases = [("adopter", ADOPTER_TEMPLATE, "docs/ai-team/scripts")]
         if PACKAGE_PATHSPEC == "package":
@@ -203,6 +366,7 @@ esac
                 self.assertIn("GET", calls)
                 self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/review_gate.sh", calls)
                 self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/_trusted_author.sh", calls)
+                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/subtree_pull_gate.sh", calls)
                 self.assertIn(f"ref={WORKFLOW_SHA}", calls)
 
     def test_materializer_fails_closed_on_api_or_payload_errors(self):
