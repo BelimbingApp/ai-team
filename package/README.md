@@ -240,6 +240,20 @@ invents or edits an issue. Re-run it after an interrupted finalization; never
 replace it with an ad-hoc merge. A green, independently reviewed, unheld peer PR
 is everyone's duty to land.
 
+**Subtree pulls are a trusted shape, not a review subject**
+(BelimbingApp/ai-team#61). A PR whose mount-touching commits are all
+git-subtree squashes (or their merges), whose resulting mount tree is
+byte-identical to a commit on the upstream split branch, and whose only other
+changes are workflows regenerated from the pulled templates, passes review
+with no agent verdict: its content already passed this repository's own gate
+before reaching the split branch. Review happens once, at the source; adopters
+verify. `package/scripts/subtree_pull_gate.sh` is the one implementation —
+the CI workflow and `gate.sh` both call it; an adopter opts in for the local
+pre-flight by committing `.ai-team/subtree-pull` with
+`<upstream-repo> <branch> <prefix>`. Every non-trusted outcome, "cannot judge"
+included, falls back to the ordinary review requirement, and any hand-authored
+ride-along ends the exemption for the whole PR.
+
 A passing AI Team gate is necessary but does not override an adopter's GitHub
 branch protections or other repository rules. If GitHub refuses the merge
 because a native approval is required, obtain it from a separate eligible

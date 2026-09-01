@@ -96,6 +96,11 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
                 contents_response(f"{gate_dir}/_trusted_author.sh", VALID_HELPER),
                 encoding="utf-8",
             )
+            shape_file = root / "shape-response.json"
+            shape_file.write_text(
+                contents_response(f"{gate_dir}/subtree_pull_gate.sh", VALID_HELPER),
+                encoding="utf-8",
+            )
             calls_file = root / "gh-calls.txt"
 
             gh = root / "gh"
@@ -109,6 +114,7 @@ if [ "$GH_EXIT" -ne 0 ]; then
 fi
 case "$*" in
   *"/_trusted_author.sh"*) cat "$HELPER_RESPONSE" ;;
+  *"/subtree_pull_gate.sh"*) cat "$SHAPE_RESPONSE" ;;
   *) cat "$CONTENTS_RESPONSE" ;;
 esac
 """,
@@ -121,6 +127,7 @@ esac
             env["AI_TEAM_TEST_STUB_PATH"] = bash_path(root)
             env["CONTENTS_RESPONSE"] = bash_path(response_file)
             env["HELPER_RESPONSE"] = bash_path(helper_file)
+            env["SHAPE_RESPONSE"] = bash_path(shape_file)
             env["GH_CALLS"] = bash_path(calls_file)
             env["GH_EXIT"] = str(gh_exit)
             env["GH_TOKEN"] = "fixture-token"
@@ -155,10 +162,28 @@ esac
                 self.assertNotIn("pull_request_review:", workflow)
                 self.assertIn("Review submissions do not trigger the privileged workflow", workflow)
                 self.assertNotIn("  pull_request:\n", workflow)
-                self.assertNotIn("actions/checkout@", workflow)
                 self.assertNotIn("present=false", workflow)
                 self.assertNotIn("default_branch", workflow)
                 self.assertNotIn("${{ github.actor }}", workflow)
+                # The ONLY permitted checkout in this privileged workflow is
+                # the trusted base at the event's base SHA (#61's shape
+                # check); a checkout of the PR head would execute-adjacent
+                # untrusted content into the workspace.
+                checkouts = [
+                    line for line in workflow.splitlines()
+                    if "actions/checkout@" in line
+                ]
+                self.assertLessEqual(len(checkouts), 1, checkouts)
+                if checkouts:
+                    self.assertIn(
+                        "ref: ${{ github.event.pull_request.base.sha }}",
+                        workflow,
+                    )
+                    self.assertNotIn(
+                        "ref: ${{ github.event.pull_request.head.sha }}",
+                        workflow,
+                    )
+                    self.assertNotIn("head.ref", workflow)
 
     def test_workflows_pin_the_contents_request_and_quote_event_values(self):
         for name, path in self.workflows():
@@ -203,6 +228,7 @@ esac
                 self.assertIn("GET", calls)
                 self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/review_gate.sh", calls)
                 self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/_trusted_author.sh", calls)
+                self.assertIn(f"repos/{REPOSITORY}/contents/{gate_dir}/subtree_pull_gate.sh", calls)
                 self.assertIn(f"ref={WORKFLOW_SHA}", calls)
 
     def test_materializer_fails_closed_on_api_or_payload_errors(self):

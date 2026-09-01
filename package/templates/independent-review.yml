@@ -40,7 +40,7 @@ jobs:
           # fetched from the exact commit that supplied this workflow, blob-
           # verified, and placed side by side so review_gate.sh can source the
           # helper relative to itself exactly as it does inside the mount.
-          for name in review_gate.sh _trusted_author.sh; do
+          for name in review_gate.sh _trusted_author.sh subtree_pull_gate.sh; do
             path="$REVIEW_GATE_DIR/$name"
             response="$RUNNER_TEMP/$name.json"
             script="$RUNNER_TEMP/$name"
@@ -76,7 +76,52 @@ jobs:
             chmod 700 "$script"
           done
 
+      # Trusted checkout for the subtree-pull shape check (#61): the BASE
+      # repository at the base SHA — never the pull request's code. PR-side
+      # commits are then fetched as git OBJECTS only and read with plumbing;
+      # nothing from the pull request executes in this privileged workflow.
+      - name: Check out trusted base for shape verification
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      # A pure, verifiable subtree pull needs no adopter-side agent review —
+      # its content already passed the package repository's own gate before
+      # reaching the split branch (#61). Exit 0 marks the exemption; exit 1
+      # falls through to the ordinary review requirement; exit 2 (cannot
+      # judge) also falls through — the exemption fails closed, never open.
+      - name: Recognize a trusted subtree pull
+        id: pull_shape
+        env:
+          PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          # Adopter-declared pull source; the defaults are correct for a
+          # standard docs/ai-team mount of this package.
+          AI_TEAM_MOUNT_PREFIX: docs/ai-team
+          AI_TEAM_UPSTREAM_REPO: BelimbingApp/ai-team
+          AI_TEAM_UPSTREAM_BRANCH: package-mount
+        run: |
+          set -euo pipefail
+          [[ "$PULL_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch -q --no-tags origin "+refs/pull/$PULL_NUMBER/head:refs/shape-check/head"
+          [[ "$(git rev-parse refs/shape-check/head)" == "$PULL_HEAD_SHA" ]] || {
+            echo "fetched PR head does not match the event head; not judging" >&2
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if "$RUNNER_TEMP/subtree_pull_gate.sh" "$PULL_BASE_SHA" "$PULL_HEAD_SHA" \
+              "$AI_TEAM_MOUNT_PREFIX" "$AI_TEAM_UPSTREAM_REPO" "$AI_TEAM_UPSTREAM_BRANCH"; then
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Verify independent review of this exact head
+        if: steps.pull_shape.outputs.trusted != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REVIEW_GATE_REPOSITORY: ${{ github.repository }}
@@ -90,3 +135,8 @@ jobs:
           AI_TEAM_HUMAN_PRINCIPALS: ""
         run: |
           "$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"
+
+      - name: Record the trusted-pull exemption
+        if: steps.pull_shape.outputs.trusted == 'true'
+        run: |
+          echo "Trusted subtree pull — content was reviewed upstream behind the package gate; no adopter-side review required (#61)." >> "$GITHUB_STEP_SUMMARY"
