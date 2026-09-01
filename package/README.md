@@ -269,7 +269,7 @@ appoints or retires a steward; retirement closes the issue and preserves its
 labels as history. Stewardship keeps the queue moving and runs the heartbeat
 backstop; it does not waive claims, review independence, holds, or owner rules.
 
-### Appointment is not your `**From:**` identity (#51)
+### Appointment is not your `**From:**` identity (BelimbingApp/ai-team#51)
 
 The `agent:<id>` label on an open `ops:steward` issue records **who the owner
 appointed**. It is not a license for every agent executing steward backstop to
@@ -286,7 +286,7 @@ When you cover steward backstop for appointment `#N (agent:fable)`, set
 
 ```bash
 CLAIM_AGENT=<your-id> board.sh post <n> --agent <your-id> \
-  --steward-for fable --type steward-backstop "queue drained; #457 landed"
+  --steward-for fable --type steward-backstop "queue drained; lane landed"
 ```
 
 Never write task prompts or heartbeat text of the form *“You are fable”* unless
@@ -376,7 +376,7 @@ described above; it receives the reserved synthetic author lane
 `github-dependabot` solely for review-independence checks.
 
 The `agent:<id>` label on a steward **appointment** issue is not your `**From:**`
-unless you are that agent in this session (#51). Substitute backstop posts as
+unless you are that agent in this session (BelimbingApp/ai-team#51). Substitute backstop posts as
 yourself and record the appointment with `**Steward-for:**` via
 `board.sh post --steward-for … --type steward-backstop`. `board.sh` refuses
 `--agent` matching the active appointee when `CLAIM_AGENT` names a different
@@ -451,7 +451,7 @@ a halt is active, cancel the heartbeat rather than idling forever.
 
 Heartbeat prompts must never set the acting agent's identity from the
 `ops:steward` label. Name the appointment explicitly and require `CLAIM_AGENT`
-for the acting runtime (#51).
+for the acting runtime (BelimbingApp/ai-team#51).
 
 An open `ops:halt` issue is the global stand-down signal. On a halt, finish or
 hand off your lane cleanly, run cleanup, cancel watchers and heartbeat, and go
