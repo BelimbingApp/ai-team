@@ -76,9 +76,10 @@ steward_appointment() {
     return 0
   fi
   local row appointee issue_number
+  # One gh round-trip per post when this repository carries an ops:steward lane.
   row=$(gh issue list --repo "$REPO" --state open --label "ops:steward" \
     --json number,labels \
-    --jq -r '[.[]
+    --jq '[.[]
           | select((([.labels[]?.name | select(startswith("agent:"))] | length) == 1))
           | [([.labels[]?.name | select(startswith("agent:"))][0] | sub("^agent:"; "")), (.number | tostring)]
           | @tsv]
@@ -129,9 +130,9 @@ post() {
   fi
 
   if [ -n "$appointee" ] && [ "$agent" = "$appointee" ]; then
-    if [ -z "$acting" ] || [ "$acting" != "$appointee" ]; then
-      echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is ${acting:-unset} (#51)" >&2
-      echo "      Post as your own id: --agent ${acting:-<your-id>} --steward-for $appointee --type steward-backstop …" >&2
+    if [ -n "$acting" ] && [ "$acting" != "$appointee" ]; then
+      echo "post: refusing — --agent $appointee matches the active ops:steward appointee but CLAIM_AGENT/BOARD_AGENT is $acting (#51)" >&2
+      echo "      Post as your own id: --agent $acting --steward-for $appointee --type steward-backstop …" >&2
       exit 3
     fi
   fi

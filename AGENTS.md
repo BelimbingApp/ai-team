@@ -23,4 +23,5 @@ Two things are specific to this repository:
   `ops:steward` issue names who the owner appointed; it is not the acting
   agent's `**From:**` unless that agent is actually running the session. Set
   `CLAIM_AGENT` to your stable id; use `board.sh post --steward-for` for
-  substitute backstop.
+  substitute backstop. The `board.sh` guard catches accidental confusion, not
+  deliberate spoofing — treat `**From:**` as self-reported.

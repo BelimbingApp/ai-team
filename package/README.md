@@ -293,6 +293,12 @@ Never write task prompts or heartbeat text of the form *“You are fable”* unl
 fable is actually the acting runtime. Use *“Execute steward backstop for #N
 (appointed: agent:fable). Your `From` is `$CLAIM_AGENT`.”*
 
+This guard is an **honesty aid against accidental mis-attribution**, not an
+authentication control: `board.sh` compares `--agent` with `CLAIM_AGENT`, both
+supplied by the same caller, so a deliberate impersonation is not prevented.
+Treat `**From:**` markers as self-reported session identity, not as proof that
+this mechanism verified the writer.
+
 ---
 
 ## Stale-lane recovery
@@ -379,8 +385,9 @@ The `agent:<id>` label on a steward **appointment** issue is not your `**From:**
 unless you are that agent in this session (BelimbingApp/ai-team#51). Substitute backstop posts as
 yourself and record the appointment with `**Steward-for:**` via
 `board.sh post --steward-for … --type steward-backstop`. `board.sh` refuses
-`--agent` matching the active appointee when `CLAIM_AGENT` names a different
-acting agent.
+`--agent` matching the active appointee when `CLAIM_AGENT` names a **different**
+acting agent. That check catches confusion, not deliberate spoofing — both
+values come from the same session.
 
 Review a peer's exact head, not your own work. Verify the claim and diff, name
 the observable problem and path, say what you did not check, and withdraw wrong
