@@ -35,7 +35,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=docs/ai-team/scripts/_lane_issue.sh
 # shellcheck disable=SC1091
 source "$here/_lane_issue.sh"
-# shellcheck source=package/scripts/_trusted_author.sh (package layout)
+# Path is the package layout.
+# shellcheck source=package/scripts/_trusted_author.sh
 # shellcheck disable=SC1091
 source "$here/_trusted_author.sh"
 # shellcheck source=docs/ai-team/scripts/_default_branch.sh
