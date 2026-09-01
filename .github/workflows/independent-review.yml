@@ -2,6 +2,10 @@ name: independent review
 
 # The package repository installs its own template (dogfood): identical to
 # templates/independent-review.yml with the package-layout grammar path.
+# Review submissions do not trigger the privileged workflow: a
+# pull_request_review run executes pull-request-controlled workflow code, which
+# could publish the same required-check name. Use the trusted rerun helper after
+# a review changes instead.
 # That grammar fetches immutable REST author/head identity; never classify a PR
 # from github.actor, which is the reviewer on review-triggered runs.
 on:

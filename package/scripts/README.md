@@ -26,13 +26,16 @@ fails if the canonical grammar path is absent or malformed. The implementation
 and its tests live here, with the board contract they enforce.
 
 Because review events are not trusted triggers, submit or update the review and
-then rerun the latest failed `Independent review` run for the current head; a
-label transition also starts a new target run. For a fresh install, land the
-mount and workflow together before requiring the check. For an existing
-adopter, retain a fail-closed precursor against whichever trusted grammar path
-it already has (or stage a standalone grammar at a custom trusted path) until
-the transition pull request has both installed the mounted grammar at
-`docs/ai-team/scripts/review_gate.sh` and copied
+then run `rerun-review-check.sh <pr-number>` to rerun the latest existing
+`Independent review` run for the current head. The helper verifies the PR head,
+workflow name, `pull_request_target` event, and matching PR before replaying the
+run; it fails if no trusted run exists, so it cannot manufacture a privileged
+check from an untrusted event. A label transition also starts a new target run.
+For a fresh install, land the mount and workflow together before requiring the
+check. For an existing adopter, retain a fail-closed precursor against
+whichever trusted grammar path it already has (or stage a standalone grammar
+at a custom trusted path) until the transition pull request has both installed
+the mounted grammar at `docs/ai-team/scripts/review_gate.sh` and copied
 `docs/ai-team/templates/independent-review.yml` into the adopter's root
 workflow directory. A 404 is never a successful installation signal.
 

@@ -463,11 +463,25 @@ that ordinary marked reviews can clear.
 Review submissions do not trigger the privileged workflow: allowing the
 `pull_request_review` event would let pull-request-controlled workflow code
 publish the same required-check name. When a review is submitted, edited, or
-dismissed, rerun the latest `pull_request_target` run for the current head (a
-subsequent label transition also creates a fresh run). Its trusted workflow and
-grammar stay pinned while `review_gate.sh` reads the current reviews. After a
-new commit, use the new `synchronize` run, not a run for the old head.
-`land.sh` performs the same live review check immediately before merging.
+dismissed, run the trusted helper for the current head:
+
+```bash
+# Package repository
+package/scripts/rerun-review-check.sh <pr-number>
+
+# Adopting repository
+docs/ai-team/scripts/rerun-review-check.sh <pr-number>
+```
+
+The helper only replays an existing `pull_request_target` run whose workflow is
+named `independent review`, whose head is the current PR head, and whose event
+metadata points at that PR. It re-reads the head immediately before requesting
+the rerun and fails if no matching trusted run exists; a subsequent label
+transition is the safe way to create a fresh target run when none is available.
+Its trusted workflow and grammar stay pinned while `review_gate.sh` reads the
+current reviews. After a new commit, use the new `synchronize` run, not a run
+for the old head. `land.sh` performs the same live review check immediately
+before merging.
 
 When a reviewed PR intentionally removes a workflow whose historical check
 names are still in the five-merge baseline, an operator may make that

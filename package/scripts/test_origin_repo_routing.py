@@ -17,6 +17,7 @@ SCRIPTS = {
     "orient.sh": ([], {}),
     "ready.sh": (["17"], {"CLAIM_AGENT": "routing-test"}),
     "review_gate.sh": (["17"], {}),
+    "rerun-review-check.sh": (["17"], {}),
 }
 
 
@@ -115,7 +116,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                     printf '  HALT #17 — ORIGIN ROUTING PROBE\\n'
                     ;;
                   "pr list") printf '' ;;
-                  "api")
+                  "api"*)
                     # A REST pull read embeds the repository in the path, not
                     # in --repo; the probe must still catch ambient scoping.
                     for argument in "$@"; do
@@ -125,7 +126,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                           ;;
                       esac
                     done
-                    printf '[]\\n'
+                    exit 19
                     ;;
                   *) printf '' ;;
                 esac
@@ -211,6 +212,9 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
 
     def test_review_gate_scopes_github_to_origin(self):
         self.assert_script_scopes_github_to_origin("review_gate.sh")
+
+    def test_rerun_review_check_scopes_github_to_origin(self):
+        self.assert_script_scopes_github_to_origin("rerun-review-check.sh")
 
 
 if __name__ == "__main__":

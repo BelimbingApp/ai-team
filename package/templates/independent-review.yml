@@ -3,6 +3,10 @@ name: independent review
 # Copy this file into an adopting repository at .github/workflows/. The
 # privileged workflow fetches only the mounted grammar from the exact trusted
 # commit that supplied this workflow; it never checks out pull-request code.
+# Review submissions do not trigger the privileged workflow: a
+# pull_request_review run executes pull-request-controlled workflow code, which
+# could publish the same required-check name. Use the trusted rerun helper after
+# a review changes instead.
 # That grammar fetches immutable REST author/head identity; never classify a PR
 # from github.actor, which is the reviewer on review-triggered runs.
 on:
