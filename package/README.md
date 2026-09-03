@@ -234,13 +234,11 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
-`gate.sh` reconciles the declared lane against `closingIssuesReferences` — the
-field GitHub actually acts on at merge. That field is populated by body keywords
-*and* by the Development panel, and a panel link leaves no trace in the body, so
-a pull request can be truthfully documented as closing nothing and still close an
-issue (BelimbingApp/ai-team#67). A lane declaring no issue while GitHub would
-close one, or declaring one issue while GitHub would close another, is refused:
-either declare the lane or unlink it in the Development panel.
+`gate.sh` reconciles the declared lane against `closingIssuesReferences`, the
+field GitHub acts on at merge. The Development panel populates it without
+touching the body, so a pull request can read as closing nothing and still close
+an issue (BelimbingApp/ai-team#67). A lane that declares none while GitHub would
+close one, or names a different one, is refused: declare the lane or unlink it.
 `land.sh` resolves the merge method from the repository's own settings rather
 than assuming one — `merge` when allowed so the reviewed commit survives
 verbatim, otherwise `squash`, otherwise `rebase` — and refuses before the merge
