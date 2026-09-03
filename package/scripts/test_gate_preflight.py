@@ -31,7 +31,8 @@ GH_STUB = textwrap.dedent(
           --arg title "$title" \
           --arg body "$body" \
           --argjson labels "$GATE_TEST_LABELS" \
-          '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels}'
+          --argjson closing "${GATE_TEST_CLOSING:-[]}" \
+          '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels,closingIssuesReferences:$closing}'
         ;;
       "pr list")
         printf '%s\\n' "$GATE_TEST_MERGED_HEADS"
@@ -179,6 +180,7 @@ class GateMechanismTest(unittest.TestCase):
         title: str | None = None,
         identity: dict[str, object] | None = None,
         review_gate_body: str | None = None,
+        closing_refs: list[int] | None = None,
         bind_review_heads: bool = True,
         branch_rules: list[dict[str, object]] | None = None,
         allow_missing_checks: str | None = None,
@@ -209,6 +211,9 @@ class GateMechanismTest(unittest.TestCase):
         effective_head = head or self.head_sha
         env["GATE_TEST_HEAD"] = effective_head
         env["GATE_TEST_RESOLVE"] = resolve
+        env["GATE_TEST_CLOSING"] = json.dumps(
+            [] if closing_refs is None else [{"number": n} for n in closing_refs]
+        )
         if body is not None:
             env["GATE_TEST_BODY"] = body
         if branch is not None:
@@ -317,6 +322,42 @@ class GateMechanismTest(unittest.TestCase):
 
         shutil.rmtree(checkout, onerror=remove_readonly)
         return result
+
+
+    def test_an_issue_less_lane_that_will_close_an_issue_is_refused(self):
+        # #67: blb-people#39 said "This PR does not close #27", gate.sh agreed,
+        # and GitHub closed #27 anyway through a Development-panel link that
+        # left no trace in the body.
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix",
+            body="AI-Team-Lane-Issue: none",
+            closing_refs=[27],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub will close #27", result.stdout)
+
+    def test_an_issue_less_lane_closing_nothing_still_passes(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix",
+            body="AI-Team-Lane-Issue: none",
+        )
+        self.assertIn("issue-less lane", result.stdout)
+
+    def test_a_lane_closing_a_different_issue_is_refused(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha, closing_refs=[27]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lane is #42 but GitHub will close #27", result.stdout)
+
+    def test_a_lane_closing_exactly_its_own_issue_passes(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha, closing_refs=[42]
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE: PASS", result.stdout)
 
     def test_rewritten_transport_refused_despite_canonical_label(self):
         # The insteadOf threat: the configured URL can look canonical while an

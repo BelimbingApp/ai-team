@@ -234,6 +234,14 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
+`gate.sh` reconciles the declared lane against `closingIssuesReferences` — the
+field GitHub actually acts on at merge. That field is populated by body keywords
+*and* by the Development panel, and a panel link leaves no trace in the body, so
+a pull request can be truthfully documented as closing nothing and still close an
+issue (BelimbingApp/ai-team#67). A lane declaring no issue while GitHub would
+close one, or declaring one issue while GitHub would close another, is refused:
+either declare the lane or unlink it in the Development panel.
+
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
 invents or edits an issue. Re-run it after an interrupted finalization; never
