@@ -234,6 +234,12 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
+`land.sh` resolves the merge method from the repository's own settings rather
+than assuming one — `merge` when allowed so the reviewed commit survives
+verbatim, otherwise `squash`, otherwise `rebase` — and refuses before the merge
+when a repository allows none. `LAND_MERGE_METHOD=merge|squash|rebase` overrides
+that. A repository forbidding merge commits used to answer a full `GATE: PASS`
+with a 405, which reads as the gate lying (BelimbingApp/ai-team#66).
 When a pull request declares no lane through its title, branch, or an exact
 `AI-Team-Lane-Issue: none` line, `ready.sh`, `gate.sh` and `land.sh` all refuse
 and name `READY_ISSUE=<n>` as the remedy. All three honour it. `orient.sh`

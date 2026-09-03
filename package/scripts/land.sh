@@ -4,6 +4,14 @@
 #
 #   LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr> <reviewed-sha>
 #
+# The merge method is not the package's to choose. A repository that forbids
+# merge commits answers a hardcoded `merge_method=merge` with a 405 *after* a
+# full GATE: PASS, which reads as the gate lying (#66). The method is resolved
+# from the repository's own `allow_*_merge` settings, preferring `merge` so
+# history keeps the reviewed commit intact, then `squash`, then `rebase`.
+# `LAND_MERGE_METHOD=merge|squash|rebase` overrides that, and — unlike the
+# remedy #68 describes — it is honoured on the path that prints it.
+#
 # The gate is always the merge precondition. Once the PR is merged, the script
 # moves both the PR and its lane issue to task:done and records the acting agent.
 # A trusted automated issue-less lane terminalizes only its PR. A rerun against
@@ -77,12 +85,48 @@ if [[ "$state" == "OPEN" ]]; then
     exit 1
   fi
 
+  # Resolve the merge method from the repository rather than assuming one.
+  # An explicit override wins; otherwise prefer `merge` (the reviewed commit
+  # survives verbatim), then `squash`, then `rebase`. A repository that allows
+  # none of the three cannot be landed into by any method, and saying so beats
+  # a 405 the operator has to decode.
+  merge_method="${LAND_MERGE_METHOD:-}"
+  if [[ -n "$merge_method" ]]; then
+    case "$merge_method" in
+      merge|squash|rebase) ;;
+      *)
+        echo "LAND_MERGE_METHOD must be merge, squash, or rebase (got '$merge_method')" >&2
+        exit 2
+        ;;
+    esac
+  else
+    if ! merge_settings=$(gh api "repos/$repo" \
+      --jq '[(.allow_merge_commit // false), (.allow_squash_merge // false), (.allow_rebase_merge // false)] | @tsv' 2>&1); then
+      echo "cannot read merge settings for $repo; set LAND_MERGE_METHOD=merge|squash|rebase" >&2
+      printf '%s\n' "$merge_settings" >&2
+      exit 2
+    fi
+    IFS=$'\t' read -r allow_merge allow_squash allow_rebase <<<"$merge_settings"
+    if [[ "$allow_merge" == "true" ]]; then
+      merge_method=merge
+    elif [[ "$allow_squash" == "true" ]]; then
+      merge_method=squash
+    elif [[ "$allow_rebase" == "true" ]]; then
+      merge_method=rebase
+    else
+      echo "refusing #$pr: $repo allows no merge method (merge, squash and rebase are all disabled)" >&2
+      exit 1
+    fi
+  fi
+  [[ "$merge_method" == "merge" ]] \
+    || echo "landing #$pr with merge_method=$merge_method ($repo does not allow a merge commit)" >&2
+
   # A passed gate establishes the AI Team's own exact-head review evidence; it
   # cannot waive GitHub branch protections. Keep GitHub's response visible on
   # an endpoint failure, then name that boundary so a shared account is not
   # mistaken for a native approving reviewer (#35).
   if ! merge_json=$(gh api -X PUT "repos/$repo/pulls/$pr/merge" \
-    -f merge_method=merge -f sha="$reviewed" 2>&1); then
+    -f merge_method="$merge_method" -f sha="$reviewed" 2>&1); then
     echo "merge request failed for PR #$pr" >&2
     if [[ -n "$merge_json" ]]; then
       printf '%s\n' "$merge_json" >&2
