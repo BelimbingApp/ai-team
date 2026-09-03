@@ -70,7 +70,7 @@ origin_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https://github\.com/|git@g
 
 # One fetch of PR state; every check below reads from it.
 pr=$(gh pr view "$PR" --repo "$REPO" \
-       --json headRefOid,headRefName,title,body,isDraft,state,mergeable,labels 2>/dev/null)
+       --json headRefOid,headRefName,title,body,isDraft,state,mergeable,labels,closingIssuesReferences 2>/dev/null)
 [[ -n "$pr" ]] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
 pr_identity=$(gh api "repos/$REPO/pulls/$PR" 2>/dev/null) || {
   echo "cannot read immutable PR identity for #$PR from $REPO" >&2
@@ -326,14 +326,24 @@ pr_body=$(printf '%s' "$pr" | jq -r '.body // ""')
 if [ -n "$automated_author" ]; then
   lane_issue="none"
 else
-  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "")
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "${READY_ISSUE:-}")
 fi
+# What GitHub will actually close on merge, which is not the same question as
+# what the body says (#67). `closingIssuesReferences` is populated by body
+# keywords AND by the Development panel, and a panel link leaves no trace in
+# the body at all — so a PR can be truthfully documented as closing nothing and
+# still close an issue. Reconcile the declared lane against the field GitHub
+# acts on, or the board learns about a closure after it has happened.
+closing_refs=$(printf '%s' "$pr" | jq -r '[.closingIssuesReferences[]?.number] | unique | map(tostring) | join(" ")')
+
 case "$lane_issue" in
   error:*)
     say_bad "${lane_issue#error:}"
     ;;
   none)
-    if [ -n "$automated_author" ]; then
+    if [ -n "$closing_refs" ]; then
+      say_bad "lane declares no issue but GitHub will close #${closing_refs// /, #} on merge — declare the lane or unlink it in the Development panel"
+    elif [ -n "$automated_author" ]; then
       say_ok "issue-less trusted automated lane"
     else
       say_ok "issue-less lane (AI-Team-Lane-Issue: none)"
@@ -344,6 +354,9 @@ case "$lane_issue" in
       say_ok "body closes #$lane_issue"
     else
       say_bad "body has no closing reference to #$lane_issue — run ready.sh or add Closes #$lane_issue"
+    fi
+    if [ -n "$closing_refs" ] && [ " $closing_refs " != " $lane_issue " ]; then
+      say_bad "lane is #$lane_issue but GitHub will close #${closing_refs// /, #} on merge"
     fi
     ;;
 esac
@@ -466,7 +479,8 @@ stray_blocking_agents=$(printf '%s' "$issue_comments" | jq -r --arg author "$aut
        | ascii_downcase)] | unique) as $agents
     | if ($agents | length) == 1 then $agents[0] else "" end;
   def has_blocking_marker:
-    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*changes required(?:[[:space:]]|$)"; "i");
+    # Request changes is the GitHub word for changes required (#70).
+    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:changes required|request changes)(?:[[:space:]]|$)"; "i");
   [.[] | . + {agent: from_agent} | select(.agent != "" and .agent != $author and has_blocking_marker) | .agent]
   | unique | join("\n")
 ' 2>/dev/null)
@@ -494,7 +508,8 @@ if [[ -z "$accepted_agents" ]]; then
     # exactly this, "**From:** opus-5 — **Verdict:** accept at `sha`." on one
     # line, which a line-anchored **Verdict:** would never match.
     def has_accept_marker:
-      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*accept(?: with follow-up)?(?:[[:space:]]|$)"; "i");
+      # Approve is the GitHub word for accept (#70).
+      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve)(?:[[:space:]]|$)"; "i");
     [.[] | . + {agent: from_agent} | select(.agent != "" and .agent != $author and has_accept_marker) | .agent]
     | unique | join("\n")
   ' 2>/dev/null)

@@ -235,12 +235,23 @@ LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-
 ```
 
 After a merge, `land.sh` names any open pull request stacked on the branch it
-just landed. GitHub closes a pull request whose base branch disappears —
-silently, without merging it, leaving its exact-head reviews on a dead lane
-(BelimbingApp/ai-team#69) — and the person running `--delete-branch` usually
-cannot know a stack exists. Retarget each named pull request before deleting the
-branch. This is a warning, not a refusal: the deletion is not the script's to
-make, and the landing itself is correct.
+landed. GitHub silently closes a pull request whose base branch disappears,
+stranding its reviews (BelimbingApp/ai-team#69). Retarget each named one before
+deleting. A warning, not a refusal: the deletion is not the script's to make.
+`gate.sh` reconciles the declared lane against `closingIssuesReferences`, the
+field GitHub acts on at merge. The Development panel populates it without
+touching the body, so a pull request can read as closing nothing and still close
+an issue (BelimbingApp/ai-team#67). A lane that declares none while GitHub would
+close one, or names a different one, is refused: declare the lane or unlink it.
+`land.sh` resolves the merge method from the repository's own settings —
+`merge` when allowed so the reviewed commit survives verbatim, else `squash`,
+else `rebase` — and refuses before merging when none is. Override with
+`LAND_MERGE_METHOD=merge|squash|rebase` (BelimbingApp/ai-team#66).
+When a pull request declares no lane through its title, branch, or an exact
+`AI-Team-Lane-Issue: none` line, `ready.sh`, `gate.sh` and `land.sh` refuse and
+name `READY_ISSUE=<n>` — and all three honour it. `orient.sh` does not: it
+derives every open lane in one pass, where one override would hit lanes it was
+never meant for.
 
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
@@ -419,7 +430,8 @@ findings. Refresh an unreviewed, behind-main PR first. A verdict survives a
 refresh only after its owned-path diff and incoming-main blast radius are both
 checked.
 
-Post a verdict as a PR review, not an issue comment:
+Post a verdict as a PR review, not an issue comment (`gh pr comment` is
+invisible to the gate):
 
 ```bash
 reviewed_head=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
@@ -429,10 +441,25 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 `**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
 you inspected. It is mandatory even for a native approval. `**Verdict:**` is
 also alone on its line and is `accept`, `accept with follow-up`, or `changes
-required`. A shared account may record it as `COMMENTED`; the exact `From`
+required` — GitHub's own words `approve` and `request changes` count as the
+same verdicts, case-insensitively. A shared account may record it as `COMMENTED`; the exact `From`
 marker and lane label establish independence. Run `gate.sh` after posting to
 verify it registered. Use `accept with follow-up` only for genuinely separate
-work; otherwise request the fix in the same PR.
+work; otherwise request the fix in the same PR. Write `**From:**` with the bare
+lane name, never an `agent:`-prefixed value (the prefix voids the review), and
+when posting through the API pass the body from a file — a raw string field
+posts the filename itself instead of the file.
+
+Three constraints bind every verdict:
+
+- **Each marker must be unique in the body**: a second `**From:**` or `**HEAD
+  reviewed:**` line anywhere — including one quoted from an earlier verdict or
+  discussion — voids the review.
+- **The review's API `commit_id` must equal the reviewed SHA**: GitHub attaches
+  this when posting via `gh pr review`; an issue comment lacks commit binding
+  entirely.
+- **The PR must carry exactly one `agent:` label**, and the reviewer's lane
+  must differ from it.
 
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
 `gate.sh` uses it. It counts only the newest review whose API `commit_id` and
