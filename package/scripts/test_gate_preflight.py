@@ -918,6 +918,41 @@ class GateMechanismTest(unittest.TestCase):
         self.assertIn("blocking verdict marker from someone-else", result.stdout)
         self.assertIn("gh pr review --comment", result.stdout)
 
+    def test_stray_synonym_verdict_warns_in_the_comment_stream(self):
+        # #70: a reviewer reaching for GitHub's word on the wrong surface
+        # must still get the loud repost WARN, not silence.
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[],
+            issue_comments=[{
+                "id": 1,
+                "body": "**From:** reviewer\n\n**Verdict:** Approve",
+            }],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("found a verdict marker from reviewer in the comment stream", result.stdout)
+
+    def test_stray_synonym_blocking_verdict_warns_beside_a_real_acceptance(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[{
+                "id": 1,
+                "state": "APPROVED",
+                "body": "**From:** reviewer",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+            issue_comments=[{
+                "id": 1,
+                "body": "**From:** someone-else\n\n**Verdict:** Request changes",
+            }],
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("blocking verdict marker from someone-else", result.stdout)
+
     def test_unfetchable_reviewed_sha_is_not_misreported_as_behind(self):
         missing_sha = "f" * 40
         result = self.run_gate(
