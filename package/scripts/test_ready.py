@@ -245,6 +245,20 @@ class ReadyHandoffTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ready for review", result.stdout)
 
+    def test_ready_warns_and_proceeds_when_threads_cannot_be_read(self):
+        self.threads_path.unlink()
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot read review threads", result.stderr)
+        self.assertIn("ready for review", result.stdout)
+
+    def test_ready_warns_and_proceeds_when_threads_cannot_be_parsed(self):
+        self.threads_path.write_text('{"data":{"repository":{}}}', encoding="utf-8")
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot parse review threads", result.stderr)
+        self.assertIn("ready for review", result.stdout)
+
 
 class LaneIssueHelperTest(unittest.TestCase):
     """Source-level probes for _lane_issue.sh via the shared Windows Bash resolver."""
