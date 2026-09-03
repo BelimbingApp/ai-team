@@ -234,6 +234,12 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
+When a pull request declares no lane through its title, branch, or an exact
+`AI-Team-Lane-Issue: none` line, `ready.sh`, `gate.sh` and `land.sh` all refuse
+and name `READY_ISSUE=<n>` as the remedy. All three honour it. `orient.sh`
+deliberately does not: it derives lanes for every open pull request in one pass,
+where a single override would be applied to lanes it was never meant for.
+
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
 invents or edits an issue. Re-run it after an interrupted finalization; never
