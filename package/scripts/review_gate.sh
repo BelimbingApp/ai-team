@@ -119,6 +119,11 @@ if [[ -z "$input" ]]; then
     exit 2
   }
   cleanup_paths+=("$reviews_file")
+  comments_file=$(mktemp) || {
+    echo "ERROR: cannot allocate temporary comments input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$comments_file")
 
   if ! gh api "repos/$repo/pulls/$pr" >"$identity_file" 2>/dev/null; then
     echo "ERROR: cannot read immutable PR identity for #$pr from $repo" >&2
@@ -143,16 +148,26 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
+  # Comments are read for diagnostic reporting only, never to satisfy the gate (#71).
+  # A failure to read comments defaults to empty so a comment-read issue does
+  # not fail the primary review gate.
+  if ! gh api "repos/$repo/issues/$pr/comments" --paginate 2>/dev/null \
+    | jq -s 'add // []' >"$comments_file" 2>/dev/null; then
+    printf '[]\n' >"$comments_file"
+  fi
+
   jq -n --arg reviewed "$reviewed" \
     --arg head_sha "$head_sha" \
     --slurpfile identity "$identity_file" \
     --slurpfile reviews "$reviews_file" \
+    --slurpfile comments "$comments_file" \
     '($identity[0] // {}) as $pr
      | {reviewed: $reviewed,
         head_sha: $head_sha,
         labels: ($pr.labels // []),
         identity: $pr,
-        reviews: ($reviews[0] // [])}' >"$input"
+        reviews: ($reviews[0] // []),
+        comments: ($comments[0] // [])}' >"$input"
 fi
 
 identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
@@ -160,42 +175,38 @@ automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
 
 result=$(jq -r --arg automated_author "$automated_author" '
   def label_names:
-    if (.labels | type) != "array" then []
-    elif (.labels | length) == 0 then []
+    if (.labels | type) != "array" or (.labels | length) == 0 then []
     elif (.labels[0] | type) == "string" then .labels
     else [.labels[].name // empty]
     end;
   def from_agent:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
-       | ascii_downcase)] | unique) as $agents
-    | if ($agents | length) == 1 then $agents[0] else "" end;
+       | ascii_downcase)] | unique) as $a
+    | if ($a | length) == 1 then $a[0] else "" end;
   def reviewed_head:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
-       | ascii_downcase)] | unique) as $heads
-    | if ($heads | length) == 1 then $heads[0] else "" end;
+       | ascii_downcase)] | unique) as $h
+    | if ($h | length) == 1 then $h[0] else "" end;
   def explicit_verdicts:
-    # GitHub verdict words count as synonyms (#70): Approve means accept,
-    # Request changes means changes required. Normalised to the canonical
-    # words here so every length check below sees one vocabulary.
     [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").verdict
+       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").v
        | ascii_downcase
-       | if . == "approve" then "accept"
-         elif . == "request changes" then "changes required"
-         else . end)] | unique;
+       | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
   def review_verdict:
-    explicit_verdicts as $explicit
+    explicit_verdicts as $e
     | if .state == "DISMISSED" then ""
       elif .state == "CHANGES_REQUESTED" then "changes required"
-      elif ($explicit | length) > 1 then ""
-      elif ($explicit | length) == 1 and $explicit[0] == "changes required" then "changes required"
+      elif ($e | length) > 1 then ""
+      elif ($e | length) == 1 and $e[0] == "changes required" then "changes required"
       elif .state == "APPROVED"
-           or (($explicit | length) == 1 and ($explicit[0] == "accept" or $explicit[0] == "accept with follow-up"))
+           or (($e | length) == 1 and ($e[0] == "accept" or $e[0] == "accept with follow-up"))
       then "accept"
       else ""
       end;
+  def comment_verdict:
+    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve|changes required|request changes)(?:[[:space:]]|$)"; "i");
   . as $input
   | (label_names) as $labels
   | ([$labels[] | select(startswith("agent:")) | ltrimstr("agent:")] | unique) as $authors
@@ -226,8 +237,13 @@ result=$(jq -r --arg automated_author "$automated_author" '
           | select(.agent == "")
           | (.user.login? // "an unidentified account")]
          | unique) as $unattributed
+      | ([($input.comments // [])[]
+          | . + {agent: from_agent}
+          | select(.agent != "" and comment_verdict)
+          | .agent]
+         | unique) as $comment_agents
       | [if $accepted == "" then
-           "FAIL: no independent exact-head acceptance; require **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
+           "FAIL: no independent exact-head acceptance; require a pull request review with **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
            "PASS: independent exact-head acceptance from \($accepted)"
          end,
@@ -239,6 +255,7 @@ result=$(jq -r --arg automated_author "$automated_author" '
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
+        + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
     end
   | .[]
 ' "$input" 2>/dev/null) || {
