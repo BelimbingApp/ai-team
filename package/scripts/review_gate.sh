@@ -173,7 +173,18 @@ fi
 identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
 automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
 
-result=$(jq -r --arg automated_author "$automated_author" '
+# The filter is a fixed, reviewed constant that grows with every diagnostic.
+# Keep it out of argv (#83): Windows rejects large *payloads* before jq starts,
+# and a 50,000-byte review body must still trip that bound — but the filter
+# text itself must not force the bound upward on every grammar change. A
+# runtime temp file survives the trusted workflow's standalone fetch (no
+# sibling .jq to blob-verify) and stays on the EXIT-trap cleanup path.
+filter_file=$(mktemp) || {
+  echo "ERROR: cannot allocate temporary review filter" >&2
+  exit 2
+}
+cleanup_paths+=("$filter_file")
+cat >"$filter_file" <<'JQFILTER'
   def label_names:
     if (.labels | type) != "array" or (.labels | length) == 0 then []
     elif (.labels[0] | type) == "string" then .labels
@@ -271,7 +282,9 @@ result=$(jq -r --arg automated_author "$automated_author" '
         + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
     end
   | .[]
-' "$input" 2>/dev/null) || {
+JQFILTER
+
+result=$(jq -r --arg automated_author "$automated_author" --from-file "$filter_file" "$input" 2>/dev/null) || {
   echo "ERROR: review input is malformed" >&2
   exit 2
 }
