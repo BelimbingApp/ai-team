@@ -428,6 +428,15 @@ findings. Refresh an unreviewed, behind-main PR first. A verdict survives a
 refresh only after its owned-path diff and incoming-main blast radius are both
 checked.
 
+**Copilot inline comments are a separate surface** (BelimbingApp/ai-team#80).
+They live on `pulls/{n}/comments` / review threads, not in the review bodies
+the gate reads. Before `ready.sh`, the author must triage every unresolved
+Copilot thread (fix it, or decline with a reason and resolve). Reviewers
+must open that surface and say in the verdict which Copilot points they agree
+with — so a paid review is an input, not discarded noise. Copilot still cannot
+satisfy Independent review: no `**From:**` lane and no durable exact-head
+binding.
+
 Post a verdict as a PR review, not an issue comment (`gh pr comment` is
 invisible to the gate):
 
