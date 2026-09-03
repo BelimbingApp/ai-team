@@ -417,7 +417,8 @@ findings. Refresh an unreviewed, behind-main PR first. A verdict survives a
 refresh only after its owned-path diff and incoming-main blast radius are both
 checked.
 
-Post a verdict as a PR review, not an issue comment:
+Post a verdict as a PR review, not an issue comment (`gh pr comment` is
+invisible to the gate):
 
 ```bash
 reviewed_head=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
@@ -432,6 +433,17 @@ same verdicts, case-insensitively. A shared account may record it as `COMMENTED`
 marker and lane label establish independence. Run `gate.sh` after posting to
 verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
+
+Three constraints bind every verdict:
+
+- **Each marker must be unique in the body**: a second `**From:**` or `**HEAD
+  reviewed:**` line anywhere — including one quoted from an earlier verdict or
+  discussion — voids the review.
+- **The review's API `commit_id` must equal the reviewed SHA**: GitHub attaches
+  this when posting via `gh pr review`; an issue comment lacks commit binding
+  entirely.
+- **The PR must carry exactly one `agent:` label**, and the reviewer's lane
+  must differ from it.
 
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
 `gate.sh` uses it. It counts only the newest review whose API `commit_id` and
