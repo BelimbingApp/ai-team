@@ -159,6 +159,26 @@ else
   exit 1
 fi
 
+# A branch deletion after landing is the documented cleanup, and it silently
+# closes any pull request stacked on that branch — GitHub auto-closes a PR whose
+# base disappears, with no merge, no comment and no notification, leaving its
+# exact-head reviews attached to a dead lane (#69). The person running
+# `--delete-branch` usually cannot know a stack exists; land.sh can, because it
+# already knows the branch it just merged. Warn by name rather than delete or
+# refuse: the deletion is not this script's to make, and a PR is worth more than
+# a tidy branch list.
+land_base=$(ai_team_default_branch 2>/dev/null || echo "<default-branch>")
+stacked=$(gh pr list --repo "$repo" --state open --base "$branch" \
+  --json number --jq '[.[].number] | map("#" + tostring) | join(", ")' 2>/dev/null) || stacked=""
+if [[ -n "$stacked" ]]; then
+  cat >&2 <<TXT
+WARNING: $stacked $( [[ "$stacked" == *,* ]] && echo "are" || echo "is" ) stacked on '$branch'.
+Do NOT delete that branch yet — GitHub closes a pull request whose base branch
+disappears, silently and without merging it. Retarget each one first:
+  gh pr edit <number> --repo $repo --base $land_base
+TXT
+fi
+
 if [[ ! "$merge_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "cannot determine the merge SHA for PR #$pr; terminalization stopped" >&2
   exit 1
