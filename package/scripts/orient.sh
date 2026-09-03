@@ -293,8 +293,11 @@ printf '%s' "$reach_prs" | jq -r '.[]
                  | capture("^\\*\\*From:\\*\\*\\s*(?<a>[a-z0-9]+([._-][a-z0-9]+)*)"; "i") | .a)?) // "") as $agent
              | select($agent != "")
              | (([(.body // "") | split("\n")[]
-                 | (capture("^\\*\\*Verdict:\\*\\*\\s*(?<v>accept( with follow-up)?|changes required)\\s*$"; "i") | .v)?
-                 | select(. != null) | ascii_downcase] | last) // "") as $verdict
+                 | (capture("^\\*\\*Verdict:\\*\\*\\s*(?<v>accept( with follow-up)?|approve|changes required|request changes)\\s*$"; "i") | .v)?
+                 | select(. != null) | ascii_downcase
+                 | if . == "approve" then "accept"
+                   elif . == "request changes" then "changes required"
+                   else . end] | last) // "") as $verdict
              | select($verdict != "")
              | {agent: $agent, verdict: $verdict, at: (.submitted_at // "")}]
             | group_by(.agent) | map(max_by(.at))
