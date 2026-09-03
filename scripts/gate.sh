@@ -326,7 +326,7 @@ pr_body=$(printf '%s' "$pr" | jq -r '.body // ""')
 if [ -n "$automated_author" ]; then
   lane_issue="none"
 else
-  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "")
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "${READY_ISSUE:-}")
 fi
 case "$lane_issue" in
   error:*)
@@ -466,7 +466,8 @@ stray_blocking_agents=$(printf '%s' "$issue_comments" | jq -r --arg author "$aut
        | ascii_downcase)] | unique) as $agents
     | if ($agents | length) == 1 then $agents[0] else "" end;
   def has_blocking_marker:
-    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*changes required(?:[[:space:]]|$)"; "i");
+    # Request changes is the GitHub word for changes required (#70).
+    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:changes required|request changes)(?:[[:space:]]|$)"; "i");
   [.[] | . + {agent: from_agent} | select(.agent != "" and .agent != $author and has_blocking_marker) | .agent]
   | unique | join("\n")
 ' 2>/dev/null)
@@ -494,7 +495,8 @@ if [[ -z "$accepted_agents" ]]; then
     # exactly this, "**From:** opus-5 — **Verdict:** accept at `sha`." on one
     # line, which a line-anchored **Verdict:** would never match.
     def has_accept_marker:
-      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*accept(?: with follow-up)?(?:[[:space:]]|$)"; "i");
+      # Approve is the GitHub word for accept (#70).
+      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve)(?:[[:space:]]|$)"; "i");
     [.[] | . + {agent: from_agent} | select(.agent != "" and .agent != $author and has_accept_marker) | .agent]
     | unique | join("\n")
   ' 2>/dev/null)

@@ -9,6 +9,10 @@
 # - When both identities exist they must agree.
 # - READY_ISSUE / override is allowed only when it agrees with every present
 #   identity, or when neither title nor branch yields a number.
+# - ready.sh, gate.sh and land.sh all forward READY_ISSUE, because all three
+#   print the refusal that names it (#68). orient.sh deliberately does not: it
+#   derives lanes for every open PR in one pass, so a single override would be
+#   applied to pull requests it was never meant for.
 # - Issue-less path: neither title nor branch yields a number, and the PR body
 #   contains an exact line `AI-Team-Lane-Issue: none`.
 

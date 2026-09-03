@@ -21,6 +21,11 @@
 # computed, so it is named in a WARN: an approval that does not count must
 # never be silent, or its author cannot learn why the gate ignored them.
 #
+# GitHub verdict words are accepted on the **Verdict:** line (#70):
+# Approve counts as accept, Request changes counts as changes required,
+# case-insensitively. The line must still contain nothing else — trailing
+# text still voids the review.
+#
 # Fixture input has `reviewed`, `head_sha`, `labels`, `identity`, and `reviews`
 # fields. `labels` may be an array of label names or GitHub label objects;
 # `identity` is the REST pull-request shape and `reviews` uses the GitHub API
@@ -172,8 +177,9 @@ result=$(jq -r --arg automated_author "$automated_author" '
     | if ($heads | length) == 1 then $heads[0] else "" end;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
-       | ascii_downcase)] | unique;
+       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").verdict
+       | ascii_downcase
+       | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
   def review_verdict:
     explicit_verdicts as $explicit
     | if .state == "DISMISSED" then ""
@@ -215,6 +221,18 @@ result=$(jq -r --arg automated_author "$automated_author" '
           | select(.agent == "")
           | (.user.login? // "an unidentified account")]
          | unique) as $unattributed
+      | ([$at_head[]
+          | select(.state != "APPROVED")
+          | . + {agent: from_agent}
+          | select(.agent == "")
+          | (.user.login? // "an unidentified account") as $login
+          | {login: $login,
+             raw: ([((.body // "") | split("\n")[]
+               | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<r>\\S+)(?:[[:space:]]|$)"; "i").r)]
+               | unique)}
+          | select(.raw | length == 1)
+          | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
+         | unique) as $malformed_from
       | [if $accepted == "" then
            "FAIL: no independent exact-head acceptance; require **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
@@ -226,8 +244,9 @@ result=$(jq -r --arg automated_author "$automated_author" '
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
+        + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
-        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"]
+        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
     end
   | .[]
 ' "$input" 2>/dev/null) || {
