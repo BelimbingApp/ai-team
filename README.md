@@ -234,6 +234,14 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
+After a merge, `land.sh` names any open pull request stacked on the branch it
+just landed. GitHub closes a pull request whose base branch disappears —
+silently, without merging it, leaving its exact-head reviews on a dead lane
+(BelimbingApp/ai-team#69) — and the person running `--delete-branch` usually
+cannot know a stack exists. Retarget each named pull request before deleting the
+branch. This is a warning, not a refusal: the deletion is not the script's to
+make, and the landing itself is correct.
+
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
 invents or edits an issue. Re-run it after an interrupted finalization; never
