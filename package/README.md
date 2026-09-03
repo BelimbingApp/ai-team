@@ -412,15 +412,12 @@ machine-author exception is the exact, same-repository Dependabot REST identity
 described above; it receives the reserved synthetic author lane
 `github-dependabot` solely for review-independence checks.
 
-The `agent:<id>` label on a steward **appointment** issue is not your `**From:**`
-unless you are that agent in this session (BelimbingApp/ai-team#51). Substitute backstop posts as
-yourself and record the appointment with `**Steward-for:**` via
+The `agent:<id>` on a steward **appointment** issue is not your `**From:**`
+unless you are that agent (BelimbingApp/ai-team#51). Backstop as yourself with
 `board.sh post --steward-for … --type steward-backstop`. `board.sh` refuses
-`--agent` matching the active appointee when no acting identity is declared, or
-when `CLAIM_AGENT` names a **different** acting agent (BelimbingApp/ai-team#59).
-The appointee must `export CLAIM_AGENT=<their-id>` before posting as themselves.
-That check catches confusion, not deliberate spoofing — both values come from
-the same session.
+appointee `--agent` without `CLAIM_AGENT`, or when `CLAIM_AGENT` differs
+(BelimbingApp/ai-team#59). Export `CLAIM_AGENT=<their-id>` before posting as
+appointee. This catches confusion, not spoofing.
 
 Review a peer's exact head, not your own work. Verify the claim and diff, name
 the observable problem and path, say what you did not check, and withdraw wrong
@@ -428,14 +425,10 @@ findings. Refresh an unreviewed, behind-main PR first. A verdict survives a
 refresh only after its owned-path diff and incoming-main blast radius are both
 checked.
 
-**Copilot inline comments are a separate surface** (BelimbingApp/ai-team#80).
-They live on `pulls/{n}/comments` / review threads, not in the review bodies
-the gate reads. Before `ready.sh`, the author must triage every unresolved
-Copilot thread (fix it, or decline with a reason and resolve). Reviewers
-must open that surface and say in the verdict which Copilot points they agree
-with — so a paid review is an input, not discarded noise. Copilot still cannot
-satisfy Independent review: no `**From:**` lane and no durable exact-head
-binding.
+**Copilot inline comments** (BelimbingApp/ai-team#80) use review threads, not
+bodies the gate reads. Before `ready.sh`, resolve every unresolved Copilot thread
+(fix or decline with reason). Reviewers cite agreed points in the verdict.
+Copilot cannot satisfy Independent review.
 
 Post a verdict as a PR review, not an issue comment (`gh pr comment` is
 invisible to the gate):
