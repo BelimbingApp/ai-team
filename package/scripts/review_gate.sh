@@ -21,6 +21,11 @@
 # computed, so it is named in a WARN: an approval that does not count must
 # never be silent, or its author cannot learn why the gate ignored them.
 #
+# GitHub verdict words are accepted on the **Verdict:** line (#70):
+# Approve counts as accept, Request changes counts as changes required,
+# case-insensitively. The line must still contain nothing else — trailing
+# text still voids the review.
+#
 # Fixture input has `reviewed`, `head_sha`, `labels`, `identity`, and `reviews`
 # fields. `labels` may be an array of label names or GitHub label objects;
 # `identity` is the REST pull-request shape and `reviews` uses the GitHub API
@@ -171,9 +176,15 @@ result=$(jq -r --arg automated_author "$automated_author" '
        | ascii_downcase)] | unique) as $heads
     | if ($heads | length) == 1 then $heads[0] else "" end;
   def explicit_verdicts:
+    # GitHub verdict words count as synonyms (#70): Approve means accept,
+    # Request changes means changes required. Normalised to the canonical
+    # words here so every length check below sees one vocabulary.
     [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
-       | ascii_downcase)] | unique;
+       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").verdict
+       | ascii_downcase
+       | if . == "approve" then "accept"
+         elif . == "request changes" then "changes required"
+         else . end)] | unique;
   def review_verdict:
     explicit_verdicts as $explicit
     | if .state == "DISMISSED" then ""
@@ -227,7 +238,7 @@ result=$(jq -r --arg automated_author "$automated_author" '
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
-        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"]
+        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
     end
   | .[]
 ' "$input" 2>/dev/null) || {

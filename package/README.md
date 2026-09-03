@@ -427,7 +427,8 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 `**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
 you inspected. It is mandatory even for a native approval. `**Verdict:**` is
 also alone on its line and is `accept`, `accept with follow-up`, or `changes
-required`. A shared account may record it as `COMMENTED`; the exact `From`
+required` — GitHub's own words `approve` and `request changes` count as the
+same verdicts, case-insensitively. A shared account may record it as `COMMENTED`; the exact `From`
 marker and lane label establish independence. Run `gate.sh` after posting to
 verify it registered. Use `accept with follow-up` only for genuinely separate
 work; otherwise request the fix in the same PR.
