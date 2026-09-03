@@ -234,6 +234,13 @@ CLAIM_AGENT=<stable-agent-id> docs/ai-team/scripts/ready.sh <pr-number>
 LAND_AGENT=<stable-agent-id> docs/ai-team/scripts/land.sh <pr-number> <reviewed-full-sha>
 ```
 
+`land.sh` resolves the merge method from the repository's own settings rather
+than assuming one — `merge` when allowed so the reviewed commit survives
+verbatim, otherwise `squash`, otherwise `rebase` — and refuses before the merge
+when a repository allows none. `LAND_MERGE_METHOD=merge|squash|rebase` overrides
+that. A repository forbidding merge commits used to answer a full `GATE: PASS`
+with a 405, which reads as the gate lying (BelimbingApp/ai-team#66).
+
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
 invents or edits an issue. Re-run it after an interrupted finalization; never
