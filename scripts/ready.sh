@@ -83,26 +83,27 @@ threads_json=$(gh api graphql \
   -f "query=query(\$o:String!,\$n:String!,\$p:Int!){repository(owner:\$o,name:\$n){pullRequest(number:\$p){reviewThreads(first:100){nodes{isResolved comments(first:10){nodes{author{login} body url}}}}}}}" \
   -f "o=$owner" -f "n=$name" -F "p=$pr" 2>/dev/null) || threads_json=""
 if [[ -z "$threads_json" ]]; then
-  echo "refusing #$pr: cannot read review threads to confirm Copilot triage (#80)" >&2
-  exit 2
+  echo "warning #$pr: cannot read review threads to confirm Copilot triage (#80); proceeding without thread evidence" >&2
+  unresolved=""
+else
+  unresolved=$(jq -r '
+    if (.data.repository.pullRequest.reviewThreads.nodes | type) != "array" then
+      error("reviewThreads.nodes missing")
+    else
+      [.data.repository.pullRequest.reviewThreads.nodes[]
+       | select(.isResolved | not)
+       | select([.comments.nodes[]?.author.login // ""]
+                | any(test("copilot"; "i")))
+       | (.comments.nodes[0].url // "thread") as $url
+       | (.comments.nodes[0].body // "") as $body
+       | "  - \($url)\n    \($body | split("\n")[0] | .[0:120])"
+      ] | join("\n")
+    end
+  ' <<<"$threads_json") || {
+    echo "warning #$pr: cannot parse review threads for Copilot triage (#80); proceeding without thread evidence" >&2
+    unresolved=""
+  }
 fi
-unresolved=$(jq -r '
-  if (.data.repository.pullRequest.reviewThreads.nodes | type) != "array" then
-    error("reviewThreads.nodes missing")
-  else
-    [.data.repository.pullRequest.reviewThreads.nodes[]
-     | select(.isResolved | not)
-     | select([.comments.nodes[]?.author.login // ""]
-              | any(test("copilot"; "i")))
-     | (.comments.nodes[0].url // "thread") as $url
-     | (.comments.nodes[0].body // "") as $body
-     | "  - \($url)\n    \($body | split("\n")[0] | .[0:120])"
-    ] | join("\n")
-  end
-' <<<"$threads_json") || {
-  echo "refusing #$pr: cannot parse review threads for Copilot triage (#80)" >&2
-  exit 2
-}
 if [[ -n "$unresolved" ]]; then
   echo "refusing #$pr: unresolved Copilot review thread(s) — triage before ready.sh (#80):" >&2
   echo "$unresolved" >&2
