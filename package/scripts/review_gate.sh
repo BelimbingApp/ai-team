@@ -242,6 +242,18 @@ result=$(jq -r --arg automated_author "$automated_author" '
           | select(.agent != "" and comment_verdict)
           | .agent]
          | unique) as $comment_agents
+      | ([$at_head[]
+          | select(.state != "APPROVED")
+          | . + {agent: from_agent}
+          | select(.agent == "")
+          | (.user.login? // "an unidentified account") as $login
+          | {login: $login,
+             raw: ([((.body // "") | split("\n")[]
+               | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<r>\\S+)(?:[[:space:]]|$)"; "i").r)]
+               | unique)}
+          | select(.raw | length == 1)
+          | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
+         | unique) as $malformed_from
       | [if $accepted == "" then
            "FAIL: no independent exact-head acceptance; require a pull request review with **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
@@ -253,6 +265,7 @@ result=$(jq -r --arg automated_author "$automated_author" '
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
+        + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
         + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
