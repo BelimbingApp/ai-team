@@ -241,6 +241,17 @@ a pull request can be truthfully documented as closing nothing and still close a
 issue (BelimbingApp/ai-team#67). A lane declaring no issue while GitHub would
 close one, or declaring one issue while GitHub would close another, is refused:
 either declare the lane or unlink it in the Development panel.
+`land.sh` resolves the merge method from the repository's own settings rather
+than assuming one — `merge` when allowed so the reviewed commit survives
+verbatim, otherwise `squash`, otherwise `rebase` — and refuses before the merge
+when a repository allows none. `LAND_MERGE_METHOD=merge|squash|rebase` overrides
+that. A repository forbidding merge commits used to answer a full `GATE: PASS`
+with a 405, which reads as the gate lying (BelimbingApp/ai-team#66).
+When a pull request declares no lane through its title, branch, or an exact
+`AI-Team-Lane-Issue: none` line, `ready.sh`, `gate.sh` and `land.sh` all refuse
+and name `READY_ISSUE=<n>` as the remedy. All three honour it. `orient.sh`
+deliberately does not: it derives lanes for every open pull request in one pass,
+where a single override would be applied to lanes it was never meant for.
 
 `land.sh` gates, merges, attributes the actor, and finalizes the task. For a
 trusted Dependabot lane it terminalizes only the PR as `task:done`; it never
@@ -429,10 +440,14 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 `**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
 you inspected. It is mandatory even for a native approval. `**Verdict:**` is
 also alone on its line and is `accept`, `accept with follow-up`, or `changes
-required`. A shared account may record it as `COMMENTED`; the exact `From`
+required` — GitHub's own words `approve` and `request changes` count as the
+same verdicts, case-insensitively. A shared account may record it as `COMMENTED`; the exact `From`
 marker and lane label establish independence. Run `gate.sh` after posting to
 verify it registered. Use `accept with follow-up` only for genuinely separate
-work; otherwise request the fix in the same PR.
+work; otherwise request the fix in the same PR. Write `**From:**` with the bare
+lane name, never an `agent:`-prefixed value (the prefix voids the review), and
+when posting through the API pass the body from a file — a raw string field
+posts the filename itself instead of the file.
 
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
 `gate.sh` uses it. It counts only the newest review whose API `commit_id` and

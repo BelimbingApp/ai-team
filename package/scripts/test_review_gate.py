@@ -654,6 +654,118 @@ printf 'signal-exit=%s\n' "$rc"
         }
 
 
+class GitHubSynonymVerdictTest(GateHarness):
+    """GitHub's verdict words count the same as the package's (#70).
+
+    Only the issue's option 1 is implemented: Approve means accept and
+    Request changes means changes required, case-insensitively. Trailing
+    text still voids the review, and near-misses like `approved` do not
+    count — those boundaries are pinned below.
+    """
+
+    def test_approve_counts_as_accept(self):
+        for word in ("Approve", "approve", "APPROVE"):
+            with self.subTest(word=word):
+                result = self.run_gate([
+                    self.review(body=f"**From:** reviewer\n\n**Verdict:** {word}"),
+                ])
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("acceptance from reviewer", result.stdout)
+
+    def test_request_changes_blocks(self):
+        for word in ("Request changes", "request changes", "REQUEST CHANGES"):
+            with self.subTest(word=word):
+                result = self.run_gate([
+                    self.review(
+                        state="COMMENTED",
+                        body=f"**From:** reviewer\n\n**Verdict:** {word}",
+                    ),
+                ])
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("changes required by reviewer", result.stdout)
+
+    def test_agreeing_synonyms_do_not_void_each_other(self):
+        result = self.run_gate([
+            self.review(body="**From:** reviewer\n\n**Verdict:** Approve\n\n**Verdict:** accept"),
+        ])
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("acceptance from reviewer", result.stdout)
+
+    def test_conflicting_verdict_lines_still_void_the_review(self):
+        result = self.run_gate([
+            self.review(body="**From:** reviewer\n\n**Verdict:** Approve\n\n**Verdict:** Request changes"),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("rejected for format", result.stdout)
+
+    def test_synonym_with_trailing_text_is_still_rejected(self):
+        result = self.run_gate([
+            self.review(body="**From:** reviewer\n\n**Verdict:** Approve, please land this"),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("rejected for format", result.stdout)
+
+    def test_approved_is_not_a_synonym(self):
+        result = self.run_gate([
+            self.review(body="**From:** reviewer\n\n**Verdict:** approved"),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("rejected for format", result.stdout)
+
+
+class MalformedFromValueTest(GateHarness):
+    """A review whose From value is malformed must be named, never silent.
+
+    The gate drops such reviews before any diagnostic is computed, and for
+    COMMENTED reviews — nearly every real verdict — nothing said why.
+    """
+
+    def test_prefixed_from_value_is_named_with_its_literal(self):
+        result = self.run_gate([
+            self.review(body="**From:** agent:some-reviewer\n\n**Verdict:** accept"),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn(
+            "WARN: review from agent-account ignored:"
+            " **From:** agent:some-reviewer is not a bare lane name",
+            result.stdout,
+        )
+
+    def test_malformed_from_on_an_approval_keeps_the_unattributed_warning(self):
+        # The precise warning covers the COMMENTED shape from the issue;
+        # an APPROVED review with a malformed From keeps the older message.
+        result = self.run_gate([
+            self.review(state="APPROVED", body="**From:** agent:some-reviewer"),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("carries no **From:** marker", result.stdout)
+        self.assertNotIn("is not a bare lane name", result.stdout)
+
+    def test_a_review_with_no_from_line_stays_quiet(self):
+        result = self.run_gate([
+            self.review(body="Just a drive-by comment."),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("is not a bare lane name", result.stdout)
+
+    def test_a_valid_from_value_warns_about_nothing_new(self):
+        result = self.run_gate([self.review()])
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is not a bare lane name", result.stdout)
+
+
 class UnattributedApprovalTest(GateHarness):
     """An approval the gate ignores must be named, never silently dropped.
 
