@@ -31,7 +31,8 @@ GH_STUB = textwrap.dedent(
           --arg title "$title" \
           --arg body "$body" \
           --argjson labels "$GATE_TEST_LABELS" \
-          '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels}'
+          --argjson closing "${GATE_TEST_CLOSING:-[]}" \
+          '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels,closingIssuesReferences:$closing}'
         ;;
       "pr list")
         printf '%s\\n' "$GATE_TEST_MERGED_HEADS"
@@ -179,6 +180,8 @@ class GateMechanismTest(unittest.TestCase):
         title: str | None = None,
         identity: dict[str, object] | None = None,
         review_gate_body: str | None = None,
+        closing_refs: list[int] | None = None,
+        ready_issue: str | None = None,
         bind_review_heads: bool = True,
         branch_rules: list[dict[str, object]] | None = None,
         allow_missing_checks: str | None = None,
@@ -209,6 +212,13 @@ class GateMechanismTest(unittest.TestCase):
         effective_head = head or self.head_sha
         env["GATE_TEST_HEAD"] = effective_head
         env["GATE_TEST_RESOLVE"] = resolve
+        env["GATE_TEST_CLOSING"] = json.dumps(
+            [] if closing_refs is None else [{"number": n} for n in closing_refs]
+        )
+        if ready_issue is not None:
+            env["READY_ISSUE"] = ready_issue
+        else:
+            env.pop("READY_ISSUE", None)
         if body is not None:
             env["GATE_TEST_BODY"] = body
         if branch is not None:
@@ -317,6 +327,61 @@ class GateMechanismTest(unittest.TestCase):
 
         shutil.rmtree(checkout, onerror=remove_readonly)
         return result
+
+
+    def test_an_issue_less_lane_that_will_close_an_issue_is_refused(self):
+        # #67: blb-people#39 said "This PR does not close #27", gate.sh agreed,
+        # and GitHub closed #27 anyway through a Development-panel link that
+        # left no trace in the body.
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix",
+            body="AI-Team-Lane-Issue: none",
+            closing_refs=[27],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GitHub will close #27", result.stdout)
+
+    def test_an_issue_less_lane_closing_nothing_still_passes(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix",
+            body="AI-Team-Lane-Issue: none",
+        )
+        self.assertIn("issue-less lane", result.stdout)
+
+    def test_a_lane_closing_a_different_issue_is_refused(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha, closing_refs=[27]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lane is #42 but GitHub will close #27", result.stdout)
+
+    def test_a_lane_closing_exactly_its_own_issue_passes(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha, closing_refs=[42]
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE: PASS", result.stdout)
+    def test_an_undeclared_lane_is_refused_and_names_ready_issue(self):
+        # The refusal that #68 was filed about — kept, because it is correct.
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix")
+        self.assertIn("pass READY_ISSUE", result.stdout + result.stderr)
+
+    def test_ready_issue_is_honoured_by_the_command_that_names_it(self):
+        # #68: gate.sh printed "pass READY_ISSUE" and then passed "" to the
+        # deriver, so the remedy it named could not work.
+        undeclared = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix")
+        overridden = self.run_gate(
+            origin=CANONICAL_HTTPS, reviewed=self.head_sha,
+            title="Fix the thing", branch="agent/author-fix", ready_issue="46")
+        self.assertIn("pass READY_ISSUE", undeclared.stdout + undeclared.stderr)
+        self.assertNotIn("pass READY_ISSUE", overridden.stdout + overridden.stderr)
+        self.assertIn("46", overridden.stdout)
 
     def test_rewritten_transport_refused_despite_canonical_label(self):
         # The insteadOf threat: the configured URL can look canonical while an
@@ -917,6 +982,41 @@ class GateMechanismTest(unittest.TestCase):
         self.assertIn("WARN", result.stdout)
         self.assertIn("blocking verdict marker from someone-else", result.stdout)
         self.assertIn("gh pr review --comment", result.stdout)
+
+    def test_stray_synonym_verdict_warns_in_the_comment_stream(self):
+        # #70: a reviewer reaching for GitHub's word on the wrong surface
+        # must still get the loud repost WARN, not silence.
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[],
+            issue_comments=[{
+                "id": 1,
+                "body": "**From:** reviewer\n\n**Verdict:** Approve",
+            }],
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+        self.assertIn("found a verdict marker from reviewer in the comment stream", result.stdout)
+
+    def test_stray_synonym_blocking_verdict_warns_beside_a_real_acceptance(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            reviews=[{
+                "id": 1,
+                "state": "APPROVED",
+                "body": "**From:** reviewer",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+            issue_comments=[{
+                "id": 1,
+                "body": "**From:** someone-else\n\n**Verdict:** Request changes",
+            }],
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("blocking verdict marker from someone-else", result.stdout)
 
     def test_unfetchable_reviewed_sha_is_not_misreported_as_behind(self):
         missing_sha = "f" * 40

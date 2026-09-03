@@ -17,7 +17,9 @@ TRUSTED_AUTHOR = Path(__file__).with_name("_trusted_author.sh")
 HYGIENE = Path(__file__).with_name("label_hygiene.sh")
 
 
-class LandMechanismTest(unittest.TestCase):
+class LandHarness(unittest.TestCase):
+    """Stubbed gh/gate fixture shared by every land test class."""
+
     """Hermetic regressions for the gate-to-terminal lane transition."""
 
     def setUp(self):
@@ -71,6 +73,16 @@ class LandMechanismTest(unittest.TestCase):
                   "api repos/example/canonical/pulls/42")
                     printf '%s\\n' "$LAND_TEST_IDENTITY"
                     ;;
+                  "api repos/example/canonical")
+                    if [ "${LAND_TEST_SETTINGS_STATUS:-0}" != "0" ]; then
+                      printf 'gh: could not read repository\\n' >&2
+                      exit "${LAND_TEST_SETTINGS_STATUS}"
+                    fi
+                    printf '%s\\t%s\\t%s\\n' \\
+                      "${LAND_TEST_ALLOW_MERGE:-true}" \\
+                      "${LAND_TEST_ALLOW_SQUASH:-true}" \\
+                      "${LAND_TEST_ALLOW_REBASE:-true}"
+                    ;;
                   "api -X")
                     if [ "${3:-}" = "PUT" ]; then
                       if [ "${LAND_TEST_MERGE_REQUEST_STATUS:-0}" != "0" ]; then
@@ -120,6 +132,13 @@ class LandMechanismTest(unittest.TestCase):
         trusted_bot: bool = False,
         reviewed: str = "a" * 40,
         stacked: str = "",
+        allow_merge: str = "true",
+        allow_squash: str = "true",
+        allow_rebase: str = "true",
+        settings_status: str = "0",
+        merge_method: str | None = None,
+        undeclared_lane: bool = False,
+        ready_issue: str | None = None,
     ):
         env = os.environ.copy()
         env.update(
@@ -135,6 +154,10 @@ class LandMechanismTest(unittest.TestCase):
             LAND_TEST_REVIEWED=reviewed.lower(),
             AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
             LAND_TEST_STACKED=stacked,
+            LAND_TEST_ALLOW_MERGE=allow_merge,
+            LAND_TEST_ALLOW_SQUASH=allow_squash,
+            LAND_TEST_ALLOW_REBASE=allow_rebase,
+            LAND_TEST_SETTINGS_STATUS=settings_status,
             PATH=f"{self.cwd / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         )
         if trusted_bot:
@@ -164,6 +187,20 @@ class LandMechanismTest(unittest.TestCase):
                     "base": {"repo": {"id": 100}},
                 }),
             )
+        if merge_method is not None:
+            env["LAND_MERGE_METHOD"] = merge_method
+        else:
+            env.pop("LAND_MERGE_METHOD", None)
+        if undeclared_lane:
+            env.update(
+                LAND_TEST_TITLE="Fix the thing",
+                LAND_TEST_BODY="No closing reference here.",
+                LAND_TEST_BRANCH="agent/author-fix",
+            )
+        if ready_issue is not None:
+            env["READY_ISSUE"] = ready_issue
+        else:
+            env.pop("READY_ISSUE", None)
         if attributed:
             env["LAND_TEST_ATTRIBUTION"] = "**From:** kiat-luna — merged at " + "b" * 40
         else:
@@ -178,6 +215,8 @@ class LandMechanismTest(unittest.TestCase):
             check=False,
         )
 
+
+class LandMechanismTest(LandHarness):
     def test_failed_gate_never_merges_or_terminalizes(self):
         result = self.run_land(gate_status="1")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -293,6 +332,22 @@ class LandMechanismTest(unittest.TestCase):
         result = self.run_land(stacked="#55")
         self.assertEqual(result.returncode, 0)
         self.assertIn("task:done", self.gh_log.read_text(encoding="utf-8"))
+    def test_an_undeclared_lane_is_still_refused(self):
+        # #68: the refusal is correct and stays.
+        result = self.run_land(undeclared_lane=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pass READY_ISSUE", result.stderr)
+
+    def test_ready_issue_resolves_the_lane_land_refused(self):
+        # #68: land.sh named READY_ISSUE as the remedy and then passed "" to
+        # the deriver, so the remedy it printed was inert.
+        result = self.run_land(undeclared_lane=True, ready_issue="46")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("pass READY_ISSUE", result.stderr)
+
+    def test_a_declared_lane_is_unaffected_by_the_variable(self):
+        result = self.run_land(ready_issue="42")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class LabelHygieneMechanismTest(unittest.TestCase):
@@ -353,6 +408,68 @@ class LabelHygieneMechanismTest(unittest.TestCase):
             self.assertNotIn("#400", result.stdout)
             self.assertIn("--state closed", log.read_text(encoding="utf-8"))
             self.assertIn("--search closed:>=", log.read_text(encoding="utf-8"))
+
+
+class MergeMethodTest(LandHarness):
+    """#66 — the merge method belongs to the repository, not to this script.
+
+    A repository that forbids merge commits answered a hardcoded
+    `merge_method=merge` with a 405 *after* a full GATE: PASS, which reads as
+    the gate having lied.
+    """
+
+    def merge_call(self):
+        log = self.gh_log.read_text(encoding="utf-8")
+        calls = [line for line in log.splitlines() if "-X PUT" in line]
+        self.assertEqual(len(calls), 1, log)
+        return calls[0]
+
+    def test_merge_commit_is_preferred_when_allowed(self):
+        result = self.run_land()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_squash_is_used_when_merge_commits_are_forbidden(self):
+        result = self.run_land(allow_merge="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=squash", self.merge_call())
+        self.assertIn("does not allow a merge commit", result.stderr)
+
+    def test_rebase_is_the_last_resort(self):
+        result = self.run_land(allow_merge="false", allow_squash="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=rebase", self.merge_call())
+
+    def test_a_repository_allowing_nothing_is_refused_before_the_merge(self):
+        result = self.run_land(
+            allow_merge="false", allow_squash="false", allow_rebase="false"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("allows no merge method", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_the_override_is_honoured_on_the_path_that_prints_it(self):
+        """#68 is about a remedy the tool names and ignores; this one works."""
+        result = self.run_land(allow_merge="false", merge_method="squash")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=squash", self.merge_call())
+
+    def test_the_override_beats_a_repository_that_allows_everything(self):
+        result = self.run_land(merge_method="rebase")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=rebase", self.merge_call())
+
+    def test_a_bogus_override_is_refused_by_invocation(self):
+        result = self.run_land(merge_method="fast-forward")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be merge, squash, or rebase", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_an_unreadable_repository_names_the_override_instead_of_guessing(self):
+        result = self.run_land(settings_status="1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("LAND_MERGE_METHOD", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

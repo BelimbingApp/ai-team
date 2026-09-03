@@ -21,6 +21,11 @@
 # computed, so it is named in a WARN: an approval that does not count must
 # never be silent, or its author cannot learn why the gate ignored them.
 #
+# GitHub verdict words are accepted on the **Verdict:** line (#70):
+# Approve counts as accept, Request changes counts as changes required,
+# case-insensitively. The line must still contain nothing else — trailing
+# text still voids the review.
+#
 # Fixture input has `reviewed`, `head_sha`, `labels`, `identity`, and `reviews`
 # fields. `labels` may be an array of label names or GitHub label objects;
 # `identity` is the REST pull-request shape and `reviews` uses the GitHub API
@@ -114,6 +119,11 @@ if [[ -z "$input" ]]; then
     exit 2
   }
   cleanup_paths+=("$reviews_file")
+  comments_file=$(mktemp) || {
+    echo "ERROR: cannot allocate temporary comments input" >&2
+    exit 2
+  }
+  cleanup_paths+=("$comments_file")
 
   if ! gh api "repos/$repo/pulls/$pr" >"$identity_file" 2>/dev/null; then
     echo "ERROR: cannot read immutable PR identity for #$pr from $repo" >&2
@@ -138,53 +148,76 @@ if [[ -z "$input" ]]; then
     exit 2
   fi
 
+  # Comments are read for diagnostic reporting only, never to satisfy the gate (#71).
+  # A failure to read comments defaults to empty so a comment-read issue does
+  # not fail the primary review gate.
+  if ! gh api "repos/$repo/issues/$pr/comments" --paginate 2>/dev/null \
+    | jq -s 'add // []' >"$comments_file" 2>/dev/null; then
+    printf '[]\n' >"$comments_file"
+  fi
+
   jq -n --arg reviewed "$reviewed" \
     --arg head_sha "$head_sha" \
     --slurpfile identity "$identity_file" \
     --slurpfile reviews "$reviews_file" \
+    --slurpfile comments "$comments_file" \
     '($identity[0] // {}) as $pr
      | {reviewed: $reviewed,
         head_sha: $head_sha,
         labels: ($pr.labels // []),
         identity: $pr,
-        reviews: ($reviews[0] // [])}' >"$input"
+        reviews: ($reviews[0] // []),
+        comments: ($comments[0] // [])}' >"$input"
 fi
 
 identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
 automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
 
-result=$(jq -r --arg automated_author "$automated_author" '
+# The filter is a fixed, reviewed constant that grows with every diagnostic.
+# Keep it out of argv (#83): Windows rejects large *payloads* before jq starts,
+# and a 50,000-byte review body must still trip that bound — but the filter
+# text itself must not force the bound upward on every grammar change. A
+# runtime temp file survives the trusted workflow's standalone fetch (no
+# sibling .jq to blob-verify) and stays on the EXIT-trap cleanup path.
+filter_file=$(mktemp) || {
+  echo "ERROR: cannot allocate temporary review filter" >&2
+  exit 2
+}
+cleanup_paths+=("$filter_file")
+cat >"$filter_file" <<'JQFILTER'
   def label_names:
-    if (.labels | type) != "array" then []
-    elif (.labels | length) == 0 then []
+    if (.labels | type) != "array" or (.labels | length) == 0 then []
     elif (.labels[0] | type) == "string" then .labels
     else [.labels[].name // empty]
     end;
   def from_agent:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
-       | ascii_downcase)] | unique) as $agents
-    | if ($agents | length) == 1 then $agents[0] else "" end;
+       | ascii_downcase)] | unique) as $a
+    | if ($a | length) == 1 then $a[0] else "" end;
   def reviewed_head:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
-       | ascii_downcase)] | unique) as $heads
-    | if ($heads | length) == 1 then $heads[0] else "" end;
+       | ascii_downcase)] | unique) as $h
+    | if ($h | length) == 1 then $h[0] else "" end;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|changes required)[[:space:]]*$"; "i").verdict
-       | ascii_downcase)] | unique;
+       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").v
+       | ascii_downcase
+       | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
   def review_verdict:
-    explicit_verdicts as $explicit
+    explicit_verdicts as $e
     | if .state == "DISMISSED" then ""
       elif .state == "CHANGES_REQUESTED" then "changes required"
-      elif ($explicit | length) > 1 then ""
-      elif ($explicit | length) == 1 and $explicit[0] == "changes required" then "changes required"
+      elif ($e | length) > 1 then ""
+      elif ($e | length) == 1 and $e[0] == "changes required" then "changes required"
       elif .state == "APPROVED"
-           or (($explicit | length) == 1 and ($explicit[0] == "accept" or $explicit[0] == "accept with follow-up"))
+           or (($e | length) == 1 and ($e[0] == "accept" or $e[0] == "accept with follow-up"))
       then "accept"
       else ""
       end;
+  def comment_verdict:
+    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve|changes required|request changes)(?:[[:space:]]|$)"; "i");
   . as $input
   | (label_names) as $labels
   | ([$labels[] | select(startswith("agent:")) | ltrimstr("agent:")] | unique) as $authors
@@ -215,8 +248,25 @@ result=$(jq -r --arg automated_author "$automated_author" '
           | select(.agent == "")
           | (.user.login? // "an unidentified account")]
          | unique) as $unattributed
+      | ([($input.comments // [])[]
+          | . + {agent: from_agent}
+          | select(.agent != "" and comment_verdict)
+          | .agent]
+         | unique) as $comment_agents
+      | ([$at_head[]
+          | select(.state != "APPROVED")
+          | . + {agent: from_agent}
+          | select(.agent == "")
+          | (.user.login? // "an unidentified account") as $login
+          | {login: $login,
+             raw: ([((.body // "") | split("\n")[]
+               | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<r>\\S+)(?:[[:space:]]|$)"; "i").r)]
+               | unique)}
+          | select(.raw | length == 1)
+          | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
+         | unique) as $malformed_from
       | [if $accepted == "" then
-           "FAIL: no independent exact-head acceptance; require **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
+           "FAIL: no independent exact-head acceptance; require a pull request review with **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
            "PASS: independent exact-head acceptance from \($accepted)"
          end,
@@ -226,11 +276,15 @@ result=$(jq -r --arg automated_author "$automated_author" '
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
+        + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
-        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / accept with follow-up / changes required)"]
+        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
+        + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
     end
   | .[]
-' "$input" 2>/dev/null) || {
+JQFILTER
+
+result=$(jq -r --arg automated_author "$automated_author" --from-file "$filter_file" "$input" 2>/dev/null) || {
   echo "ERROR: review input is malformed" >&2
   exit 2
 }
