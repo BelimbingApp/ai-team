@@ -176,15 +176,10 @@ result=$(jq -r --arg automated_author "$automated_author" '
        | ascii_downcase)] | unique) as $heads
     | if ($heads | length) == 1 then $heads[0] else "" end;
   def explicit_verdicts:
-    # GitHub verdict words count as synonyms (#70): Approve means accept,
-    # Request changes means changes required. Normalised to the canonical
-    # words here so every length check below sees one vocabulary.
     [((.body // "") | split("\n")[]
        | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<verdict>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").verdict
        | ascii_downcase
-       | if . == "approve" then "accept"
-         elif . == "request changes" then "changes required"
-         else . end)] | unique;
+       | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
   def review_verdict:
     explicit_verdicts as $explicit
     | if .state == "DISMISSED" then ""
@@ -226,6 +221,18 @@ result=$(jq -r --arg automated_author "$automated_author" '
           | select(.agent == "")
           | (.user.login? // "an unidentified account")]
          | unique) as $unattributed
+      | ([$at_head[]
+          | select(.state != "APPROVED")
+          | . + {agent: from_agent}
+          | select(.agent == "")
+          | (.user.login? // "an unidentified account") as $login
+          | {login: $login,
+             raw: ([((.body // "") | split("\n")[]
+               | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<r>\\S+)(?:[[:space:]]|$)"; "i").r)]
+               | unique)}
+          | select(.raw | length == 1)
+          | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
+         | unique) as $malformed_from
       | [if $accepted == "" then
            "FAIL: no independent exact-head acceptance; require **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
          else
@@ -237,6 +244,7 @@ result=$(jq -r --arg automated_author "$automated_author" '
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
+        + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
     end

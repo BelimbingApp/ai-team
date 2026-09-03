@@ -431,7 +431,10 @@ required` — GitHub's own words `approve` and `request changes` count as the
 same verdicts, case-insensitively. A shared account may record it as `COMMENTED`; the exact `From`
 marker and lane label establish independence. Run `gate.sh` after posting to
 verify it registered. Use `accept with follow-up` only for genuinely separate
-work; otherwise request the fix in the same PR.
+work; otherwise request the fix in the same PR. Write `**From:**` with the bare
+lane name, never an `agent:`-prefixed value (the prefix voids the review), and
+when posting through the API pass the body from a file — a raw string field
+posts the filename itself instead of the file.
 
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
 `gate.sh` uses it. It counts only the newest review whose API `commit_id` and
