@@ -62,7 +62,7 @@ automated_author=$(ai_team_trusted_automated_author_lane "$pr_identity")
 if [[ -n "$automated_author" ]]; then
   lane_issue="none"
 else
-  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$body" "")
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$body" "${READY_ISSUE:-}")
 fi
 if [[ "$lane_issue" == error:* ]]; then
   echo "refusing #$pr: ${lane_issue#error:}" >&2
