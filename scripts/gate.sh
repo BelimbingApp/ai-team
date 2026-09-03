@@ -326,7 +326,7 @@ pr_body=$(printf '%s' "$pr" | jq -r '.body // ""')
 if [ -n "$automated_author" ]; then
   lane_issue="none"
 else
-  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "")
+  lane_issue=$(ai_team_derive_lane_issue "$title" "$branch" "$pr_body" "${READY_ISSUE:-}")
 fi
 case "$lane_issue" in
   error:*)

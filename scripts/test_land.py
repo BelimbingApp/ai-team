@@ -116,6 +116,8 @@ class LandMechanismTest(unittest.TestCase):
         merge_message: str = "",
         trusted_bot: bool = False,
         reviewed: str = "a" * 40,
+        undeclared_lane: bool = False,
+        ready_issue: str | None = None,
     ):
         env = os.environ.copy()
         env.update(
@@ -159,6 +161,16 @@ class LandMechanismTest(unittest.TestCase):
                     "base": {"repo": {"id": 100}},
                 }),
             )
+        if undeclared_lane:
+            env.update(
+                LAND_TEST_TITLE="Fix the thing",
+                LAND_TEST_BODY="No closing reference here.",
+                LAND_TEST_BRANCH="agent/author-fix",
+            )
+        if ready_issue is not None:
+            env["READY_ISSUE"] = ready_issue
+        else:
+            env.pop("READY_ISSUE", None)
         if attributed:
             env["LAND_TEST_ATTRIBUTION"] = "**From:** kiat-luna — merged at " + "b" * 40
         else:
@@ -262,6 +274,23 @@ class LandMechanismTest(unittest.TestCase):
         self.assertIn("pr edit 42", gh_log)
         self.assertNotIn("issue edit", gh_log)
         self.assertNotIn("pr comment 42", gh_log)
+
+    def test_an_undeclared_lane_is_still_refused(self):
+        # #68: the refusal is correct and stays.
+        result = self.run_land(undeclared_lane=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pass READY_ISSUE", result.stderr)
+
+    def test_ready_issue_resolves_the_lane_land_refused(self):
+        # #68: land.sh named READY_ISSUE as the remedy and then passed "" to
+        # the deriver, so the remedy it printed was inert.
+        result = self.run_land(undeclared_lane=True, ready_issue="46")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("pass READY_ISSUE", result.stderr)
+
+    def test_a_declared_lane_is_unaffected_by_the_variable(self):
+        result = self.run_land(ready_issue="42")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class LabelHygieneMechanismTest(unittest.TestCase):
