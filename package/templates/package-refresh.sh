@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Activation boundary for an adopting repository. Copy this file and
-# package-refresh.conf to .ai-team/, then run .ai-team/activate.sh instead of
-# orient.sh when a team session starts. An update is built and tested away from
-# the caller's checkout; onboarding resumes only after its PR has merged.
+# Explicit package refresh command for an adopting repository. Copy this file
+# and package-refresh.conf to .ai-team/, then run .ai-team/package-refresh.sh
+# only when intentionally updating the mounted package. It prepares a reviewed
+# package-only PR away from the caller's checkout; it is not session onboarding.
 set -u
 
 PREFIX=docs/ai-team
 UPDATE_BRANCH=ai-team/package-refresh
-MUTEX_BRANCH=ai-team/activation-mutex
+MUTEX_BRANCH=ai-team/claim-refresh-mutex
 BOOTSTRAP_AGENT=package-bootstrap
 CONFIG=.ai-team/package-refresh.conf
 MUTEX_REF="refs/heads/$MUTEX_BRANCH"
@@ -16,7 +16,6 @@ MUTEX_HELD=0
 MUTEX_EMPTY_RETRY_COUNT=0
 TEMP_PARENT=
 TEMP_WORKTREE=
-TEMP_SUITE_REPO=
 BODY_FILE=
 WORKTREE_ADDED=0
 PUBLISHED_CLAIM_SHA=
@@ -24,78 +23,78 @@ PUBLISHED_CLAIM_ACTIVE=0
 REMOTE_UPDATE_SHA=
 
 fail() {
-  printf 'activation: %s\n' "$*" >&2
+  printf 'refresh: %s\n' "$*" >&2
   exit 1
 }
 
 # Repository-selection environment can redirect even `git -C` and `git init`
-# into adopter-owned Git state. Activation never guesses through it: enter the
+# into adopter-owned Git state. Package refresh never guesses through it: enter the
 # intended checkout normally, with all selectors unset.
-[ -z "${GIT_DIR:-}" ] || fail "GIT_DIR must be unset before activation"
-[ -z "${GIT_WORK_TREE:-}" ] || fail "GIT_WORK_TREE must be unset before activation"
-[ -z "${GIT_COMMON_DIR:-}" ] || fail "GIT_COMMON_DIR must be unset before activation"
-[ -z "${GIT_OBJECT_DIRECTORY:-}" ] || fail "GIT_OBJECT_DIRECTORY must be unset before activation"
+[ -z "${GIT_DIR:-}" ] || fail "GIT_DIR must be unset before refresh"
+[ -z "${GIT_WORK_TREE:-}" ] || fail "GIT_WORK_TREE must be unset before refresh"
+[ -z "${GIT_COMMON_DIR:-}" ] || fail "GIT_COMMON_DIR must be unset before refresh"
+[ -z "${GIT_OBJECT_DIRECTORY:-}" ] || fail "GIT_OBJECT_DIRECTORY must be unset before refresh"
 [ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] || \
-  fail "GIT_ALTERNATE_OBJECT_DIRECTORIES must be unset before activation"
-[ -z "${GIT_INDEX_FILE:-}" ] || fail "GIT_INDEX_FILE must be unset before activation"
-[ -z "${GIT_NAMESPACE:-}" ] || fail "GIT_NAMESPACE must be unset before activation"
-[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || fail "GIT_CONFIG_PARAMETERS must be unset before activation"
-[ -z "${GIT_CONFIG_COUNT:-}" ] || fail "GIT_CONFIG_COUNT must be unset before activation"
+  fail "GIT_ALTERNATE_OBJECT_DIRECTORIES must be unset before refresh"
+[ -z "${GIT_INDEX_FILE:-}" ] || fail "GIT_INDEX_FILE must be unset before refresh"
+[ -z "${GIT_NAMESPACE:-}" ] || fail "GIT_NAMESPACE must be unset before refresh"
+[ -z "${GIT_CONFIG_PARAMETERS:-}" ] || fail "GIT_CONFIG_PARAMETERS must be unset before refresh"
+[ -z "${GIT_CONFIG_COUNT:-}" ] || fail "GIT_CONFIG_COUNT must be unset before refresh"
 
 stop_for_pr() {
-  printf 'activation: %s\n' "$*" >&2
-  printf 'activation: onboarding is paused until the package refresh PR is merged and the default branch is updated locally\n' >&2
+  printf 'refresh: %s\n' "$*" >&2
+  printf 'refresh: new claims are paused until the package refresh PR is merged and the default branch is updated locally; orientation and read-only work remain available\n' >&2
   exit 3
 }
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not a git checkout"
 cd "$ROOT" || fail "cannot enter repository root"
 
-acquire_activation_mutex() {
+acquire_claim_refresh_mutex() {
   mutex_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || {
-    printf 'activation: cannot generate a unique activation mutex claim\n' >&2
+    printf 'refresh: cannot generate a unique refresh mutex claim\n' >&2
     return 2
   }
   printf '%s\n' "$mutex_nonce" | grep -Eq '^[0-9a-fA-F]{32}$' || {
-    printf 'activation: cannot generate a valid activation mutex claim\n' >&2
+    printf 'refresh: cannot generate a valid refresh mutex claim\n' >&2
     return 2
   }
   mutex_tree=$(git rev-parse "$base_sha^{tree}" 2>/dev/null) || {
-    printf 'activation: cannot inspect the default tree for the activation mutex\n' >&2
+    printf 'refresh: cannot inspect the default tree for the refresh mutex\n' >&2
     return 2
   }
-  mutex_message=$(printf 'AI Team activation/claim mutex\n\nAI-Team-Activation-Mutex: true\nAI-Team-Activation-Mutex-Base: %s\nAI-Team-Activation-Mutex-Owner: package-refresh:%s\nAI-Team-Activation-Mutex-Nonce: %s\n' \
+  mutex_message=$(printf 'AI Team refresh/claim mutex\n\nAI-Team-Claim-Refresh-Mutex: true\nAI-Team-Claim-Refresh-Mutex-Base: %s\nAI-Team-Claim-Refresh-Mutex-Owner: package-refresh:%s\nAI-Team-Claim-Refresh-Mutex-Nonce: %s\n' \
     "$base_sha" "$UPSTREAM_SHA" "$mutex_nonce")
-  MUTEX_SHA=$(git -c user.name=ai-team-activation-mutex \
-    -c user.email=ai-team-activation-mutex@users.noreply.github.com \
+  MUTEX_SHA=$(git -c user.name=ai-team-claim-refresh-mutex \
+    -c user.email=ai-team-claim-refresh-mutex@users.noreply.github.com \
     commit-tree "$mutex_tree" -p "$base_sha" <<EOF
 $mutex_message
 EOF
   ) || {
-    printf 'activation: cannot create the activation mutex commit\n' >&2
+    printf 'refresh: cannot create the refresh mutex commit\n' >&2
     return 2
   }
 
   if ! git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:" \
     "$ORIGIN_PUSH_URL" "$MUTEX_SHA:$MUTEX_REF"; then
     mutex_observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || {
-      printf 'activation: mutex push failed and its remote state cannot be inspected\n' >&2
+      printf 'refresh: mutex push failed and its remote state cannot be inspected\n' >&2
       return 2
     }
     mutex_observed=$(printf '%s\n' "$mutex_observed_lines" | awk 'NF { print $1; exit }')
     if [ "$mutex_observed" = "$MUTEX_SHA" ]; then
-      printf 'activation: mutex push response was uncertain, but this updater owns it\n' >&2
+      printf 'refresh: mutex push response was uncertain, but this updater owns it\n' >&2
     elif [ -n "$mutex_observed" ]; then
       if [ "${AI_TEAM_RECOVER_MUTEX_SHA:-}" = "$mutex_observed" ]; then
         git fetch -q --no-tags origin "$MUTEX_BRANCH" || {
-          printf 'activation: cannot fetch the exact mutex selected for recovery\n' >&2
+          printf 'refresh: cannot fetch the exact mutex selected for recovery\n' >&2
           return 2
         }
         stale_message=$(git show -s --format=%B "$mutex_observed" 2>/dev/null || true)
-        stale_managed=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Activation-Mutex: / { value=$2 } END { print value }')
-        stale_base=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Base: / { value=$2 } END { print value }')
-        stale_owner=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Owner: / { value=$2 } END { print value }')
-        stale_nonce=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Nonce: / { value=$2 } END { print value }')
+        stale_managed=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex: / { value=$2 } END { print value }')
+        stale_base=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Base: / { value=$2 } END { print value }')
+        stale_owner=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Owner: / { value=$2 } END { print value }')
+        stale_nonce=$(printf '%s\n' "$stale_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Nonce: / { value=$2 } END { print value }')
         stale_parent_line=$(git rev-list --parents -n 1 "$mutex_observed" 2>/dev/null || true)
         stale_parent=$(printf '%s\n' "$stale_parent_line" | awk 'NF == 2 { print $2 }')
         stale_tree=$(git rev-parse "$mutex_observed^{tree}" 2>/dev/null || true)
@@ -105,7 +104,7 @@ EOF
           printf '%s\n' "$stale_base" | grep -Eq '^[0-9a-fA-F]{40,64}$' && \
           printf '%s\n' "$stale_nonce" | grep -Eq '^[0-9a-fA-F]{32}$' && \
           printf '%s\n' "$stale_owner" | grep -Eq '^(claim:[a-z0-9]+([._-][a-z0-9]+)*:#[0-9]+|package-refresh:[0-9a-fA-F]{40,64})$' || {
-          printf 'activation: selected mutex is malformed or not generated state; refusing recovery\n' >&2
+          printf 'refresh: selected mutex is malformed or not generated state; refusing recovery\n' >&2
           return 2
         }
         if ! git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:$mutex_observed" \
@@ -113,18 +112,18 @@ EOF
           recovered_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || return 2
           recovered_observed=$(printf '%s\n' "$recovered_lines" | awk 'NF { print $1; exit }')
           [ -z "$recovered_observed" ] || {
-            printf 'activation: mutex changed during exact recovery; refusing to delete %s\n' "$recovered_observed" >&2
+            printf 'refresh: mutex changed during exact recovery; refusing to delete %s\n' "$recovered_observed" >&2
             return 2
           }
         fi
-        printf 'activation: recovered exact stale generated mutex %s after owner verification\n' "$mutex_observed" >&2
+        printf 'refresh: recovered exact stale generated mutex %s after owner verification\n' "$mutex_observed" >&2
         MUTEX_EMPTY_RETRY_COUNT=0
-        acquire_activation_mutex
+        acquire_claim_refresh_mutex
         return $?
       fi
       mutex_wait_limit=${AI_TEAM_MUTEX_WAIT_SECONDS:-30}
       printf '%s\n' "$mutex_wait_limit" | grep -Eq '^[0-9]+$' || {
-        printf 'activation: AI_TEAM_MUTEX_WAIT_SECONDS must be a non-negative integer\n' >&2
+        printf 'refresh: AI_TEAM_MUTEX_WAIT_SECONDS must be a non-negative integer\n' >&2
         return 2
       }
       mutex_waited=0
@@ -134,24 +133,24 @@ EOF
         waited_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || return 2
         waited_observed=$(printf '%s\n' "$waited_lines" | awk 'NF { print $1; exit }')
         if [ -z "$waited_observed" ]; then
-          printf 'activation: the short mutex cleared after %s second(s); observing the durable lane\n' "$mutex_waited" >&2
+          printf 'refresh: the short mutex cleared after %s second(s); observing the durable lane\n' "$mutex_waited" >&2
           MUTEX_EMPTY_RETRY_COUNT=0
-          acquire_activation_mutex
+          acquire_claim_refresh_mutex
           return $?
         fi
         mutex_observed=$waited_observed
       done
-      # A package activation can legitimately hold this short mutex longer
+      # A package refresh can legitimately hold this short mutex longer
       # than the local wait budget while it repairs historical merged lanes.
       # If its exact generated owner names this same immutable package
-      # revision, pause onboarding with a durable, revision-tied result rather
-      # than turning scheduler timing into a false activation failure.
+      # revision, pause new claims with a durable, revision-tied result rather
+      # than turning scheduler timing into a false refresh failure.
       if git fetch -q --no-tags origin "$mutex_observed" 2>/dev/null; then
         waited_message=$(git show -s --format=%B "$mutex_observed" 2>/dev/null || true)
-        waited_managed=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Activation-Mutex: / { value=$2 } END { print value }')
-        waited_base=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Base: / { value=$2 } END { print value }')
-        waited_owner=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Owner: / { value=$2 } END { print value }')
-        waited_nonce=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Activation-Mutex-Nonce: / { value=$2 } END { print value }')
+        waited_managed=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex: / { value=$2 } END { print value }')
+        waited_base=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Base: / { value=$2 } END { print value }')
+        waited_owner=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Owner: / { value=$2 } END { print value }')
+        waited_nonce=$(printf '%s\n' "$waited_message" | awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Nonce: / { value=$2 } END { print value }')
         waited_parent_line=$(git rev-list --parents -n 1 "$mutex_observed" 2>/dev/null || true)
         waited_parent=$(printf '%s\n' "$waited_parent_line" | awk 'NF == 2 { print $2 }')
         waited_tree=$(git rev-parse "$mutex_observed^{tree}" 2>/dev/null || true)
@@ -161,21 +160,21 @@ EOF
            printf '%s\n' "$waited_base" | grep -Eq '^[0-9a-fA-F]{40,64}$' && \
            printf '%s\n' "$waited_nonce" | grep -Eq '^[0-9a-fA-F]{32}$' && \
            [ "$waited_owner" = "package-refresh:$UPSTREAM_SHA" ]; then
-          stop_for_pr "package revision $UPSTREAM_SHA is in progress under exact activation mutex $mutex_observed"
+          stop_for_pr "package revision $UPSTREAM_SHA is in progress under exact refresh mutex $mutex_observed"
         fi
       fi
-      printf 'activation: another activation or claim owns origin/%s; retry after it finishes\n' "$MUTEX_BRANCH" >&2
-      printf 'activation: if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=%s; activation never steals it\n' "$mutex_observed" >&2
+      printf 'refresh: another refresh or claim owns origin/%s; retry after it finishes\n' "$MUTEX_BRANCH" >&2
+      printf 'refresh: if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=%s; refresh never steals it\n' "$mutex_observed" >&2
       return 1
     else
       if [ "$MUTEX_EMPTY_RETRY_COUNT" -lt 3 ]; then
         MUTEX_EMPTY_RETRY_COUNT=$((MUTEX_EMPTY_RETRY_COUNT + 1))
-        printf 'activation: mutex CAS failed but the ref is now empty; retrying with a fresh nonce (%s/3)\n' \
+        printf 'refresh: mutex CAS failed but the ref is now empty; retrying with a fresh nonce (%s/3)\n' \
           "$MUTEX_EMPTY_RETRY_COUNT" >&2
-        acquire_activation_mutex
+        acquire_claim_refresh_mutex
         return $?
       fi
-      printf 'activation: cannot acquire origin/%s (check push permission or protection)\n' "$MUTEX_BRANCH" >&2
+      printf 'refresh: cannot acquire origin/%s (check push permission or protection)\n' "$MUTEX_BRANCH" >&2
       return 2
     fi
   fi
@@ -183,7 +182,7 @@ EOF
   MUTEX_HELD=1
 }
 
-release_activation_mutex() {
+release_claim_refresh_mutex() {
   [ "$MUTEX_HELD" -eq 1 ] || return 0
   if git -c core.hooksPath=/dev/null push --quiet --force-with-lease="$MUTEX_REF:$MUTEX_SHA" \
     "$ORIGIN_PUSH_URL" ":$MUTEX_REF"; then
@@ -191,7 +190,7 @@ release_activation_mutex() {
     return 0
   fi
   mutex_observed_lines=$(git ls-remote --heads "$ORIGIN_URL" "$MUTEX_REF" 2>/dev/null) || {
-    printf 'activation: cannot release the activation mutex or inspect its remote state\n' >&2
+    printf 'refresh: cannot release the refresh mutex or inspect its remote state\n' >&2
     return 2
   }
   mutex_observed=$(printf '%s\n' "$mutex_observed_lines" | awk 'NF { print $1; exit }')
@@ -200,9 +199,9 @@ release_activation_mutex() {
     return 0
   fi
   if [ "$mutex_observed" != "$MUTEX_SHA" ]; then
-    printf 'activation: mutex ownership changed unexpectedly; refusing to delete %s\n' "$mutex_observed" >&2
+    printf 'refresh: mutex ownership changed unexpectedly; refusing to delete %s\n' "$mutex_observed" >&2
   else
-    printf 'activation: cannot release origin/%s; delete only that exact generated ref after verifying no activation or claim is running\n' "$MUTEX_BRANCH" >&2
+    printf 'refresh: cannot release origin/%s; delete only that exact generated ref after verifying no refresh or claim is running\n' "$MUTEX_BRANCH" >&2
   fi
   return 2
 }
@@ -213,7 +212,7 @@ mark_failed_refresh_claim() {
   failed_observed=$(printf '%s\n' "$failed_observed_lines" | awk 'NF { print $1; exit }')
   [ "$failed_observed" = "$PUBLISHED_CLAIM_SHA" ] || return 1
   failed_tree=$(git rev-parse "$base_sha^{tree}" 2>/dev/null) || return 1
-  failed_message=$(printf 'AI Team package refresh stopped before verification\n\nAI-Team-Activation-Managed: true\nAI-Team-Activation-Base: %s\nAI-Team-Package-Source: %s\nAI-Team-Package-Ref: %s\nAI-Team-Package-Revision: %s\nAI-Team-Activation-Failed: true\n' \
+  failed_message=$(printf 'AI Team package refresh stopped before verification\n\nAI-Team-Package-Refresh-Managed: true\nAI-Team-Package-Refresh-Base: %s\nAI-Team-Package-Source: %s\nAI-Team-Package-Ref: %s\nAI-Team-Package-Revision: %s\nAI-Team-Package-Refresh-Failed: true\n' \
     "$base_sha" "$SOURCE" "$REF" "$UPSTREAM_SHA")
   failed_sha=$(git -c user.name=ai-team-package-bootstrap \
     -c user.email=ai-team-package-bootstrap@users.noreply.github.com \
@@ -224,7 +223,7 @@ EOF
   if git -c core.hooksPath=/dev/null push --quiet --force-with-lease="refs/heads/$UPDATE_BRANCH:$PUBLISHED_CLAIM_SHA" \
     "$ORIGIN_PUSH_URL" "$failed_sha:refs/heads/$UPDATE_BRANCH"; then
     PUBLISHED_CLAIM_ACTIVE=0
-    printf 'activation: recorded a recoverable failed refresh marker at %s\n' "$failed_sha" >&2
+    printf 'refresh: recorded a recoverable failed refresh marker at %s\n' "$failed_sha" >&2
     return 0
   fi
   failed_after_lines=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || return 1
@@ -234,30 +233,24 @@ EOF
   return 0
 }
 
-activation_cleanup() {
+package_refresh_cleanup() {
   cleanup_status=$?
   trap - EXIT HUP INT TERM
   if [ "$cleanup_status" -ne 0 ] && ! mark_failed_refresh_claim; then
-    printf 'activation: could not convert this invocation\047s claim into a recoverable failure marker; verify no updater is running before exact recovery of %s\n' "$PUBLISHED_CLAIM_SHA" >&2
+    printf 'refresh: could not convert this invocation\047s claim into a recoverable failure marker; verify no updater is running before exact recovery of %s\n' "$PUBLISHED_CLAIM_SHA" >&2
   fi
   if [ "$WORKTREE_ADDED" -eq 1 ]; then
     git -C "$ROOT" worktree remove --force "$TEMP_WORKTREE" >/dev/null 2>&1 || true
   fi
-  if [ -n "$TEMP_SUITE_REPO" ] && [ -n "$TEMP_PARENT" ]; then
-    case "$TEMP_SUITE_REPO" in
-      "$TEMP_PARENT"/suite-repo) rm -rf -- "$TEMP_SUITE_REPO" ;;
-      *) printf 'activation: refusing cleanup of unexpected suite path %s\n' "$TEMP_SUITE_REPO" >&2 ;;
-    esac
-  fi
   [ -z "$BODY_FILE" ] || [ ! -f "$BODY_FILE" ] || rm -f -- "$BODY_FILE"
   [ -z "$TEMP_PARENT" ] || rmdir "$TEMP_PARENT" >/dev/null 2>&1 || true
-  if ! release_activation_mutex; then
+  if ! release_claim_refresh_mutex; then
     [ "$cleanup_status" -ne 0 ] || cleanup_status=2
   fi
   exit "$cleanup_status"
 }
 
-[ -f "$CONFIG" ] || fail "$CONFIG is missing; install the owner-reviewed activation policy first"
+[ -f "$CONFIG" ] || fail "$CONFIG is missing; install the owner-reviewed refresh policy first"
 
 SOURCE=
 REF=
@@ -319,88 +312,11 @@ printf '%s\n' "$UPSTREAM_SHA" | grep -Eq '^[0-9a-fA-F]{40,64}$' || \
   fail "approved package ref $REF returned an invalid revision"
 
 # Fetch the immutable object named above. FETCH_HEAD is not used afterwards;
-# concurrent activations may update it without changing the resolved object.
+# concurrent refreshes may update it without changing the resolved object.
 git fetch -q --no-tags "$SOURCE" "$UPSTREAM_SHA" || \
   fail "cannot fetch package revision $UPSTREAM_SHA"
 UPSTREAM_TREE=$(git rev-parse "$UPSTREAM_SHA^{tree}" 2>/dev/null) || \
   fail "package revision $UPSTREAM_SHA has no tree"
-
-run_mounted_suite() {
-  suite_checkout=$1
-  suite_python=
-  if command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
-    suite_python=python3
-  elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
-    suite_python=python
-  else
-    printf 'activation: Python is required to verify the mounted mechanism suite\n' >&2
-    return 1
-  fi
-  (cd "$suite_checkout" && \
-    "$suite_python" -B -m unittest discover -s "$PREFIX/scripts" -p 'test_*.py')
-}
-
-remove_isolated_suite_repo() {
-  [ -n "$TEMP_SUITE_REPO" ] && [ -n "$TEMP_PARENT" ] || return 0
-  case "$TEMP_SUITE_REPO" in
-    "$TEMP_PARENT"/suite-repo) rm -rf -- "$TEMP_SUITE_REPO" || return 1 ;;
-    *) return 1 ;;
-  esac
-  TEMP_SUITE_REPO=
-}
-
-# Run package tests in a standalone repository, never a linked worktree. This
-# prevents a passing suite from changing the caller/build repository's shared
-# hooks, config, refs, index, or object namespace. Return 1 for an ordinary
-# failing suite and 2 for setup, mutation, or cleanup violations.
-run_isolated_mounted_suite() {
-  isolated_revision=$1
-  isolated_tree=$2
-  isolated_source_checkout=$3
-  TEMP_SUITE_REPO="$TEMP_PARENT/suite-repo"
-  [ ! -e "$TEMP_SUITE_REPO" ] || return 2
-  git init -q "$TEMP_SUITE_REPO" || return 2
-  git -C "$TEMP_SUITE_REPO" config user.name ai-team-suite || return 2
-  git -C "$TEMP_SUITE_REPO" config user.email ai-team-suite@users.noreply.github.com || return 2
-  git -C "$TEMP_SUITE_REPO" -c protocol.file.allow=always \
-    fetch -q --no-tags "$isolated_source_checkout" HEAD || return 2
-  git -C "$TEMP_SUITE_REPO" -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD || return 2
-  git -C "$TEMP_SUITE_REPO" remote add origin "$ORIGIN_URL" || return 2
-  git -C "$TEMP_SUITE_REPO" remote set-url --push origin "$TEMP_PARENT/non-writable-origin" || return 2
-
-  isolated_before_head=$(git -C "$TEMP_SUITE_REPO" rev-parse HEAD 2>/dev/null || true)
-  isolated_before_tree=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD^{tree}" 2>/dev/null || true)
-  isolated_before_prefix=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
-  isolated_config_before=$(git -C "$TEMP_SUITE_REPO" config --local --list 2>/dev/null | LC_ALL=C sort)
-  isolated_refs_before=$(git -C "$TEMP_SUITE_REPO" for-each-ref --format='%(refname)%09%(objectname)' 2>/dev/null | LC_ALL=C sort)
-  isolated_hooks_before=$(find "$TEMP_SUITE_REPO/.git/hooks" -type f ! -name '*.sample' -print 2>/dev/null | LC_ALL=C sort)
-  [ "$isolated_before_head" = "$isolated_revision" ] && \
-    [ "$isolated_before_tree" = "$isolated_tree" ] && \
-    [ "$isolated_before_prefix" = "$UPSTREAM_TREE" ] && \
-    [ -z "$(git -C "$TEMP_SUITE_REPO" status --porcelain --untracked-files=all)" ] || \
-    return 2
-
-  run_mounted_suite "$TEMP_SUITE_REPO"
-  isolated_suite_status=$?
-  [ "$isolated_suite_status" -eq 0 ] || return 1
-
-  isolated_after_head=$(git -C "$TEMP_SUITE_REPO" rev-parse HEAD 2>/dev/null || true)
-  isolated_after_tree=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD^{tree}" 2>/dev/null || true)
-  isolated_after_prefix=$(git -C "$TEMP_SUITE_REPO" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
-  isolated_config_after=$(git -C "$TEMP_SUITE_REPO" config --local --list 2>/dev/null | LC_ALL=C sort)
-  isolated_refs_after=$(git -C "$TEMP_SUITE_REPO" for-each-ref --format='%(refname)%09%(objectname)' 2>/dev/null | LC_ALL=C sort)
-  isolated_hooks_after=$(find "$TEMP_SUITE_REPO/.git/hooks" -type f ! -name '*.sample' -print 2>/dev/null | LC_ALL=C sort)
-  [ "$isolated_after_head" = "$isolated_revision" ] && \
-    [ "$isolated_after_tree" = "$isolated_tree" ] && \
-    [ "$isolated_after_prefix" = "$UPSTREAM_TREE" ] && \
-    [ "$isolated_config_after" = "$isolated_config_before" ] && \
-    [ "$isolated_refs_after" = "$isolated_refs_before" ] && \
-    [ "$isolated_hooks_after" = "$isolated_hooks_before" ] && \
-    [ -z "$(git -C "$TEMP_SUITE_REPO" status --porcelain --untracked-files=all)" ] || \
-    return 2
-  remove_isolated_suite_repo || return 2
-  return 0
-}
 
 refresh_remote_update_sha() {
   remote_update_line=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
@@ -438,7 +354,7 @@ scan_active_lanes() {
 # GitHub does not always delete a merged PR's head branch. Remove that branch
 # only after its commit metadata, mounted tree, exact merged PR, and terminal
 # labels prove it is generated state already present on the default branch.
-# The caller must own the activation mutex.
+# The caller must own the refresh mutex.
 cleanup_proven_merged_refresh() {
   lingering_line=$(git ls-remote --heads "$ORIGIN_URL" "refs/heads/$UPDATE_BRANCH" 2>/dev/null) || \
     fail "cannot inspect origin/$UPDATE_BRANCH"
@@ -460,13 +376,13 @@ cleanup_proven_merged_refresh() {
     fail "cannot fetch lingering origin/$UPDATE_BRANCH"
   lingering_message=$(git show -s --format=%B "$lingering_sha" 2>/dev/null) || \
     fail "cannot inspect lingering origin/$UPDATE_BRANCH metadata"
-  lingering_managed=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Activation-Managed: / { value=$2 } END { print value }')
-  lingering_base=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Activation-Base: / { value=$2 } END { print value }')
+  lingering_managed=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Refresh-Managed: / { value=$2 } END { print value }')
+  lingering_base=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Refresh-Base: / { value=$2 } END { print value }')
   lingering_source=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Source: / { value=$2 } END { print value }')
   lingering_ref=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Ref: / { value=$2 } END { print value }')
   lingering_revision=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Revision: / { value=$2 } END { print value }')
-  lingering_claim=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Activation-Claim: / { value=$2 } END { print value }')
-  lingering_failed=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Activation-Failed: / { value=$2 } END { print value }')
+  lingering_claim=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Refresh-Claim: / { value=$2 } END { print value }')
+  lingering_failed=$(printf '%s\n' "$lingering_message" | awk -F': ' '/^AI-Team-Package-Refresh-Failed: / { value=$2 } END { print value }')
   # Pending/failed commits are not merge-cleanup candidates. Leave them for
   # the exact recovery state machine below; otherwise an interrupted updater
   # with no PR could never reach its owner-guided recovery path.
@@ -475,11 +391,11 @@ cleanup_proven_merged_refresh() {
   [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" != "$lingering_sha" ] || return 0
   [ "$lingering_managed" = "true" ] && [ -z "$lingering_claim" ] && \
     [ "$lingering_source" = "$SOURCE" ] && [ "$lingering_ref" = "$REF" ] || \
-    fail "closed origin/$UPDATE_BRANCH is not a completed activation-owned branch; refusing to delete it"
+    fail "closed origin/$UPDATE_BRANCH is not a completed refresh-owned branch; refusing to delete it"
   printf '%s\n' "$lingering_base" | grep -Eq '^[0-9a-fA-F]{40,64}$' && \
     git cat-file -e "$lingering_base^{commit}" 2>/dev/null && \
     git merge-base --is-ancestor "$lingering_base" "$lingering_sha" 2>/dev/null || \
-    fail "closed origin/$UPDATE_BRANCH has invalid activation ancestry; refusing to delete it"
+    fail "closed origin/$UPDATE_BRANCH has invalid refresh ancestry; refusing to delete it"
   git diff --quiet "$lingering_base" "$lingering_sha" -- . ":(exclude)$PREFIX" || \
     fail "closed origin/$UPDATE_BRANCH changes adopter-owned paths outside $PREFIX; refusing to delete or overwrite it"
   printf '%s\n' "$lingering_revision" | grep -Eq '^[0-9a-fA-F]{40,64}$' || \
@@ -561,7 +477,7 @@ EOF
       fail "origin/$UPDATE_BRANCH changed while its merged state was being finalized; refusing to delete it"
     fi
   fi
-  printf 'activation: finalized merged package refresh PR #%s and removed origin/%s\n' \
+  printf 'refresh: finalized merged package refresh PR #%s and removed origin/%s\n' \
     "$merged_number" "$UPDATE_BRANCH"
 }
 
@@ -605,25 +521,25 @@ terminalize_deleted_refreshes() {
     if [ "$pull_head_count" -ne 1 ] || [ "$pull_head" != "$deleted_head" ] || \
        ! git fetch -q --no-tags --no-write-fetch-head origin "$deleted_head" 2>/dev/null || \
        ! git cat-file -e "$deleted_head^{commit}" 2>/dev/null; then
-      printf 'activation: ignored merged PR #%s because its immutable head could not be fetched\n' \
+      printf 'refresh: ignored merged PR #%s because its immutable head could not be fetched\n' \
         "$deleted_number" >&2
       continue
     fi
 
     deleted_message=$(git show -s --format=%B "$deleted_head" 2>/dev/null || true)
-    deleted_managed=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Activation-Managed: / { value=$2 } END { print value }')
-    deleted_base=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Activation-Base: / { value=$2 } END { print value }')
+    deleted_managed=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Refresh-Managed: / { value=$2 } END { print value }')
+    deleted_base=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Refresh-Base: / { value=$2 } END { print value }')
     deleted_commit_source=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Source: / { value=$2 } END { print value }')
     deleted_commit_ref=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Ref: / { value=$2 } END { print value }')
     deleted_revision=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Revision: / { value=$2 } END { print value }')
-    deleted_claim=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Activation-Claim: / { value=$2 } END { print value }')
-    deleted_failed=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Activation-Failed: / { value=$2 } END { print value }')
+    deleted_claim=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Refresh-Claim: / { value=$2 } END { print value }')
+    deleted_failed=$(printf '%s\n' "$deleted_message" | awk -F': ' '/^AI-Team-Package-Refresh-Failed: / { value=$2 } END { print value }')
     expected_revision_line=$(printf -- '- Resolved revision: `%s`' "$deleted_revision")
     if [ "$deleted_managed" != "true" ] || [ -n "$deleted_claim" ] || \
        [ -n "$deleted_failed" ] || [ "$deleted_commit_source" != "$SOURCE" ] || \
        [ "$deleted_commit_ref" != "$REF" ] || \
        [ "$deleted_revision_line" != "$expected_revision_line" ]; then
-      printf 'activation: ignored merged PR #%s because its head is not exact generated refresh state\n' \
+      printf 'refresh: ignored merged PR #%s because its head is not exact generated refresh state\n' \
         "$deleted_number" >&2
       continue
     fi
@@ -632,25 +548,25 @@ terminalize_deleted_refreshes() {
        ! git cat-file -e "$deleted_base^{commit}" 2>/dev/null || \
        ! git merge-base --is-ancestor "$deleted_base" "$deleted_head" 2>/dev/null || \
        ! git diff --quiet "$deleted_base" "$deleted_head" -- . ":(exclude)$PREFIX"; then
-      printf 'activation: ignored merged PR #%s because its generated ancestry or path ownership was not exact\n' \
+      printf 'refresh: ignored merged PR #%s because its generated ancestry or path ownership was not exact\n' \
         "$deleted_number" >&2
       continue
     fi
     if ! git fetch -q --no-tags "$SOURCE" "$deleted_revision" 2>/dev/null; then
-      printf 'activation: ignored merged PR #%s because its recorded package revision could not be fetched\n' \
+      printf 'refresh: ignored merged PR #%s because its recorded package revision could not be fetched\n' \
         "$deleted_number" >&2
       continue
     fi
     deleted_package_tree=$(git rev-parse "$deleted_revision^{tree}" 2>/dev/null || true)
     deleted_head_tree=$(git rev-parse "$deleted_head:$PREFIX" 2>/dev/null || true)
     if [ -z "$deleted_package_tree" ] || [ "$deleted_head_tree" != "$deleted_package_tree" ]; then
-      printf 'activation: ignored merged PR #%s because its head package tree was not exact\n' \
+      printf 'refresh: ignored merged PR #%s because its head package tree was not exact\n' \
         "$deleted_number" >&2
       continue
     fi
     if ! git cat-file -e "$deleted_merge^{commit}" 2>/dev/null; then
       git fetch -q --no-tags origin "$deleted_merge" 2>/dev/null || {
-        printf 'activation: ignored merged PR #%s because its immutable merge commit could not be fetched\n' \
+        printf 'refresh: ignored merged PR #%s because its immutable merge commit could not be fetched\n' \
           "$deleted_number" >&2
         continue
       }
@@ -661,7 +577,7 @@ terminalize_deleted_refreshes() {
        ! git merge-base --is-ancestor "$deleted_base" "$deleted_merge" 2>/dev/null || \
        ! git merge-base --is-ancestor "$deleted_merge" "origin/$BASE" 2>/dev/null || \
        ! git diff --quiet "$deleted_merge_parent" "$deleted_merge" -- . ":(exclude)$PREFIX"; then
-      printf 'activation: ignored merged PR #%s because its merge is not an exact package-only ancestor of origin/%s\n' \
+      printf 'refresh: ignored merged PR #%s because its merge is not an exact package-only ancestor of origin/%s\n' \
         "$deleted_number" "$BASE" >&2
       continue
     fi
@@ -679,7 +595,7 @@ terminalize_deleted_refreshes() {
       fail "cannot read back auto-deleted package refresh PR #$deleted_number labels"
     [ "$deleted_labels" = "task:done" ] || \
       fail "auto-deleted package refresh PR #$deleted_number did not reach exact task:done state"
-    printf 'activation: terminalized auto-deleted merged package refresh PR #%s\n' "$deleted_number"
+    printf 'refresh: terminalized auto-deleted merged package refresh PR #%s\n' "$deleted_number"
   done 3<<EOF
 $AUTO_MERGED_ROWS
 EOF
@@ -701,9 +617,9 @@ finalize_current_refresh_if_needed() {
   base_sha=$(git rev-parse "origin/$BASE")
   [ "$local_sha" = "$base_sha" ] || \
     fail "the package is current, but $BASE must match origin/$BASE to finalize the refresh lane"
-  trap activation_cleanup EXIT
+  trap package_refresh_cleanup EXIT
   trap 'exit 130' HUP INT TERM
-  acquire_activation_mutex
+  acquire_claim_refresh_mutex
   mutex_status=$?
   [ "$mutex_status" -eq 0 ] || exit "$mutex_status"
   refresh_remote_update_sha || fail "cannot inspect origin/$UPDATE_BRANCH before finalization"
@@ -717,7 +633,7 @@ finalize_current_refresh_if_needed() {
   current_lingering_sha=$(printf '%s\n' "$current_lingering" | awk 'NF { print $1; exit }')
   [ -z "$current_lingering_sha" ] || \
     stop_for_pr "the package tree is current, but exact generated refresh $current_lingering_sha is still open or incomplete; after verifying no updater is running, resume it with AI_TEAM_RECOVER_REFRESH_SHA=$current_lingering_sha"
-  release_activation_mutex || fail "cannot release the activation mutex after finalizing the merged refresh"
+  release_claim_refresh_mutex || fail "cannot release the refresh mutex after finalizing the merged refresh"
 }
 
 mounted_tree=$(git rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
@@ -730,45 +646,15 @@ if [ -n "${AI_TEAM_RECOVER_REFRESH_SHA:-}" ]; then
     RECOVER_CURRENT_REFRESH=1
 fi
 if [ "$mounted_tree" = "$UPSTREAM_TREE" ] && [ "$RECOVER_CURRENT_REFRESH" -eq 0 ]; then
-  ORIENT="$ROOT/$PREFIX/scripts/orient.sh"
-  [ -x "$ORIENT" ] || fail "the current package matches $UPSTREAM_SHA but $ORIENT is not executable"
   git diff --quiet -- "$PREFIX" || \
-    fail "the mounted package has unstaged changes; refusing to execute it"
+    fail "the mounted package has unstaged changes"
   git diff --cached --quiet -- "$PREFIX" || \
-    fail "the mounted package has staged changes; refusing to execute it"
+    fail "the mounted package has staged changes"
   [ -z "$(git ls-files --others --exclude-standard -- "$PREFIX")" ] || \
-    fail "the mounted package has untracked files; refusing to execute it"
-
-  # Tests run in a standalone repository even when the package is current. A
-  # linked worktree would share hooks, config, refs, and objects with the caller
-  # and therefore would not be an isolation boundary.
-  current_suite_head=$(git rev-parse HEAD) || fail "cannot capture the current checkout before verification"
-  current_suite_tree=$(git rev-parse "HEAD^{tree}") || fail "cannot capture the current tree before verification"
-  TEMP_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/ai-team-current-verify.XXXXXX") || \
-    fail "cannot create an isolated current-package verification directory"
-  trap activation_cleanup EXIT
-  trap 'exit 130' HUP INT TERM
-  current_suite_status=0
-  run_isolated_mounted_suite "$current_suite_head" "$current_suite_tree" "$ROOT" || current_suite_status=$?
-  [ "$current_suite_status" -ne 1 ] || \
-    fail "current package matches $UPSTREAM_SHA but its mounted mechanism suite failed"
-  [ "$current_suite_status" -eq 0 ] || \
-    fail "current mounted mechanism suite modified its standalone repository; refusing onboarding"
-  rmdir "$TEMP_PARENT" >/dev/null 2>&1 || \
-    fail "cannot remove the current-package verification directory"
-  TEMP_PARENT=
-  trap - EXIT HUP INT TERM
-
+    fail "the mounted package has untracked files"
   finalize_current_refresh_if_needed
-  [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$current_suite_head" ] && \
-    [ "$(git rev-parse "HEAD:$PREFIX" 2>/dev/null || true)" = "$UPSTREAM_TREE" ] && \
-    git diff --quiet -- "$PREFIX" && \
-    git diff --cached --quiet -- "$PREFIX" && \
-    [ -z "$(git ls-files --others --exclude-standard -- "$PREFIX")" ] && \
-    [ -x "$ORIENT" ] || \
-    fail "the caller's mounted package changed after verification; refusing to execute it"
-  printf 'activation: package is current at %s (%s)\n' "$UPSTREAM_SHA" "$REF"
-  exec "$ORIENT"
+  printf 'refresh: package is already current at %s (%s)\n' "$UPSTREAM_SHA" "$REF"
+  exit 0
 fi
 
 # The first opt-in/migration can still have a pre-mutex claim.sh mounted. No
@@ -776,11 +662,11 @@ fi
 # it, so the repository owner must stop claim clients for this one boundary.
 # Once this refresh lands, both scripts share the CAS mutex on every run.
 mounted_claim_protocol=$(git show "HEAD:$PREFIX/scripts/claim.sh" 2>/dev/null | \
-  awk -F= '/^AI_TEAM_ACTIVATION_MUTEX_PROTOCOL=1$/ { print $2; exit }' || true)
+  awk -F= '/^AI_TEAM_CLAIM_REFRESH_MUTEX_PROTOCOL=1$/ { print $2; exit }' || true)
 if [ "$mounted_claim_protocol" != "1" ]; then
-  [ "${AI_TEAM_EXCLUSIVE_FIRST_REFRESH:-}" = "1" ] || \
-    fail "first activation/migration is not mutex-compatible yet; stop every claim client, then rerun this owner-controlled bootstrap with AI_TEAM_EXCLUSIVE_FIRST_REFRESH=1"
-  printf 'activation: owner acknowledged an exclusive first refresh; legacy claim clients must remain stopped until its PR merges\n'
+  [ "${AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION:-}" = "1" ] || \
+    fail "first refresh/migration is not mutex-compatible yet; stop every claim client, then rerun this owner-controlled bootstrap with AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION=1"
+  printf 'refresh: owner acknowledged an exclusive first refresh; legacy claim clients must remain stopped until its PR merges\n'
 fi
 
 # From this point onward an update is required. Refuse every caller state in
@@ -804,9 +690,9 @@ base_sha=$(git rev-parse "origin/$BASE")
 [ "$local_sha" = "$base_sha" ] || \
   fail "$BASE must exactly match origin/$BASE before package refresh"
 
-trap activation_cleanup EXIT
+trap package_refresh_cleanup EXIT
 trap 'exit 130' HUP INT TERM
-acquire_activation_mutex
+acquire_claim_refresh_mutex
 mutex_status=$?
 [ "$mutex_status" -eq 0 ] || exit "$mutex_status"
 refresh_remote_update_sha || fail "cannot inspect origin/$UPDATE_BRANCH"
@@ -852,16 +738,16 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   git fetch -q --no-tags origin "$UPDATE_BRANCH" || fail "cannot fetch origin/$UPDATE_BRANCH"
   remote_message=$(git show -s --format=%B "$REMOTE_UPDATE_SHA" 2>/dev/null) || \
     fail "cannot inspect origin/$UPDATE_BRANCH metadata"
-  remote_managed=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Activation-Managed: / { value=$2 } END { print value }')
-  remote_base=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Activation-Base: / { value=$2 } END { print value }')
+  remote_managed=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Refresh-Managed: / { value=$2 } END { print value }')
+  remote_base=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Refresh-Base: / { value=$2 } END { print value }')
   remote_source=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Source: / { value=$2 } END { print value }')
   remote_ref=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Ref: / { value=$2 } END { print value }')
   remote_revision=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Revision: / { value=$2 } END { print value }')
-  remote_claim=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Activation-Claim: / { value=$2 } END { print value }')
-  remote_failed=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Activation-Failed: / { value=$2 } END { print value }')
+  remote_claim=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Refresh-Claim: / { value=$2 } END { print value }')
+  remote_failed=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Refresh-Failed: / { value=$2 } END { print value }')
   [ "$remote_managed" = "true" ] && [ "$remote_source" = "$SOURCE" ] && \
     [ "$remote_ref" = "$REF" ] || \
-    fail "origin/$UPDATE_BRANCH is not an activation-owned branch for the approved source/ref; refusing to overwrite it"
+    fail "origin/$UPDATE_BRANCH is not an refresh-owned branch for the approved source/ref; refusing to overwrite it"
   printf '%s\n' "$remote_revision" | grep -Eq '^[0-9a-fA-F]{40,64}$' || \
     fail "origin/$UPDATE_BRANCH has an invalid generated package revision"
   if [ -n "$remote_claim" ]; then
@@ -875,7 +761,7 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   printf '%s\n' "$remote_base" | grep -Eq '^[0-9a-fA-F]{40,64}$' && \
     git cat-file -e "$remote_base^{commit}" 2>/dev/null && \
     git merge-base --is-ancestor "$remote_base" "$REMOTE_UPDATE_SHA" 2>/dev/null || \
-    fail "origin/$UPDATE_BRANCH does not have valid activation ancestry; refusing to overwrite it"
+    fail "origin/$UPDATE_BRANCH does not have valid refresh ancestry; refusing to overwrite it"
   git diff --quiet "$remote_base" "$REMOTE_UPDATE_SHA" -- . ":(exclude)$PREFIX" || \
     fail "origin/$UPDATE_BRANCH changes adopter-owned paths outside $PREFIX; refusing to overwrite it"
 
@@ -898,21 +784,21 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
 
   if [ -z "$PR_NUMBER" ]; then
     if [ "$remote_failed" = "true" ]; then
-      printf 'activation: resuming recoverable failed refresh state at %s\n' "$REMOTE_UPDATE_SHA" >&2
+      printf 'refresh: resuming recoverable failed refresh state at %s\n' "$REMOTE_UPDATE_SHA" >&2
     elif [ -n "$remote_claim" ] && \
          [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-      printf 'activation: owner selected exact orphan refresh claim %s (recorded revision %s) for recovery to %s\n' \
+      printf 'refresh: owner selected exact orphan refresh claim %s (recorded revision %s) for recovery to %s\n' \
         "$REMOTE_UPDATE_SHA" "$remote_revision" "$UPSTREAM_SHA" >&2
     elif [ -n "$remote_claim" ]; then
       stop_for_pr "origin/$UPDATE_BRANCH is claimed for recorded package revision $remote_revision but has no PR; after verifying no updater is running, recover it to $UPSTREAM_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
     elif [ -z "$remote_claim" ] && \
          [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-      printf 'activation: owner selected exact verified refresh %s without an open PR for recovery\n' \
+      printf 'refresh: owner selected exact verified refresh %s without an open PR for recovery\n' \
         "$REMOTE_UPDATE_SHA" >&2
     elif [ -z "$remote_claim" ]; then
       stop_for_pr "origin/$UPDATE_BRANCH is verified generated state but has no open or matching merged PR; after verifying no updater is running, recover it with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
     else
-      fail "activation-owned origin/$UPDATE_BRANCH has no open refresh PR; resolve or delete that exact generated branch before retrying"
+      fail "refresh-owned origin/$UPDATE_BRANCH has no open refresh PR; resolve or delete that exact generated branch before retrying"
     fi
   fi
   if [ -n "$PR_NUMBER" ]; then
@@ -930,7 +816,7 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   # original updater has stopped.
   if [ -n "$remote_claim" ]; then
     if [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-      printf 'activation: owner selected exact pending refresh claim %s (recorded revision %s) for recovery to %s\n' \
+      printf 'refresh: owner selected exact pending refresh claim %s (recorded revision %s) for recovery to %s\n' \
         "$REMOTE_UPDATE_SHA" "$remote_revision" "$UPSTREAM_SHA" >&2
     else
       if [ -n "$PR_NUMBER" ]; then
@@ -943,7 +829,7 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   if [ -z "$remote_claim" ] && [ "$remote_failed" != "true" ]; then
     if [ "$update_tree" = "$UPSTREAM_TREE" ]; then
       if [ "${AI_TEAM_RECOVER_REFRESH_SHA:-}" = "$REMOTE_UPDATE_SHA" ]; then
-        printf 'activation: owner selected exact verified refresh %s for re-verification/finalization\n' "$REMOTE_UPDATE_SHA" >&2
+        printf 'refresh: owner selected exact verified refresh %s for re-verification/finalization\n' "$REMOTE_UPDATE_SHA" >&2
       elif [ -z "$PR_NUMBER" ]; then
         stop_for_pr "origin/$UPDATE_BRANCH contains the current package but has no open PR; after verifying no updater is running, recover it with AI_TEAM_RECOVER_REFRESH_SHA=$REMOTE_UPDATE_SHA"
       elif [ "$PR_DRAFT" = "true" ]; then
@@ -991,16 +877,16 @@ EOF
       fail "recoverable failed refresh PR #$PR_NUMBER could not be proven draft"
     fi
     if [ "$remote_revision" != "$UPSTREAM_SHA" ]; then
-      printf 'activation: superseding exact generated failure marker %s from revision %s with %s\n' \
+      printf 'refresh: superseding exact generated failure marker %s from revision %s with %s\n' \
         "$REMOTE_UPDATE_SHA" "$remote_revision" "$UPSTREAM_SHA" >&2
     else
-      printf 'activation: resuming exact generated failure marker %s\n' "$REMOTE_UPDATE_SHA" >&2
+      printf 'refresh: resuming exact generated failure marker %s\n' "$REMOTE_UPDATE_SHA" >&2
     fi
   fi
 fi
 
 gh label create "agent:$BOOTSTRAP_AGENT" --repo "$REPO" --force \
-  --color 5319e7 --description "AI Team activation package updater" >/dev/null 2>&1 || \
+  --color 5319e7 --description "AI Team refresh package updater" >/dev/null 2>&1 || \
   fail "cannot create the package bootstrap identity label"
 gh label create task:active --repo "$REPO" --force \
   --color BFD4F2 --description "Claimed and in progress" >/dev/null 2>&1 || \
@@ -1032,7 +918,7 @@ write_pending_body() {
 
 AI-Team-Lane-Issue: none
 
-Activation detected a newer approved AI Team package and prepared this dedicated refresh lane.
+The explicit package refresh command detected a newer approved AI Team package and prepared this dedicated refresh lane.
 
 - Source: \`$SOURCE\`
 - Ref: \`$REF\`
@@ -1040,7 +926,7 @@ Activation detected a newer approved AI Team package and prepared this dedicated
 - Mounted prefix: \`$PREFIX\`
 - Verification: pending in the isolated refresh worktree. This draft is not ready to merge.
 
-Normal team onboarding and claims remain paused until this PR merges.
+New claims remain paused until this PR merges. Orientation and read-only work remain available.
 
 **Adopter impact:** the mounted AI Team package advances to the exact revision above; no adopter-owned task files are changed.
 EOF
@@ -1052,15 +938,15 @@ write_verified_body() {
 
 AI-Team-Lane-Issue: none
 
-Activation detected a newer approved AI Team package and prepared this dedicated refresh lane.
+The explicit package refresh command detected a newer approved AI Team package and prepared this dedicated refresh lane.
 
 - Source: \`$SOURCE\`
 - Ref: \`$REF\`
 - Resolved revision: \`$UPSTREAM_SHA\`
 - Mounted prefix: \`$PREFIX\`
-- Verification: the mounted tree exactly matches the resolved revision and its full mechanism suite passed in the isolated refresh worktree.
+- Verification: the mounted tree exactly matches the resolved immutable revision. The refresh PR's required CI qualifies the mechanism suite.
 
-Normal team onboarding and claims remain paused until this PR merges.
+New claims remain paused until this PR merges. Orientation and read-only work remain available.
 
 **Adopter impact:** the mounted AI Team package advances to the exact revision above; no adopter-owned task files are changed.
 EOF
@@ -1068,8 +954,8 @@ EOF
 
 metadata_message() {
   printf '%s\n\n' "chore(ai-team): refresh package to ${UPSTREAM_SHA:0:12}"
-  printf 'AI-Team-Activation-Managed: true\n'
-  printf 'AI-Team-Activation-Base: %s\n' "$base_sha"
+  printf 'AI-Team-Package-Refresh-Managed: true\n'
+  printf 'AI-Team-Package-Refresh-Base: %s\n' "$base_sha"
   printf 'AI-Team-Package-Source: %s\n' "$SOURCE"
   printf 'AI-Team-Package-Ref: %s\n' "$REF"
   printf 'AI-Team-Package-Revision: %s\n' "$UPSTREAM_SHA"
@@ -1081,7 +967,7 @@ printf '%s\n' "$claim_nonce" | grep -Eq '^[0-9a-fA-F]{32}$' || \
   fail "cannot generate a valid package refresh claim"
 claim_message() {
   metadata_message
-  printf 'AI-Team-Activation-Claim: %s\n' "$claim_nonce"
+  printf 'AI-Team-Package-Refresh-Claim: %s\n' "$claim_nonce"
 }
 
 [ -z "$PR_NUMBER" ] || [ "$PR_DRAFT" = "true" ] || \
@@ -1124,7 +1010,7 @@ if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null push --quiet \
     fail "claim push failed and origin/$UPDATE_BRANCH cannot be inspected"
   observed=$(printf '%s\n' "$observed_lines" | awk 'NF { print $1; exit }')
   if [ "$observed" = "$claim_sha" ]; then
-    printf 'activation: claim push response was uncertain, but origin/%s contains this activation claim\n' "$UPDATE_BRANCH" >&2
+    printf 'refresh: claim push response was uncertain, but origin/%s contains this refresh claim\n' "$UPDATE_BRANCH" >&2
   elif [ "$observed" != "$REMOTE_UPDATE_SHA" ]; then
     stop_for_pr "another updater changed origin/$UPDATE_BRANCH to ${observed:-a deleted ref}"
   else
@@ -1175,7 +1061,7 @@ EOF
   [ "$pending_issueless" = "true" ] || \
   fail "refresh PR #$PR_NUMBER did not reach exact canonical draft/task:active state"
 
-# The fixed remote branch is now the activation lock. Scan again so a claim
+# The fixed remote branch is now the refresh lock. Scan again so a claim
 # that became visible between the first scan and this atomic lock cannot be
 # updated underneath.
 active_lanes=$(scan_active_lanes) || \
@@ -1186,8 +1072,8 @@ active_lanes=$(scan_active_lanes) || \
 # The persistent refresh branch and its draft PR now make the update visible
 # to old and new claim clients. Release the short common mutex before the
 # isolated subtree build and test run.
-release_activation_mutex || \
-  fail "the refresh lane is visible, but its activation mutex could not be released"
+release_claim_refresh_mutex || \
+  fail "the refresh lane is visible, but its refresh mutex could not be released"
 
 # Always reconstruct from the exact current default branch. An existing refresh
 # PR is generated state, so replacing its obsolete tree under a lease cannot
@@ -1214,21 +1100,6 @@ BUILD_TREE=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD^{tree}" 2>/dev/null || true
   git -C "$TEMP_WORKTREE" diff --quiet "$base_sha" "$BUILD_SHA" -- . ":(exclude)$PREFIX" || \
   fail "isolated subtree build did not produce exact clean package-only generated state"
 
-isolated_suite_status=0
-run_isolated_mounted_suite "$BUILD_SHA" "$BUILD_TREE" "$TEMP_WORKTREE" || isolated_suite_status=$?
-[ "$isolated_suite_status" -ne 1 ] || \
-  fail "mounted mechanism tests failed; origin/$UPDATE_BRANCH remains draft and the caller checkout is unchanged"
-[ "$isolated_suite_status" -eq 0 ] || \
-  fail "mounted mechanism suite modified its standalone repository; refusing publication"
-post_suite_head=$(git -C "$TEMP_WORKTREE" rev-parse HEAD 2>/dev/null || true)
-post_suite_tree=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD^{tree}" 2>/dev/null || true)
-post_suite_prefix=$(git -C "$TEMP_WORKTREE" rev-parse "HEAD:$PREFIX" 2>/dev/null || true)
-  [ "$post_suite_head" = "$BUILD_SHA" ] && [ "$post_suite_tree" = "$BUILD_TREE" ] && \
-  [ "$post_suite_prefix" = "$UPSTREAM_TREE" ] && \
-  [ -z "$(git -C "$TEMP_WORKTREE" status --porcelain --untracked-files=all)" ] && \
-  git -C "$TEMP_WORKTREE" diff --quiet "$base_sha" "$post_suite_head" -- . ":(exclude)$PREFIX" || \
-  fail "mounted mechanism suite modified the isolated refresh result; refusing publication"
-
 expected_metadata=$(metadata_message)
 printf '%s\n' "$expected_metadata" | git -C "$TEMP_WORKTREE" \
   -c core.hooksPath=/dev/null -c commit.gpgSign=false \
@@ -1252,7 +1123,7 @@ if ! git -C "$TEMP_WORKTREE" -c core.hooksPath=/dev/null push --quiet \
     fail "verified-result push failed and origin/$UPDATE_BRANCH cannot be inspected"
   observed=$(printf '%s\n' "$observed_lines" | awk 'NF { print $1; exit }')
   if [ "$observed" = "$FINAL_SHA" ]; then
-    printf 'activation: result push response was uncertain, but origin/%s contains this verified result\n' "$UPDATE_BRANCH" >&2
+    printf 'refresh: result push response was uncertain, but origin/%s contains this verified result\n' "$UPDATE_BRANCH" >&2
   elif [ "$observed" != "$lease_sha" ]; then
     stop_for_pr "another updater advanced origin/$UPDATE_BRANCH; this isolated result was not published"
   else
@@ -1326,4 +1197,4 @@ EOF
   [ "$final_pr_issueless" = "true" ] || \
   fail "PR #$PR_NUMBER did not reach the exact package-bootstrap/task:review state; after correcting GitHub access, recover exact refresh $FINAL_SHA with AI_TEAM_RECOVER_REFRESH_SHA=$FINAL_SHA"
 
-stop_for_pr "package revision $UPSTREAM_SHA passed the mounted suite in PR #$PR_NUMBER at $PR_URL"
+stop_for_pr "package revision $UPSTREAM_SHA is ready for review and CI in PR #$PR_NUMBER at $PR_URL"

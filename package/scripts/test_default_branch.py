@@ -53,6 +53,7 @@ class DefaultBranchResolutionTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
+                  "issue list") ;;
                   "issue list")
                     # Empty means "no halt". [] reads as an active halt and
                     # orient.sh exits before the section under test.
@@ -256,6 +257,7 @@ class NestedRepositoryLanePlacementTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
+                  "issue list") ;;
                   "issue view")
                     # claim.sh reads the labels back after writing them (#15);
                     # this fixture models a claim whose labels landed.
