@@ -747,7 +747,7 @@ if [ -n "$REMOTE_UPDATE_SHA" ]; then
   remote_failed=$(printf '%s\n' "$remote_message" | awk -F': ' '/^AI-Team-Package-Refresh-Failed: / { value=$2 } END { print value }')
   [ "$remote_managed" = "true" ] && [ "$remote_source" = "$SOURCE" ] && \
     [ "$remote_ref" = "$REF" ] || \
-    fail "origin/$UPDATE_BRANCH is not an refresh-owned branch for the approved source/ref; refusing to overwrite it"
+    fail "origin/$UPDATE_BRANCH is not a refresh-owned branch for the approved source/ref; refusing to overwrite it"
   printf '%s\n' "$remote_revision" | grep -Eq '^[0-9a-fA-F]{40,64}$' || \
     fail "origin/$UPDATE_BRANCH has an invalid generated package revision"
   if [ -n "$remote_claim" ]; then
