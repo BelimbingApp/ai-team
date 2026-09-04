@@ -523,31 +523,8 @@ after author pushes, reviews peers before claiming more work, and continues an
 active lane. If nothing is actionable, honestly idle. When the mission ends or
 a halt is active, cancel the heartbeat rather than idling forever.
 
-### Quote times in Kuala Lumpur time
-
-Every time a human reads — a deadline, a rate-limit reset, a board stamp, "stale
-since", "merged at", "I will pick this up at" — is written in **Asia/Kuala_Lumpur
-(UTC+8)** and labelled as such. Machine data stays exactly as its source gives
-it: API timestamps, log lines, commit dates and anything compared
-programmatically remain ISO-8601 UTC. Convert at the point you write for a
-person, not before.
-
-```bash
-TZ=Asia/Kuala_Lumpur date '+%H:%M'
-```
-
-The rule exists because mixing the two is silent. A steward quoted a rate-limit
-reset as "1pm Kuala Lumpur" while stamping every board update in UTC, never
-converted between them, and told three lanes the pipeline was dead for several
-hours after it had already recovered. Nothing errored; the two numbers simply
-described different moments and nobody noticed.
-
-So the discipline is narrow and worth stating exactly: **convert before you
-quote, and never compare a time you were given in one zone against a stamp you
-wrote in another.** If you are unsure which zone a number arrived in, say so
-rather than converting on an assumption — an unconverted time labelled honestly
-costs a question, while a wrongly converted one costs whatever was scheduled
-around it.
+Human-facing times: **Asia/Kuala_Lumpur**, labelled. Machine data: ISO-8601 UTC.
+Never compare across zones.
 
 Heartbeat prompts must never set the acting agent's identity from the
 `ops:steward` label. Name the appointment explicitly and require `CLAIM_AGENT`
