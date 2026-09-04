@@ -932,14 +932,10 @@ class ActivationRefreshTest(unittest.TestCase):
                     race_runner=f"runner-{index}",
                     fixed_commit_time=True,
                     mutex_wait_seconds=120,
-                    # The file barrier aligns the CAS race but not the loser's
-                    # later polls against the winner's finalization: undelayed,
-                    # the loser can observe the refresh PR mid-dressing and
-                    # refuse (exit 1) instead of stopping durably (exit 3).
-                    # Holding the winner briefly after its successful push keeps
-                    # real overlap while making the observed outcome
-                    # deterministic. (#81)
-                    mutex_winner_delay=5,
+                    # #86: mid-finalization tip/PR-head skew must still yield
+                    # durable exit 3 (activate.sh exempts ownership-proven
+                    # refresh PRs without requiring OID match). Do not reintroduce
+                    # mutex_winner_delay here — that only hid the race (#82).
                     exclusive_first_refresh=True,
                 )
                 for index, checkout in enumerate((self.checkout, second_checkout), start=1)
