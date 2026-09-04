@@ -113,7 +113,8 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                       previous="$argument"
                     done
                     [ "$scoped_repo" = 'example/origin' ] || exit 18
-                    printf '  HALT #17 — ORIGIN ROUTING PROBE\\n'
+                    if [[ "$*" == *"--label ops:halt"* ]] && [ "${ORIGIN_ROUTING_SCRIPT:-}" = "claim.sh" ]; then printf ''
+                    else printf '  ORIGIN ROUTING PROBE\\n'; fi
                     ;;
                   "pr list") printf '' ;;
                   "api"*)
@@ -162,6 +163,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
         arguments, extra_env = SCRIPTS[name]
         env = self.env.copy()
         env.update(extra_env)
+        env["ORIGIN_ROUTING_SCRIPT"] = name
         result = run_with_bash_path(
             ["bash", bash_path(scripts_dir / name), *arguments],
             stub_directory=self.bin,
@@ -191,7 +193,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                 "show-ref",
                 "--verify",
                 "--quiet",
-                "refs/heads/ai-team/activation-mutex",
+                "refs/heads/ai-team/claim-refresh-mutex",
             ],
             capture_output=True,
             check=False,

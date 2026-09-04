@@ -53,6 +53,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
+                  "issue list") ;;
                   "issue view")
                     # claim.sh reads the labels back after writing them and
                     # judges the lookup by its exit status, so this has to
