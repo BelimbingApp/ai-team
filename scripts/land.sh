@@ -124,13 +124,24 @@ if [[ "$state" == "OPEN" ]]; then
   classic_linear=false
   if ! branch_protection=$(gh api "repos/$repo/branches/$encoded_base/protection" 2>&1); then
     # GitHub uses the canonical structured 404 below for a genuinely
-    # unprotected branch. A generic 404 may instead conceal an inaccessible
-    # resource, so an HTTP status substring alone is not proof of no policy.
-    if ! jq -eRs '
-      split("\n")
-      | map(select(length > 0) | fromjson?)
-      | any(.[]; .message == "Branch not protected" and ((.status | tostring) == "404"))
-    ' <<<"$branch_protection" >/dev/null; then
+    # unprotected branch. gh currently concatenates its diagnostic directly
+    # after the JSON body because that body has no newline. Accept that exact
+    # production shape or the exact JSON body alone. A generic/concealed 404,
+    # extra JSON, malformed suffix, or contradictory diagnostic is not proof
+    # that no policy exists and therefore fails closed.
+    if ! jq -en --arg response "$branch_protection" '
+      def canonical_body:
+        (try fromjson catch null) as $body
+        | ($body | type) == "object"
+          and ($body | keys) == ["documentation_url", "message", "status"]
+          and $body.message == "Branch not protected"
+          and $body.documentation_url == "https://docs.github.com/rest/branches/branch-protection#get-branch-protection"
+          and $body.status == "404";
+      "gh: Branch not protected (HTTP 404)" as $diagnostic
+      | ($response | canonical_body)
+        or (($response | endswith($diagnostic))
+          and ($response[0:-($diagnostic | length)] | canonical_body))
+    ' >/dev/null; then
       echo "cannot read classic protection for $repo branch '$base_branch'; refusing to guess merge policy" >&2
       printf '%s\n' "$branch_protection" >&2
       exit 2
