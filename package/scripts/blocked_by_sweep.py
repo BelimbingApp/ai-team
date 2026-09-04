@@ -22,6 +22,7 @@ MARKER_INFIX = "-blocked-by-sweep:"
 READY_LABEL = "task:ready"
 REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
 REFERENCE_PATTERN = rf"(?:{REPOSITORY_PATTERN})?#[0-9]+"
+BLOCKED_BY_PREFIX_RE = re.compile(r"(?i)(?<![\w-])Blocked-By:")
 BLOCKED_BY_RE = re.compile(
     rf"(?i)(?<![\w-])Blocked-By:[ \t]*({REFERENCE_PATTERN}(?:[ \t]*,[ \t]*{REFERENCE_PATTERN})*)(?=[ \t]*(?:[.;]|$))"
 )
@@ -178,7 +179,14 @@ def parse_blocker_references(body: str | None) -> tuple[BlockerReference, ...]:
     references: list[BlockerReference] = []
 
     for line in safe_lines(body or ""):
-        for match in BLOCKED_BY_RE.finditer(line):
+        prefixes = tuple(BLOCKED_BY_PREFIX_RE.finditer(line))
+        declarations = tuple(BLOCKED_BY_RE.finditer(line))
+        if tuple(match.start() for match in prefixes) != tuple(
+            match.start() for match in declarations
+        ):
+            return ()
+
+        for match in declarations:
             for raw_reference in match.group(1).split(","):
                 parsed = REFERENCE_RE.fullmatch(raw_reference.strip())
                 if parsed is None:

@@ -64,6 +64,12 @@ class BlockedBySweepTest(unittest.TestCase):
         )
         self.assertEqual(parse_blocker_references("Blocked-By: owner/repo/extra#2"), ())
 
+    def test_one_malformed_declaration_invalidates_other_valid_declarations(self):
+        body = "Blocked-By: #12.\nBlocked-By: owner/repo#oops."
+
+        self.assertEqual(parse_blocker_references(body), ())
+        self.assertEqual(parse_blockers(body), ())
+
     def test_derives_the_marker_from_the_repository_name(self):
         # #2: no adopter ships another repository's name in its comments.
         self.assertEqual(
@@ -262,6 +268,42 @@ class BlockedBySweepTest(unittest.TestCase):
                 return None
 
         self.assertEqual(sweep(FakeAPI()), 0)
+
+    def test_malformed_second_declaration_causes_no_comment_or_label_write(self):
+        class FakeAPI:
+            repository = "Example/people"
+
+            def __init__(self):
+                self.comments_seen = []
+                self.labels_written = None
+                self.state_reads = []
+
+            def open_blocked_issues(self):
+                return [{
+                    "number": 13,
+                    "body": "Blocked-By: #12.\nBlocked-By: owner/repo#oops.",
+                    "labels": [{"name": BLOCKED_LABEL}],
+                }]
+
+            def issue_state(self, number):
+                self.state_reads.append(number)
+                return "closed"
+
+            def comments(self, number):
+                return self.comments_seen
+
+            def add_comment(self, number, body):
+                self.comments_seen.append(body)
+
+            def replace_labels(self, number, labels):
+                self.labels_written = labels
+
+        api = FakeAPI()
+
+        self.assertEqual(sweep(api), 0)
+        self.assertEqual(api.state_reads, [])
+        self.assertEqual(api.comments_seen, [])
+        self.assertIsNone(api.labels_written)
 
     def test_all_qualified_blockers_closed_unblocks_with_unambiguous_marker(self):
         class FakeAPI:
