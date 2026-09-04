@@ -63,7 +63,15 @@ class ReadmeOnboardingTest(unittest.TestCase):
         )
         self.assertIn("Joining a session never refreshes", document)
         self.assertIn("`ai-team/claim-refresh-mutex` compare-and-swap lease", document)
-        self.assertIn("remove the adopter-owned\n`.ai-team/activate.sh`", document)
+        self.assertIn("owner-reviewed-full-package-mount-sha", document)
+        self.assertIn('git fetch --no-tags "$package_source" "$package_revision"', document)
+        self.assertIn(
+            'git show "$package_revision:templates/package-refresh.sh"', document
+        )
+        self.assertIn(
+            'git show "$package_revision:templates/package-refresh.conf"', document
+        )
+        self.assertIn("git rm .ai-team/activate.sh", document)
         self.assertIn("AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION=1", document)
         self.assertIn("Keep legacy clients stopped", document)
         self.assertIn("AI_TEAM_RECOVER_MUTEX_SHA=<exact-sha>", document)
