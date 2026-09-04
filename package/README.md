@@ -114,11 +114,24 @@ permission is a hard failure.
 
 For the one migration from `activate.sh`, first resume and finish, land, or
 truthfully close every existing claimed lane with the legacy client; no issue
-or PR metadata needs rewriting. Then stop legacy processes and verify
-that no active/review issue or open PR remains, remove the adopter-owned
-`.ai-team/activate.sh`, install the two files above from one exact reviewed
-`package-mount` revision, and commit that adopter-owned change. With the
-exclusive window still in force, run:
+or PR metadata needs rewriting. Then stop legacy processes and verify that no
+active/review issue or open PR remains. A legacy mount does not contain the new
+template, so fetch one exact owner-reviewed `package-mount` revision and
+extract both files from that immutable object before removing activation:
+
+```bash
+package_source=https://github.com/BelimbingApp/ai-team.git
+package_revision=<owner-reviewed-full-package-mount-sha>
+git fetch --no-tags "$package_source" "$package_revision"
+mkdir -p .ai-team
+git show "$package_revision:templates/package-refresh.sh" > .ai-team/package-refresh.sh
+git show "$package_revision:templates/package-refresh.conf" > .ai-team/package-refresh.conf
+chmod +x .ai-team/package-refresh.sh
+git rm .ai-team/activate.sh
+```
+
+Review the extracted policy values, commit this adopter-owned migration, and
+keep the exclusive window in force while running:
 
 ```bash
 AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION=1 .ai-team/package-refresh.sh

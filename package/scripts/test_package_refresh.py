@@ -1118,6 +1118,66 @@ class PackageRefreshTest(unittest.TestCase):
             release.result()
         return first, raced, original_head, second_head
 
+    def test_legacy_adopter_bootstraps_refresh_from_an_immutable_revision(self):
+        templates = self.source / "templates"
+        templates.mkdir()
+        (templates / "package-refresh.sh").write_bytes(TEMPLATE.read_bytes())
+        (templates / "package-refresh.sh").chmod(0o755)
+        (templates / "package-refresh.conf").write_text(
+            f"source={bash_path(self.source_bare)}\nref=package-mount\n",
+            encoding="utf-8",
+        )
+        self.git("add", "templates", cwd=self.source)
+        self.git("commit", "-qm", "publish explicit refresh command", cwd=self.source)
+        self.git("push", "-q", "origin", "package-mount", cwd=self.source)
+        self.package_sha = self.git_output("rev-parse", "HEAD", cwd=self.source)
+        self.package_tree = self.git_output("rev-parse", "HEAD^{tree}", cwd=self.source)
+
+        self.refresh.unlink()
+        (self.checkout / ".ai-team" / "package-refresh.conf").unlink()
+        legacy_activation = self.checkout / ".ai-team" / "activate.sh"
+        legacy_activation.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+        legacy_activation.chmod(0o755)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "model legacy activation entry point")
+        self.git("push", "-q", "origin", "main")
+        self.assertFalse(self.refresh.exists())
+
+        self.git("fetch", "--no-tags", str(self.source_bare), self.package_sha)
+        self.refresh.write_bytes(
+            subprocess.run(
+                ["git", "show", f"{self.package_sha}:templates/package-refresh.sh"],
+                cwd=self.checkout,
+                env=self.git_env(),
+                capture_output=True,
+                check=True,
+            ).stdout
+        )
+        self.refresh.chmod(0o755)
+        config = self.checkout / ".ai-team" / "package-refresh.conf"
+        config.write_bytes(
+            subprocess.run(
+                ["git", "show", f"{self.package_sha}:templates/package-refresh.conf"],
+                cwd=self.checkout,
+                env=self.git_env(),
+                capture_output=True,
+                check=True,
+            ).stdout
+        )
+        legacy_activation.unlink()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "replace legacy activation with explicit refresh")
+        self.git("push", "-q", "origin", "main")
+
+        result = self.run_refresh(exclusive_first_refresh=True)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue((self.state / "ready").is_file())
+        self.assertEqual(
+            self.origin_output("rev-parse", f"{self.remote_update_sha()}:docs/ai-team"),
+            self.package_tree,
+        )
+
     def test_concurrent_initial_refresh_is_idempotent_and_onboards_only_after_merge(self):
         first, raced, original_head, second_head = (
             self._run_concurrent_initial_refresh_with_skew_hold()
