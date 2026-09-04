@@ -87,7 +87,12 @@ class LandHarness(unittest.TestCase):
                     ;;
                   "api repos/example/canonical/branches/main/protection")
                     if [ "${LAND_TEST_PROTECTION_STATUS:-404}" != "0" ]; then
-                      printf 'gh: branch protection unavailable (HTTP %s)\\n' "${LAND_TEST_PROTECTION_STATUS:-404}" >&2
+                      if [ -n "${LAND_TEST_PROTECTION_FAILURE:-}" ]; then
+                        printf '%s\\n' "$LAND_TEST_PROTECTION_FAILURE" >&2
+                      else
+                        printf '{"message":"Branch not protected","status":"404"}\\n' >&2
+                        printf 'gh: Branch not protected (HTTP 404)\\n' >&2
+                      fi
                       exit 1
                     fi
                     printf '%s\\n' "$LAND_TEST_PROTECTION"
@@ -161,6 +166,7 @@ class LandHarness(unittest.TestCase):
         classic_linear: bool | None = None,
         protection: dict | None = None,
         protection_status: str | None = None,
+        protection_failure: str = "",
         rules_pages: list[list[dict]] | None = None,
         rules_status: str = "0",
         undeclared_lane: bool = False,
@@ -195,6 +201,7 @@ class LandHarness(unittest.TestCase):
                     "required_linear_history": {"enabled": classic_linear}
                 }
             ),
+            LAND_TEST_PROTECTION_FAILURE=protection_failure,
             LAND_TEST_RULES_PAGES=json.dumps(
                 rules_pages if rules_pages is not None else [[]]
             ),
@@ -520,6 +527,19 @@ class MergeMethodTest(LandHarness):
         self.assertIn("-f merge_method=squash", self.merge_call())
         self.assertNotIn("-f merge_method=merge", self.merge_call())
 
+    def test_explicitly_disabled_classic_linear_history_keeps_merge(self):
+        """A valid false value is policy, not a jq parse failure."""
+        result = self.run_land(classic_linear=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_absent_classic_linear_history_keeps_merge(self):
+        result = self.run_land(protection={})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
     def test_all_matching_rulesets_are_intersected(self):
         result = self.run_land(rules_pages=[[{
             "type": "pull_request",
@@ -568,7 +588,10 @@ class MergeMethodTest(LandHarness):
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
     def test_unreadable_classic_protection_fails_closed(self):
-        result = self.run_land(protection_status="403")
+        result = self.run_land(
+            protection_status="403",
+            protection_failure="gh: forbidden (HTTP 403)",
+        )
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot read classic protection", result.stderr)
@@ -581,6 +604,29 @@ class MergeMethodTest(LandHarness):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("ambiguous required_linear_history", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_generic_404_classic_protection_fails_closed(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure='{"message":"Not Found","status":"404"}\n'
+            "gh: Not Found (HTTP 404)",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read classic protection", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_generic_404_fails_closed_even_with_override(self):
+        result = self.run_land(
+            merge_method="squash",
+            protection_status="404",
+            protection_failure='{"message":"Not Found","status":"404"}\n'
+            "gh: Not Found (HTTP 404)",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read classic protection", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
     def test_malformed_pull_request_rule_fails_closed(self):

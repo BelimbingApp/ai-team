@@ -123,13 +123,22 @@ if [[ "$state" == "OPEN" ]]; then
 
   classic_linear=false
   if ! branch_protection=$(gh api "repos/$repo/branches/$encoded_base/protection" 2>&1); then
-    if [[ "$branch_protection" != *"HTTP 404"* ]]; then
+    # GitHub uses the canonical structured 404 below for a genuinely
+    # unprotected branch. A generic 404 may instead conceal an inaccessible
+    # resource, so an HTTP status substring alone is not proof of no policy.
+    if ! jq -eRs '
+      split("\n")
+      | map(select(length > 0) | fromjson?)
+      | any(.[]; .message == "Branch not protected" and ((.status | tostring) == "404"))
+    ' <<<"$branch_protection" >/dev/null; then
       echo "cannot read classic protection for $repo branch '$base_branch'; refusing to guess merge policy" >&2
       printf '%s\n' "$branch_protection" >&2
       exit 2
     fi
   else
-    if ! classic_linear=$(jq -er '
+    # Do not use jq -e here: a valid JSON false is an exit-1 result under -e
+    # and would be indistinguishable from malformed protection (#95).
+    if ! classic_linear=$(jq -r '
       if has("required_linear_history") then
         if (.required_linear_history | type) == "object"
             and (.required_linear_history | has("enabled"))
