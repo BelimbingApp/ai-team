@@ -129,19 +129,48 @@ if [[ "$state" == "OPEN" ]]; then
     # production shape or the exact JSON body alone. A generic/concealed 404,
     # extra JSON, malformed suffix, or contradictory diagnostic is not proof
     # that no policy exists and therefore fails closed.
-    if ! jq -en --arg response "$branch_protection" '
-      def canonical_body:
-        (try fromjson catch null) as $body
-        | ($body | type) == "object"
-          and ($body | keys) == ["documentation_url", "message", "status"]
-          and $body.message == "Branch not protected"
-          and $body.documentation_url == "https://docs.github.com/rest/branches/branch-protection#get-branch-protection"
-          and $body.status == "404";
-      "gh: Branch not protected (HTTP 404)" as $diagnostic
-      | ($response | canonical_body)
-        or (($response | endswith($diagnostic))
-          and ($response[0:-($diagnostic | length)] | canonical_body))
-    ' >/dev/null; then
+    if ! AI_TEAM_PROTECTION_RESPONSE="$branch_protection" python3 - <<'PY'
+import json
+import os
+import sys
+
+
+response = os.environ["AI_TEAM_PROTECTION_RESPONSE"]
+diagnostic = "gh: Branch not protected (HTTP 404)"
+body = response
+if response.endswith(diagnostic):
+    body = response[:-len(diagnostic)]
+    # The production shape is a direct concatenation. Whitespace before the
+    # diagnostic is a different, unsupported response and remains ambiguous.
+    if not body or body[-1].isspace():
+        sys.exit(1)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON member: {key}")
+        result[key] = value
+    return result
+
+
+try:
+    parsed = json.loads(body, object_pairs_hook=unique_object)
+except (json.JSONDecodeError, ValueError):
+    sys.exit(1)
+
+expected = {
+    "message": "Branch not protected",
+    "documentation_url": (
+        "https://docs.github.com/rest/branches/"
+        "branch-protection#get-branch-protection"
+    ),
+    "status": "404",
+}
+sys.exit(0 if parsed == expected else 1)
+PY
+    then
       echo "cannot read classic protection for $repo branch '$base_branch'; refusing to guess merge policy" >&2
       printf '%s\n' "$branch_protection" >&2
       exit 2
