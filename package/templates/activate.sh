@@ -411,7 +411,15 @@ refresh_remote_update_sha() {
 scan_active_lanes() {
   # A blocked backlog issue does not mutate a checkout. Active/review issues
   # block refresh, and every open PR (including a blocked lane's PR) blocks it.
-  # Only the exact canonical generated refresh lane is exempt.
+  # Only the canonical generated refresh lane is exempt.
+  #
+  # Do not require the PR head OID to equal REMOTE_UPDATE_SHA. The winner releases
+  # the short mutex before force-pushing the verified tip and dressing the PR
+  # (#86 / #82): a concurrent loser can therefore observe tip/PR head skew for
+  # the same ownership-proven refresh lane. Treating that skew as a foreign
+  # active lane yields exit 1 (refuse) instead of the durable exit 3 pause the
+  # contract promises. Identity + ownership markers are enough; later inspect
+  # paths still stop_for_pr on claim/draft/ready states.
   scanned_issues=$(gh issue list --repo "$REPO" --state open --limit 1000 \
     --json number,labels \
     --jq '.[] | select(any(.labels[]?; .name == "task:active" or .name == "task:review")) | "#\(.number)"' \
@@ -421,9 +429,9 @@ scan_active_lanes() {
     --jq '.[] | [.number, .headRefOid, .headRefName, .baseRefName, ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")), .isCrossRepository, ([.labels[].name | select(startswith("agent:"))] | sort | join(",")), (((.body // "") | split("\n") | index("**From:** package-bootstrap")) != null), (((.body // "") | split("\n") | index("AI-Team-Lane-Issue: none")) != null)] | @tsv' \
     2>/dev/null) || return 1
   scanned_prs=$(printf '%s\n' "$scanned_pr_rows" | awk -F'\t' \
-    -v head="$REMOTE_UPDATE_SHA" -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
+    -v repo="$REPO" -v base="$BASE" -v branch="$UPDATE_BRANCH" \
     -v agent="agent:$BOOTSTRAP_AGENT" \
-    'NF && !($2 != "" && $2 == head && $3 == branch && $4 == base && $5 == repo && $6 == "false" && $7 == agent && $8 == "true" && $9 == "true") { print "PR #" $1 }')
+    'NF && !($3 == branch && $4 == base && $5 == repo && $6 == "false" && $7 == agent && $8 == "true" && $9 == "true") { print "PR #" $1 }')
   printf '%s\n%s\n' "$scanned_issues" "$scanned_prs" | awk 'NF'
 }
 
