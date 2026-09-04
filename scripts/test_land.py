@@ -100,6 +100,9 @@ class LandHarness(unittest.TestCase):
                       printf '{"merged":true,"sha":"%s"}\\n' "${LAND_TEST_MERGE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
                     fi
                     ;;
+                  "pr list")
+                    printf '%s\\n' "${LAND_TEST_STACKED:-}"
+                    ;;
                   "pr comment"|"pr edit"|"issue edit")
                     ;;
                   *)
@@ -128,6 +131,7 @@ class LandHarness(unittest.TestCase):
         merge_message: str = "",
         trusted_bot: bool = False,
         reviewed: str = "a" * 40,
+        stacked: str = "",
         allow_merge: str = "true",
         allow_squash: str = "true",
         allow_rebase: str = "true",
@@ -149,6 +153,7 @@ class LandHarness(unittest.TestCase):
             LAND_TEST_MERGE_MESSAGE=merge_message,
             LAND_TEST_REVIEWED=reviewed.lower(),
             AI_TEAM_TEST_ORIGIN_REPO="example/canonical",
+            LAND_TEST_STACKED=stacked,
             LAND_TEST_ALLOW_MERGE=allow_merge,
             LAND_TEST_ALLOW_SQUASH=allow_squash,
             LAND_TEST_ALLOW_REBASE=allow_rebase,
@@ -302,6 +307,31 @@ class LandMechanismTest(LandHarness):
         self.assertNotIn("issue edit", gh_log)
         self.assertNotIn("pr comment 42", gh_log)
 
+    def test_a_stacked_pull_request_is_named_before_cleanup(self):
+        # #69: landing and deleting the branch silently closed a stacked PR —
+        # no merge, no comment, no notification, reviews left on a dead lane.
+        result = self.run_land(stacked="#55")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("#55 is stacked on", result.stderr)
+        self.assertIn("Do NOT delete that branch yet", result.stderr)
+        self.assertIn("gh pr edit <number>", result.stderr)
+
+    def test_several_stacked_pull_requests_are_all_named(self):
+        result = self.run_land(stacked="#55, #56")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("#55, #56 are stacked on", result.stderr)
+
+    def test_an_unstacked_landing_says_nothing_about_branches(self):
+        result = self.run_land()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("stacked on", result.stderr)
+
+    def test_the_warning_does_not_block_the_landing(self):
+        # The deletion is not land.sh's to make; a stack is a warning, not a
+        # refusal, or a correct landing becomes unrunnable.
+        result = self.run_land(stacked="#55")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("task:done", self.gh_log.read_text(encoding="utf-8"))
     def test_an_undeclared_lane_is_still_refused(self):
         # #68: the refusal is correct and stays.
         result = self.run_land(undeclared_lane=True)
