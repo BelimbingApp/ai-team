@@ -174,11 +174,10 @@ esac
     def run_live_gate_with_argv_guard(
         self,
         review_body_size=50_000,
-        # Raised from 5_120 when the #71/#73 refresh merged two independent
-        # WARN diagnostics into the filter (5497 bytes). The bound still guards
-        # the property under test — no 50,000-byte payload in argv — with room
-        # to spare; lower it again if the filter ever shrinks.
-        jq_arg_limit=6_144,
+        # Restored to 4096 after #83 moved the filter out of argv. The bound
+        # guards unbounded GitHub payloads only; the filter is a fixed reviewed
+        # constant loaded via --from-file and no longer shares this ceiling.
+        jq_arg_limit=4_096,
         *,
         malformed_reviews=False,
         interrupt_on_review_parse=False,
