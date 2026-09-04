@@ -25,6 +25,30 @@ CANONICAL_UNPROTECTED_JSON = (
 CANONICAL_UNPROTECTED_RESPONSE = (
     CANONICAL_UNPROTECTED_JSON + "gh: Branch not protected (HTTP 404)"
 )
+REORDERED_UNPROTECTED_JSON = (
+    '{"status":"404","message":"Branch not protected",'
+    '"documentation_url":"https://docs.github.com/rest/branches/'
+    'branch-protection#get-branch-protection"}'
+)
+DUPLICATE_UNPROTECTED_RESPONSES = [
+    (
+        '{"message":"Not Found","message":"Branch not protected",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection","status":"404"}'
+    ),
+    (
+        '{"message":"Branch not protected",'
+        '"documentation_url":"https://example.invalid/concealed",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection","status":"404"}'
+    ),
+    (
+        '{"message":"Branch not protected",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection",'
+        '"status":"403","status":"404"}'
+    ),
+]
 
 
 class LandHarness(unittest.TestCase):
@@ -622,6 +646,45 @@ class MergeMethodTest(LandHarness):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_reordered_canonical_json_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=REORDERED_UNPROTECTED_JSON,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_duplicate_404_members_fail_closed(self):
+        for response in DUPLICATE_UNPROTECTED_RESPONSES:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    protection_status="404", protection_failure=response
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_duplicate_404_members_fail_closed_even_with_override(self):
+        for response in DUPLICATE_UNPROTECTED_RESPONSES:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    merge_method="squash",
+                    protection_status="404",
+                    protection_failure=response,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
 
     def test_ambiguous_classic_linear_history_fails_closed(self):
         result = self.run_land(protection={
