@@ -56,6 +56,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
+                  "issue list") ;;
                   "issue view")
                     if printf '%s' "$*" | grep -q -- '--json labels'; then
                       [ "${CLAIM_TEST_ISSUE_READBACK_FAILS:-0}" = "1" ] && exit 1
