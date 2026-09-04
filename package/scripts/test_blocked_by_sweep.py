@@ -1,13 +1,19 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from urllib.error import HTTPError
+from unittest.mock import MagicMock, patch
 
 from blocked_by_sweep import (
     BLOCKED_LABEL,
     READY_LABEL,
+    BlockerReference,
+    GitHubAPI,
     comment_marker,
+    parse_blocker_references,
     sweep_slug,
     parse_blockers,
+    sweep,
     transition_for,
 )
 
@@ -19,6 +25,50 @@ class BlockedBySweepTest(unittest.TestCase):
     def test_rejects_missing_or_malformed_header(self):
         self.assertEqual(parse_blockers("blocked on #131"), ())
         self.assertEqual(parse_blockers("Blocked-By: #131 and #132"), ())
+
+    def test_parses_mixed_local_and_qualified_references(self):
+        self.assertEqual(
+            parse_blocker_references(
+                "Blocked-By: #131, BelimbingApp/blb-people-connector#97, #132."
+            ),
+            (
+                BlockerReference(None, 131),
+                BlockerReference("belimbingapp/blb-people-connector", 97),
+                BlockerReference(None, 132),
+            ),
+        )
+
+    def test_qualified_references_dedupe_case_insensitively(self):
+        self.assertEqual(
+            parse_blocker_references(
+                "Blocked-By: BelimbingApp/People#7, belimbingapp/people#7"
+            ),
+            (BlockerReference("belimbingapp/people", 7),),
+        )
+
+    def test_original_integer_parser_fails_closed_on_qualified_references(self):
+        body = "Blocked-By: #1, BelimbingApp/connector#2, #3"
+
+        self.assertEqual(parse_blockers(body), ())
+        self.assertIsNone(transition_for(
+            {"body": body, "labels": [{"name": BLOCKED_LABEL}]},
+            {1: "closed", 3: "closed"},
+        ))
+
+    def test_rejects_urls_and_malformed_qualified_references(self):
+        self.assertEqual(
+            parse_blocker_references(
+                "Blocked-By: https://github.com/BelimbingApp/connector/issues/2"
+            ),
+            (),
+        )
+        self.assertEqual(parse_blocker_references("Blocked-By: owner/repo/extra#2"), ())
+
+    def test_one_malformed_declaration_invalidates_other_valid_declarations(self):
+        body = "Blocked-By: #12.\nBlocked-By: owner/repo#oops."
+
+        self.assertEqual(parse_blocker_references(body), ())
+        self.assertEqual(parse_blockers(body), ())
 
     def test_derives_the_marker_from_the_repository_name(self):
         # #2: no adopter ships another repository's name in its comments.
@@ -172,6 +222,156 @@ class BlockedBySweepTest(unittest.TestCase):
             self.assertEqual(sweep(FakeAPI()), 1)
 
         self.assertEqual(output.getvalue(), "unblocked issue #345\n")
+
+    def test_qualified_open_blocker_prevents_local_closed_blocker_from_unblocking(self):
+        class FakeAPI:
+            repository = "Example/people"
+
+            def __init__(self):
+                self.labels_written = None
+
+            def open_blocked_issues(self):
+                return [{
+                    "number": 13,
+                    "body": "Blocked-By: #12, Example/connector#97",
+                    "labels": [{"name": BLOCKED_LABEL}],
+                }]
+
+            def issue_state(self, number):
+                return "closed"
+
+            def repository_issue_state(self, repository, number):
+                self.assert_reference = (repository, number)
+                return "open"
+
+            def replace_labels(self, number, labels):
+                self.labels_written = labels
+
+        api = FakeAPI()
+
+        self.assertEqual(sweep(api), 0)
+        self.assertEqual(api.assert_reference, ("example/connector", 97))
+        self.assertIsNone(api.labels_written)
+
+    def test_unknown_qualified_blocker_fails_closed(self):
+        class FakeAPI:
+            repository = "Example/people"
+
+            def open_blocked_issues(self):
+                return [{
+                    "number": 13,
+                    "body": "Blocked-By: Example/private-connector#97",
+                    "labels": [{"name": BLOCKED_LABEL}],
+                }]
+
+            def repository_issue_state(self, repository, number):
+                return None
+
+        self.assertEqual(sweep(FakeAPI()), 0)
+
+    def test_malformed_second_declaration_causes_no_comment_or_label_write(self):
+        class FakeAPI:
+            repository = "Example/people"
+
+            def __init__(self):
+                self.comments_seen = []
+                self.labels_written = None
+                self.state_reads = []
+
+            def open_blocked_issues(self):
+                return [{
+                    "number": 13,
+                    "body": "Blocked-By: #12.\nBlocked-By: owner/repo#oops.",
+                    "labels": [{"name": BLOCKED_LABEL}],
+                }]
+
+            def issue_state(self, number):
+                self.state_reads.append(number)
+                return "closed"
+
+            def comments(self, number):
+                return self.comments_seen
+
+            def add_comment(self, number, body):
+                self.comments_seen.append(body)
+
+            def replace_labels(self, number, labels):
+                self.labels_written = labels
+
+        api = FakeAPI()
+
+        self.assertEqual(sweep(api), 0)
+        self.assertEqual(api.state_reads, [])
+        self.assertEqual(api.comments_seen, [])
+        self.assertIsNone(api.labels_written)
+
+    def test_all_qualified_blockers_closed_unblocks_with_unambiguous_marker(self):
+        class FakeAPI:
+            repository = "Example/people"
+
+            def __init__(self):
+                self.comments_seen = []
+                self.labels_written = None
+
+            def open_blocked_issues(self):
+                return [{
+                    "number": 13,
+                    "body": "Blocked-By: Example/one#7, Example/two#7",
+                    "labels": [{"name": BLOCKED_LABEL}],
+                }]
+
+            def repository_issue_state(self, repository, number):
+                return "closed"
+
+            def comments(self, number):
+                return self.comments_seen
+
+            def add_comment(self, number, body):
+                self.comments_seen.append(body)
+
+            def replace_labels(self, number, labels):
+                self.labels_written = labels
+
+        api = FakeAPI()
+
+        self.assertEqual(sweep(api), 1)
+        self.assertEqual(api.labels_written, (READY_LABEL,))
+        self.assertIn("example/one#7, example/two#7", api.comments_seen[0])
+        self.assertIn(
+            "people-blocked-by-sweep:example/one#7,example/two#7",
+            api.comments_seen[0],
+        )
+
+
+class QualifiedGitHubAPITest(unittest.TestCase):
+    def test_qualified_lookup_targets_the_declared_repository(self):
+        api = GitHubAPI("Example/people", "secret")
+        response = MagicMock()
+        response.__enter__.return_value.status = 200
+        response.__enter__.return_value.read.return_value = b'{"state":"open"}'
+
+        with patch("blocked_by_sweep.urlopen", return_value=response) as mocked:
+            self.assertEqual(api.repository_issue_state("example/connector", 97), "open")
+
+        self.assertEqual(
+            mocked.call_args.args[0].full_url,
+            "https://api.github.com/repos/example/connector/issues/97",
+        )
+
+    def test_missing_or_inaccessible_qualified_issue_is_unknown(self):
+        api = GitHubAPI("Example/people", "secret")
+        missing = HTTPError("url", 404, "not found", {}, None)
+
+        with patch("blocked_by_sweep.urlopen", side_effect=missing):
+            self.assertIsNone(api.repository_issue_state("example/private", 97))
+
+    def test_non_not_found_api_failure_aborts_instead_of_inferring_state(self):
+        api = GitHubAPI("Example/people", "secret")
+        failure = HTTPError("url", 503, "unavailable", {}, None)
+
+        with patch("blocked_by_sweep.urlopen", side_effect=failure):
+            with self.assertRaises(HTTPError):
+                api.repository_issue_state("example/connector", 97)
 
 
 class BlockedByParsingTest(unittest.TestCase):

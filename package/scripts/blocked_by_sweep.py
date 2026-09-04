@@ -20,8 +20,14 @@ from urllib.request import Request, urlopen
 BLOCKED_LABEL = "task:blocked"
 MARKER_INFIX = "-blocked-by-sweep:"
 READY_LABEL = "task:ready"
+REPOSITORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
+REFERENCE_PATTERN = rf"(?:{REPOSITORY_PATTERN})?#[0-9]+"
+BLOCKED_BY_PREFIX_RE = re.compile(r"(?i)(?<![\w-])Blocked-By:")
 BLOCKED_BY_RE = re.compile(
-    r"(?i)(?<![\w-])Blocked-By:[ \t]*(#[0-9]+(?:[ \t]*,[ \t]*#[0-9]+)*)(?=[ \t]*(?:[.;]|$))"
+    rf"(?i)(?<![\w-])Blocked-By:[ \t]*({REFERENCE_PATTERN}(?:[ \t]*,[ \t]*{REFERENCE_PATTERN})*)(?=[ \t]*(?:[.;]|$))"
+)
+REFERENCE_RE = re.compile(
+    rf"(?i)^(?:(?P<repository>{REPOSITORY_PATTERN}))?#(?P<number>[0-9]+)$"
 )
 # Only prose can declare a dependency. This module owns that boundary for the
 # whole package (#3): an adopter that reads issue or PR prose for its own gate
@@ -33,7 +39,31 @@ CLOSING_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[ \t]*$")
 INDENTED_CODE_RE = re.compile(r"^( {4}|[ ]*\t)")
 INLINE_COMMENT_RE = re.compile(r"<!--.*?-->")
 
-__all__ = ["safe_lines", "parse_blockers", "transition_for", "sweep"]
+__all__ = [
+    "BlockerReference",
+    "safe_lines",
+    "parse_blocker_references",
+    "parse_blockers",
+    "transition_for",
+    "sweep",
+]
+
+
+@dataclass(frozen=True)
+class BlockerReference:
+    """One local or repository-qualified GitHub issue reference."""
+
+    repository: str | None
+    number: int
+
+    def display(self) -> str:
+        prefix = self.repository if self.repository is not None else ""
+        return f"{prefix}#{self.number}"
+
+    def marker_key(self) -> str:
+        """Stable marker component, preserving the legacy local shape."""
+
+        return self.display() if self.repository is not None else str(self.number)
 
 
 @dataclass(frozen=True)
@@ -127,31 +157,64 @@ def _closes_fence(closing: str, opening: str) -> bool:
     return closing[0] == opening[0] and len(closing) >= len(opening)
 
 
-def parse_blockers(body: str | None) -> tuple[int, ...]:
-    """Return issue numbers from every valid prose Blocked-By declaration.
+def parse_blocker_references(body: str | None) -> tuple[BlockerReference, ...]:
+    """Return local and qualified references from prose declarations.
 
     Standalone headers and inline sentences ending the reference list with a
     period or semicolon are both declarations. Inline stays a declaration by
     decision (#3): a real blocker was declared mid-sentence (belimbing #345)
     and honored, and dropping the form would silently strand issues written
-    that way in task:blocked — a fail-closed state nobody is watching. All declarations are unioned
-    rather than only the first: recording a new blocker by adding a line is the
-    natural edit, and reading only the first silently dropped the rest -- which
-    marked an issue ready while a blocker was open.
+    that way in task:blocked — a fail-closed state nobody is watching. All
+    declarations are unioned rather than only the first: recording a new
+    blocker by adding a line is the natural edit, and reading only the first
+    silently dropped the rest -- which marked an issue ready while a blocker
+    was open.
 
-    A malformed or missing declaration contributes nothing. Duplicate
-    references are collapsed while preserving their first-seen order.
+    A qualified reference uses GitHub's ``owner/repository#number`` form. A
+    malformed or missing declaration contributes nothing. Duplicate
+    references are collapsed case-insensitively while preserving their
+    first-seen order.
     """
 
-    numbers: list[int] = []
+    references: list[BlockerReference] = []
 
     for line in safe_lines(body or ""):
-        for match in BLOCKED_BY_RE.finditer(line):
-            numbers.extend(
-                int(reference.strip()[1:]) for reference in match.group(1).split(",")
-            )
+        prefixes = tuple(BLOCKED_BY_PREFIX_RE.finditer(line))
+        declarations = tuple(BLOCKED_BY_RE.finditer(line))
+        if tuple(match.start() for match in prefixes) != tuple(
+            match.start() for match in declarations
+        ):
+            return ()
 
-    return tuple(dict.fromkeys(numbers))
+        for match in declarations:
+            for raw_reference in match.group(1).split(","):
+                parsed = REFERENCE_RE.fullmatch(raw_reference.strip())
+                if parsed is None:
+                    continue
+                repository = parsed.group("repository")
+                references.append(
+                    BlockerReference(
+                        repository.casefold() if repository is not None else None,
+                        int(parsed.group("number")),
+                    )
+                )
+
+    return tuple(dict.fromkeys(references))
+
+
+def parse_blockers(body: str | None) -> tuple[int, ...]:
+    """Return local issue numbers, preserving the package's original API.
+
+    New integrations that need repository-qualified dependencies use
+    :func:`parse_blocker_references`. Existing adopters importing this helper
+    continue to receive the same integer-only representation.
+    """
+
+    references = parse_blocker_references(body)
+    if any(reference.repository is not None for reference in references):
+        return ()
+
+    return tuple(reference.number for reference in references)
 
 
 def label_names(issue: dict) -> tuple[str, ...]:
@@ -167,13 +230,29 @@ def transition_for(
     comments: list[str] | None = None,
     repository: str | None = None,
 ) -> Transition | None:
-    """Build an idempotent transition, or return None when it is unsafe."""
+    """Build a local-reference transition through the original public API."""
+
+    blockers = tuple(
+        BlockerReference(None, number) for number in parse_blockers(issue.get("body"))
+    )
+    states = {blocker: blocker_states.get(blocker.number) for blocker in blockers}
+    return _transition_for_references(issue, blockers, states, comments, repository)
+
+
+def _transition_for_references(
+    issue: dict,
+    blockers: tuple[BlockerReference, ...],
+    blocker_states: dict[BlockerReference, str | None],
+    comments: list[str] | None = None,
+    repository: str | None = None,
+) -> Transition | None:
+    """Build a transition for the sweep's complete reference model."""
 
     if BLOCKED_LABEL not in label_names(issue):
         return None
-
-    blockers = parse_blockers(issue.get("body"))
-    if not blockers or any(blocker_states.get(number) != "closed" for number in blockers):
+    if not blockers or any(
+        blocker_states.get(blocker) != "closed" for blocker in blockers
+    ):
         return None
 
     labels = list(dict.fromkeys(label_names(issue)))
@@ -183,11 +262,13 @@ def transition_for(
 
     existing_comments = comments or []
     comment = None
-    if not any(marker_matches(blockers, body) for body in existing_comments):
-        references = ", ".join(f"#{number}" for number in blockers)
+    if not any(
+        reference_marker_matches(blockers, body) for body in existing_comments
+    ):
+        references = ", ".join(blocker.display() for blocker in blockers)
         comment = (
             f"Blocked-By sweep: all declared blockers are closed ({references}); "
-            f"marking this task ready. {comment_marker(blockers, repository)}"
+            f"marking this task ready. {reference_comment_marker(blockers, repository)}"
         )
 
     return Transition(tuple(labels), comment)
@@ -214,6 +295,13 @@ def comment_marker(blockers: tuple[int, ...], repository: str | None = None) -> 
     return f"<!-- {sweep_slug(repository)}{MARKER_INFIX}{references} -->"
 
 
+def reference_comment_marker(
+    blockers: tuple[BlockerReference, ...], repository: str | None = None
+) -> str:
+    references = ",".join(blocker.marker_key() for blocker in blockers)
+    return f"<!-- {sweep_slug(repository)}{MARKER_INFIX}{references} -->"
+
+
 def marker_matches(blockers: tuple[int, ...], body: str) -> bool:
     """Whether a comment already carries this blocker-set's marker.
 
@@ -229,6 +317,13 @@ def marker_matches(blockers: tuple[int, ...], body: str) -> bool:
     return f"{MARKER_INFIX}{references} -->" in body
 
 
+def reference_marker_matches(
+    blockers: tuple[BlockerReference, ...], body: str
+) -> bool:
+    references = ",".join(blocker.marker_key() for blocker in blockers)
+    return f"{MARKER_INFIX}{references} -->" in body.casefold()
+
+
 class GitHubAPI:
     def __init__(self, repository: str, token: str):
         self.base_url = f"https://api.github.com/repos/{repository}"
@@ -236,10 +331,21 @@ class GitHubAPI:
         self.token = token
         self.user_agent = f"{sweep_slug(repository)}-blocked-by-sweep"
 
-    def request(self, path: str, method: str = "GET", payload: dict | None = None):
+    def request(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict | None = None,
+        repository: str | None = None,
+    ):
         body = None if payload is None else json.dumps(payload).encode("utf-8")
+        base_url = (
+            self.base_url
+            if repository is None
+            else f"https://api.github.com/repos/{repository}"
+        )
         request = Request(
-            f"{self.base_url}{path}",
+            f"{base_url}{path}",
             data=body,
             headers={
                 "Accept": "application/vnd.github+json",
@@ -279,6 +385,23 @@ class GitHubAPI:
                 return None
             raise
 
+    def repository_issue_state(self, repository: str, number: int) -> str | None:
+        """Read a qualified blocker without changing this adopter's API root.
+
+        Missing or inaccessible repositories/issues resolve to unknown. Every
+        other HTTP failure propagates and aborts the workflow before it can
+        infer readiness from incomplete state.
+        """
+
+        try:
+            return self.request(f"/issues/{number}", repository=repository).get(
+                "state"
+            )
+        except HTTPError as error:
+            if error.code == 404:
+                return None
+            raise
+
     def comments(self, number: int) -> list[str]:
         return [
             comment.get("body", "")
@@ -298,15 +421,24 @@ def sweep(api: GitHubAPI) -> int:
         if "pull_request" in issue:
             continue
 
-        blockers = parse_blockers(issue.get("body"))
+        blockers = parse_blocker_references(issue.get("body"))
         if not blockers:
             continue
 
-        states = {number: api.issue_state(number) for number in blockers}
-        if any(states[number] != "closed" for number in blockers):
+        states = {
+            blocker: (
+                api.issue_state(blocker.number)
+                if blocker.repository is None
+                else api.repository_issue_state(blocker.repository, blocker.number)
+            )
+            for blocker in blockers
+        }
+        if any(states[blocker] != "closed" for blocker in blockers):
             continue
 
-        transition = transition_for(issue, states, api.comments(issue["number"]), api.repository)
+        transition = _transition_for_references(
+            issue, blockers, states, api.comments(issue["number"]), api.repository
+        )
         if transition is None:
             continue
 
