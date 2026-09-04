@@ -286,11 +286,13 @@ does not choose an adopter's branch protections: retaining or changing a native
 approval requirement is an owner-controlled policy decision, not a substitute
 for an independently reviewed AI Team lane.
 
-Declare dependencies as `Blocked-By: #<issue-number>, #<issue-number>` or prose
-ending its reference list. Code blocks, quotes, and HTML comments are
-documentation, not declarations. `blocked_by_sweep.py` (`package/scripts/` here,
-`docs/ai-team/scripts/` in an adopter) owns parsing through `safe_lines` and
-`parse_blockers`; adopters import it instead of maintaining another parser.
+Declare dependencies as
+`Blocked-By: #<issue-number>, owner/repository#<issue-number>`; local and
+qualified comma-separated references may mix in prose. Unknown or unreadable
+blockers fail closed. Code, quotes, and HTML comments are not declarations.
+`blocked_by_sweep.py` owns `safe_lines` and `parse_blocker_references`;
+`parse_blockers` remains local-only and fails closed on qualified declarations.
+Adopters import these canonical parsers.
 
 ---
 
