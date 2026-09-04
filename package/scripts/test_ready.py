@@ -1,3 +1,4 @@
+import json
 import os
 import stat
 import subprocess
@@ -28,6 +29,11 @@ class ReadyHandoffTest(unittest.TestCase):
         self.bin = base / "bin"
         self.bin.mkdir()
         self.gh_log = base / "gh.log"
+        self.threads_path = base / "threads.json"
+        self.threads_path.write_text(
+            '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}',
+            encoding="utf-8",
+        )
         gh = self.bin / "gh"
         gh.write_text(
             textwrap.dedent(
@@ -64,6 +70,9 @@ class ReadyHandoffTest(unittest.TestCase):
                     ;;
                   "pr ready"|"issue edit")
                     ;;
+                  "api graphql")
+                    cat "$READY_TEST_THREADS"
+                    ;;
                   *)
                     echo "unexpected gh: $*" >&2
                     exit 1
@@ -83,6 +92,7 @@ class ReadyHandoffTest(unittest.TestCase):
         env = os.environ.copy()
         env["READY_TEST_GH_LOG"] = bash_path(self.gh_log)
         env["READY_TEST_BODY"] = bash_path(self.body_path)
+        env["READY_TEST_THREADS"] = bash_path(self.threads_path)
         env["READY_TEST_TITLE"] = self.title
         env["READY_TEST_BRANCH"] = self.branch
         env["CLAIM_AGENT"] = "composer"
@@ -149,6 +159,105 @@ class ReadyHandoffTest(unittest.TestCase):
         result = self.run_ready(ready_issue="42")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Closes #42", result.stdout)
+
+    def test_ready_refuses_unresolved_copilot_threads(self):
+        # #80: Copilot's substance is on review threads; handoff must wait.
+        self.threads_path.write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "author": {
+                                                            "login": "copilot-pull-request-reviewer"
+                                                        },
+                                                        "body": "Nullable branch needs a fallback.",
+                                                        "url": "https://example.test/thread/1",
+                                                    }
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unresolved Copilot review thread", result.stderr)
+        self.assertIn("Nullable branch needs a fallback", result.stderr)
+        self.assertNotIn("ready for review", result.stdout)
+
+    def test_ready_allows_resolved_copilot_threads(self):
+        self.threads_path.write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "isResolved": True,
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "author": {"login": "Copilot"},
+                                                        "body": "Already fixed.",
+                                                        "url": "https://example.test/thread/2",
+                                                    }
+                                                ]
+                                            },
+                                        },
+                                        {
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "author": {"login": "human-reviewer"},
+                                                        "body": "Not Copilot — ignore for this check.",
+                                                        "url": "https://example.test/thread/3",
+                                                    }
+                                                ]
+                                            },
+                                        },
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ready for review", result.stdout)
+
+    def test_ready_warns_and_proceeds_when_threads_cannot_be_read(self):
+        self.threads_path.unlink()
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot read review threads", result.stderr)
+        self.assertIn("ready for review", result.stdout)
+
+    def test_ready_warns_and_proceeds_when_threads_cannot_be_parsed(self):
+        self.threads_path.write_text('{"data":{"repository":{}}}', encoding="utf-8")
+        result = self.run_ready()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot parse review threads", result.stderr)
+        self.assertIn("ready for review", result.stdout)
 
 
 class LaneIssueHelperTest(unittest.TestCase):
