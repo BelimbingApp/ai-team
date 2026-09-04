@@ -15,6 +15,40 @@ LANE = Path(__file__).with_name("_lane_issue.sh")
 DEFAULT_BRANCH = Path(__file__).with_name("_default_branch.sh")
 TRUSTED_AUTHOR = Path(__file__).with_name("_trusted_author.sh")
 HYGIENE = Path(__file__).with_name("label_hygiene.sh")
+CANONICAL_UNPROTECTED_JSON = (
+    '{"message":"Branch not protected",'
+    '"documentation_url":"https://docs.github.com/rest/branches/'
+    'branch-protection#get-branch-protection","status":"404"}'
+)
+# Captured from the production command with xxd: the API body has no newline,
+# so gh's stderr diagnostic begins immediately after the closing brace.
+CANONICAL_UNPROTECTED_RESPONSE = (
+    CANONICAL_UNPROTECTED_JSON + "gh: Branch not protected (HTTP 404)"
+)
+REORDERED_UNPROTECTED_JSON = (
+    '{"status":"404","message":"Branch not protected",'
+    '"documentation_url":"https://docs.github.com/rest/branches/'
+    'branch-protection#get-branch-protection"}'
+)
+DUPLICATE_UNPROTECTED_RESPONSES = [
+    (
+        '{"message":"Not Found","message":"Branch not protected",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection","status":"404"}'
+    ),
+    (
+        '{"message":"Branch not protected",'
+        '"documentation_url":"https://example.invalid/concealed",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection","status":"404"}'
+    ),
+    (
+        '{"message":"Branch not protected",'
+        '"documentation_url":"https://docs.github.com/rest/branches/'
+        'branch-protection#get-branch-protection",'
+        '"status":"403","status":"404"}'
+    ),
+]
 
 
 class LandHarness(unittest.TestCase):
@@ -67,8 +101,9 @@ class LandHarness(unittest.TestCase):
                       --arg title "$LAND_TEST_TITLE" \\
                       --arg body "$LAND_TEST_BODY" \\
                       --arg branch "$LAND_TEST_BRANCH" \\
+                      --arg base "$LAND_TEST_BASE_BRANCH" \\
                       --argjson labels "$LAND_TEST_LABELS" \\
-                      '{number:42,title:$title,body:$body,headRefName:$branch,labels:$labels,isDraft:false,state:$state,mergeCommit:(if $state == "MERGED" then {oid:$sha} else null end),comments:(if $attr == "" then [] else [{body:$attr}] end)}'
+                      '{number:42,title:$title,body:$body,headRefName:$branch,baseRefName:$base,labels:$labels,isDraft:false,state:$state,mergeCommit:(if $state == "MERGED" then {oid:$sha} else null end),comments:(if $attr == "" then [] else [{body:$attr}] end)}'
                     ;;
                   "api repos/example/canonical/pulls/42")
                     printf '%s\\n' "$LAND_TEST_IDENTITY"
@@ -78,10 +113,18 @@ class LandHarness(unittest.TestCase):
                       printf 'gh: could not read repository\\n' >&2
                       exit "${LAND_TEST_SETTINGS_STATUS}"
                     fi
-                    printf '%s\\t%s\\t%s\\n' \\
-                      "${LAND_TEST_ALLOW_MERGE:-true}" \\
-                      "${LAND_TEST_ALLOW_SQUASH:-true}" \\
-                      "${LAND_TEST_ALLOW_REBASE:-true}"
+                    jq -n \\
+                      --argjson merge "${LAND_TEST_ALLOW_MERGE:-true}" \\
+                      --argjson squash "${LAND_TEST_ALLOW_SQUASH:-true}" \\
+                      --argjson rebase "${LAND_TEST_ALLOW_REBASE:-true}" \\
+                      '{allow_merge_commit:$merge,allow_squash_merge:$squash,allow_rebase_merge:$rebase}'
+                    ;;
+                  "api repos/example/canonical/branches/main/protection")
+                    if [ "${LAND_TEST_PROTECTION_STATUS:-404}" != "0" ]; then
+                      printf '%s\\n' "$LAND_TEST_PROTECTION_FAILURE" >&2
+                      exit 1
+                    fi
+                    printf '%s\\n' "$LAND_TEST_PROTECTION"
                     ;;
                   "api -X")
                     if [ "${3:-}" = "PUT" ]; then
@@ -99,6 +142,17 @@ class LandHarness(unittest.TestCase):
                       fi
                       printf '{"merged":true,"sha":"%s"}\\n' "${LAND_TEST_MERGE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
                     fi
+                    ;;
+                  "api --paginate")
+                    if [[ "$*" != *"rules/branches/main?per_page=100"* ]]; then
+                      echo "unexpected paginated gh: $*" >&2
+                      exit 1
+                    fi
+                    if [ "${LAND_TEST_RULES_STATUS:-0}" != "0" ]; then
+                      printf 'gh: could not read active rules\\n' >&2
+                      exit "${LAND_TEST_RULES_STATUS}"
+                    fi
+                    printf '%s\\n' "$LAND_TEST_RULES_PAGES"
                     ;;
                   "pr list")
                     printf '%s\\n' "${LAND_TEST_STACKED:-}"
@@ -137,6 +191,13 @@ class LandHarness(unittest.TestCase):
         allow_rebase: str = "true",
         settings_status: str = "0",
         merge_method: str | None = None,
+        base_branch: str = "main",
+        classic_linear: bool | None = None,
+        protection: dict | None = None,
+        protection_status: str | None = None,
+        protection_failure: str | None = None,
+        rules_pages: list[list[dict]] | None = None,
+        rules_status: str = "0",
         undeclared_lane: bool = False,
         ready_issue: str | None = None,
     ):
@@ -158,6 +219,25 @@ class LandHarness(unittest.TestCase):
             LAND_TEST_ALLOW_SQUASH=allow_squash,
             LAND_TEST_ALLOW_REBASE=allow_rebase,
             LAND_TEST_SETTINGS_STATUS=settings_status,
+            LAND_TEST_BASE_BRANCH=base_branch,
+            LAND_TEST_PROTECTION_STATUS=(
+                protection_status
+                if protection_status is not None
+                else ("0" if classic_linear is not None or protection is not None else "404")
+            ),
+            LAND_TEST_PROTECTION=json.dumps(
+                protection if protection is not None else {
+                    "required_linear_history": {"enabled": classic_linear}
+                }
+            ),
+            LAND_TEST_PROTECTION_FAILURE=(
+                CANONICAL_UNPROTECTED_RESPONSE
+                if protection_failure is None else protection_failure
+            ),
+            LAND_TEST_RULES_PAGES=json.dumps(
+                rules_pages if rules_pages is not None else [[]]
+            ),
+            LAND_TEST_RULES_STATUS=rules_status,
             PATH=f"{self.cwd / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         )
         if trusted_bot:
@@ -433,7 +513,7 @@ class MergeMethodTest(LandHarness):
         result = self.run_land(allow_merge="false")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("-f merge_method=squash", self.merge_call())
-        self.assertIn("does not allow a merge commit", result.stderr)
+        self.assertIn("effective methods", result.stderr)
 
     def test_rebase_is_the_last_resort(self):
         result = self.run_land(allow_merge="false", allow_squash="false")
@@ -445,7 +525,7 @@ class MergeMethodTest(LandHarness):
             allow_merge="false", allow_squash="false", allow_rebase="false"
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("allows no merge method", result.stderr)
+        self.assertIn("allow no common merge method", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
     def test_the_override_is_honoured_on_the_path_that_prints_it(self):
@@ -465,10 +545,241 @@ class MergeMethodTest(LandHarness):
         self.assertIn("must be merge, squash, or rebase", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
-    def test_an_unreadable_repository_names_the_override_instead_of_guessing(self):
+    def test_an_unreadable_repository_refuses_instead_of_guessing(self):
         result = self.run_land(settings_status="1")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("LAND_MERGE_METHOD", result.stderr)
+        self.assertIn("refusing to guess merge policy", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_classic_linear_history_overrides_repository_merge_permission(self):
+        """#95: this is the exact failure shape reproduced on People PR #96."""
+        result = self.run_land(classic_linear=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=squash", self.merge_call())
+        self.assertNotIn("-f merge_method=merge", self.merge_call())
+
+    def test_explicitly_disabled_classic_linear_history_keeps_merge(self):
+        """A valid false value is policy, not a jq parse failure."""
+        result = self.run_land(classic_linear=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_absent_classic_linear_history_keeps_merge(self):
+        result = self.run_land(protection={})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_all_matching_rulesets_are_intersected(self):
+        result = self.run_land(rules_pages=[[{
+            "type": "pull_request",
+            "ruleset_id": 10,
+            "parameters": {"allowed_merge_methods": ["merge", "squash"]},
+        }, {
+            "type": "pull_request",
+            "ruleset_id": 20,
+            "parameters": {"allowed_merge_methods": ["squash", "rebase"]},
+        }]])
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=squash", self.merge_call())
+
+    def test_ruleset_linear_history_removes_merge(self):
+        result = self.run_land(rules_pages=[[{
+            "type": "required_linear_history", "ruleset_id": 10
+        }]])
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=squash", self.merge_call())
+
+    def test_override_is_refused_when_classic_protection_forbids_it(self):
+        result = self.run_land(classic_linear=True, merge_method="merge")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("LAND_MERGE_METHOD=merge is forbidden", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_override_is_refused_when_a_ruleset_forbids_it(self):
+        result = self.run_land(merge_method="merge", rules_pages=[[{
+            "type": "pull_request",
+            "parameters": {"allowed_merge_methods": ["squash"]},
+        }]])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("LAND_MERGE_METHOD=merge is forbidden", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_unreadable_ruleset_policy_fails_closed_even_with_override(self):
+        result = self.run_land(merge_method="squash", rules_status="1")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read active rulesets", result.stderr)
+        self.assertIn("refusing to guess merge policy", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_unreadable_classic_protection_fails_closed(self):
+        result = self.run_land(
+            protection_status="403",
+            protection_failure="gh: forbidden (HTTP 403)",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read classic protection", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_live_concatenated_unprotected_response_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=CANONICAL_UNPROTECTED_RESPONSE,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_canonical_json_without_gh_diagnostic_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=CANONICAL_UNPROTECTED_JSON,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_reordered_canonical_json_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=REORDERED_UNPROTECTED_JSON,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_duplicate_404_members_fail_closed(self):
+        for response in DUPLICATE_UNPROTECTED_RESPONSES:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    protection_status="404", protection_failure=response
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_duplicate_404_members_fail_closed_even_with_override(self):
+        for response in DUPLICATE_UNPROTECTED_RESPONSES:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    merge_method="squash",
+                    protection_status="404",
+                    protection_failure=response,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_ambiguous_classic_linear_history_fails_closed(self):
+        result = self.run_land(protection={
+            "required_linear_history": {"enabled": "yes"}
+        })
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ambiguous required_linear_history", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_generic_404_classic_protection_fails_closed(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure='{"message":"Not Found","status":"404"}\n'
+            "gh: Not Found (HTTP 404)",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read classic protection", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_generic_404_fails_closed_even_with_override(self):
+        result = self.run_land(
+            merge_method="squash",
+            protection_status="404",
+            protection_failure='{"message":"Not Found","status":"404"}\n'
+            "gh: Not Found (HTTP 404)",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read classic protection", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_canonical_404_with_extra_or_contradictory_evidence_fails_closed(self):
+        poisoned_responses = [
+            CANONICAL_UNPROTECTED_JSON + "not-json",
+            CANONICAL_UNPROTECTED_JSON
+            + '{"message":"Not Found","status":"404"}',
+            CANONICAL_UNPROTECTED_JSON + "gh: Forbidden (HTTP 403)",
+        ]
+        for response in poisoned_responses:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    protection_status="404", protection_failure=response
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_poisoned_canonical_404_fails_closed_even_with_override(self):
+        poisoned_responses = [
+            CANONICAL_UNPROTECTED_JSON + "not-json",
+            CANONICAL_UNPROTECTED_JSON
+            + '{"message":"Not Found","status":"404"}',
+            CANONICAL_UNPROTECTED_JSON + "gh: Forbidden (HTTP 403)",
+        ]
+        for response in poisoned_responses:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    merge_method="squash",
+                    protection_status="404",
+                    protection_failure=response,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_malformed_pull_request_rule_fails_closed(self):
+        result = self.run_land(rules_pages=[[{
+            "type": "pull_request", "parameters": {}
+        }]])
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid allowed_merge_methods", result.stderr)
+        self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_disjoint_rulesets_refuse_before_the_merge(self):
+        result = self.run_land(rules_pages=[[{
+            "type": "pull_request",
+            "parameters": {"allowed_merge_methods": ["merge"]},
+        }, {
+            "type": "pull_request",
+            "parameters": {"allowed_merge_methods": ["squash"]},
+        }]])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("allow no common merge method", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
 

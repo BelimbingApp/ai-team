@@ -9,8 +9,11 @@
 # full GATE: PASS, which reads as the gate lying (#66). The method is resolved
 # from the repository's own `allow_*_merge` settings, preferring `merge` so
 # history keeps the reviewed commit intact, then `squash`, then `rebase`.
-# `LAND_MERGE_METHOD=merge|squash|rebase` overrides that, and — unlike the
-# remedy #68 describes — it is honoured on the path that prints it.
+# Repository settings are only the first layer: target-branch protection and
+# every active matching ruleset may narrow the effective set further (#95).
+# `LAND_MERGE_METHOD=merge|squash|rebase` selects from that effective set; it
+# never bypasses policy, and — unlike the remedy #68 describes — is honoured
+# on the path that prints it.
 #
 # The gate is always the merge precondition. Once the PR is merged, the script
 # moves both the PR and its lane issue to task:done and records the acting agent.
@@ -54,7 +57,7 @@ repo=$(ai_team_origin_repo) || {
 [[ -n "$repo" ]] || { echo "cannot resolve the repository from origin" >&2; exit 2; }
 
 pr_json=$(gh pr view "$pr" --repo "$repo" \
-  --json number,title,body,headRefName,labels,isDraft,state,mergeCommit,comments 2>/dev/null) || {
+  --json number,title,body,headRefName,baseRefName,labels,isDraft,state,mergeCommit,comments 2>/dev/null) || {
   echo "cannot read PR #$pr from $repo" >&2
   exit 2
 }
@@ -65,6 +68,7 @@ pr_identity=$(gh api "repos/$repo/pulls/$pr" 2>/dev/null) || {
 
 title=$(jq -r '.title // ""' <<<"$pr_json")
 branch=$(jq -r '.headRefName // ""' <<<"$pr_json")
+base_branch=$(jq -r '.baseRefName // ""' <<<"$pr_json")
 body=$(jq -r '.body // ""' <<<"$pr_json")
 automated_author=$(ai_team_trusted_automated_author_lane "$pr_identity")
 if [[ -n "$automated_author" ]]; then
@@ -85,41 +89,170 @@ if [[ "$state" == "OPEN" ]]; then
     exit 1
   fi
 
-  # Resolve the merge method from the repository rather than assuming one.
-  # An explicit override wins; otherwise prefer `merge` (the reviewed commit
-  # survives verbatim), then `squash`, then `rebase`. A repository that allows
-  # none of the three cannot be landed into by any method, and saying so beats
-  # a 405 the operator has to decode.
+  # Resolve the effective merge methods from every GitHub policy layer. The
+  # branch-rules endpoint already returns every active repository and parent
+  # ruleset matching this exact base branch; intersecting every pull_request
+  # rule therefore handles overlapping rulesets without reimplementing GitHub's
+  # ref-pattern grammar. Classic protection is a separate, layered API.
   merge_method="${LAND_MERGE_METHOD:-}"
-  if [[ -n "$merge_method" ]]; then
-    case "$merge_method" in
-      merge|squash|rebase) ;;
-      *)
-        echo "LAND_MERGE_METHOD must be merge, squash, or rebase (got '$merge_method')" >&2
-        exit 2
-        ;;
-    esac
-  else
-    if ! merge_settings=$(gh api "repos/$repo" \
-      --jq '[(.allow_merge_commit // false), (.allow_squash_merge // false), (.allow_rebase_merge // false)] | @tsv' 2>&1); then
-      echo "cannot read merge settings for $repo; set LAND_MERGE_METHOD=merge|squash|rebase" >&2
-      printf '%s\n' "$merge_settings" >&2
+  case "$merge_method" in
+    ""|merge|squash|rebase) ;;
+    *)
+      echo "LAND_MERGE_METHOD must be merge, squash, or rebase (got '$merge_method')" >&2
+      exit 2
+      ;;
+  esac
+  [[ -n "$base_branch" ]] || {
+    echo "cannot determine PR #$pr base branch; refusing to guess merge policy" >&2
+    exit 2
+  }
+
+  if ! merge_settings=$(gh api "repos/$repo" 2>&1); then
+    echo "cannot read repository merge settings for $repo; refusing to guess merge policy" >&2
+    printf '%s\n' "$merge_settings" >&2
+    exit 2
+  fi
+
+  encoded_base=$(jq -rn --arg value "$base_branch" '$value | @uri')
+  if ! applied_rules=$(gh api --paginate --slurp \
+    "repos/$repo/rules/branches/$encoded_base?per_page=100" 2>&1); then
+    echo "cannot read active rulesets for $repo branch '$base_branch'; refusing to guess merge policy" >&2
+    printf '%s\n' "$applied_rules" >&2
+    exit 2
+  fi
+
+  classic_linear=false
+  if ! branch_protection=$(gh api "repos/$repo/branches/$encoded_base/protection" 2>&1); then
+    # GitHub uses the canonical structured 404 below for a genuinely
+    # unprotected branch. gh currently concatenates its diagnostic directly
+    # after the JSON body because that body has no newline. Accept that exact
+    # production shape or the exact JSON body alone. A generic/concealed 404,
+    # extra JSON, malformed suffix, or contradictory diagnostic is not proof
+    # that no policy exists and therefore fails closed.
+    if ! AI_TEAM_PROTECTION_RESPONSE="$branch_protection" python3 - <<'PY'
+import json
+import os
+import sys
+
+
+response = os.environ["AI_TEAM_PROTECTION_RESPONSE"]
+diagnostic = "gh: Branch not protected (HTTP 404)"
+body = response
+if response.endswith(diagnostic):
+    body = response[:-len(diagnostic)]
+    # The production shape is a direct concatenation. Whitespace before the
+    # diagnostic is a different, unsupported response and remains ambiguous.
+    if not body or body[-1].isspace():
+        sys.exit(1)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON member: {key}")
+        result[key] = value
+    return result
+
+
+try:
+    parsed = json.loads(body, object_pairs_hook=unique_object)
+except (json.JSONDecodeError, ValueError):
+    sys.exit(1)
+
+expected = {
+    "message": "Branch not protected",
+    "documentation_url": (
+        "https://docs.github.com/rest/branches/"
+        "branch-protection#get-branch-protection"
+    ),
+    "status": "404",
+}
+sys.exit(0 if parsed == expected else 1)
+PY
+    then
+      echo "cannot read classic protection for $repo branch '$base_branch'; refusing to guess merge policy" >&2
+      printf '%s\n' "$branch_protection" >&2
       exit 2
     fi
-    IFS=$'\t' read -r allow_merge allow_squash allow_rebase <<<"$merge_settings"
-    if [[ "$allow_merge" == "true" ]]; then
-      merge_method=merge
-    elif [[ "$allow_squash" == "true" ]]; then
-      merge_method=squash
-    elif [[ "$allow_rebase" == "true" ]]; then
-      merge_method=rebase
-    else
-      echo "refusing #$pr: $repo allows no merge method (merge, squash and rebase are all disabled)" >&2
-      exit 1
+  else
+    # Do not use jq -e here: a valid JSON false is an exit-1 result under -e
+    # and would be indistinguishable from malformed protection (#95).
+    if ! classic_linear=$(jq -r '
+      if has("required_linear_history") then
+        if (.required_linear_history | type) == "object"
+            and (.required_linear_history | has("enabled"))
+            and (.required_linear_history.enabled | type) == "boolean" then
+          .required_linear_history.enabled
+        else error("invalid required_linear_history") end
+      else false end
+    ' \
+      <<<"$branch_protection" 2>/dev/null); then
+      echo "classic protection for $repo branch '$base_branch' has an ambiguous required_linear_history value" >&2
+      exit 2
     fi
   fi
-  [[ "$merge_method" == "merge" ]] \
-    || echo "landing #$pr with merge_method=$merge_method ($repo does not allow a merge commit)" >&2
+
+  if ! effective_methods=$(jq -enr \
+    --argjson settings "$merge_settings" \
+    --argjson pages "$applied_rules" \
+    --argjson classic_linear "$classic_linear" '
+      def known_method: . == "merge" or . == "squash" or . == "rebase";
+      def intersect($left; $right): [$left[] | select(. as $method | $right | index($method))];
+      if ($settings.allow_merge_commit | type) != "boolean"
+          or ($settings.allow_squash_merge | type) != "boolean"
+          or ($settings.allow_rebase_merge | type) != "boolean" then
+        error("repository merge settings are not booleans")
+      elif ($pages | type) != "array" or any($pages[]; type != "array") then
+        error("active-rules response is not paginated JSON")
+      else
+        [if $settings.allow_merge_commit then "merge" else empty end,
+         if $settings.allow_squash_merge then "squash" else empty end,
+         if $settings.allow_rebase_merge then "rebase" else empty end] as $repository_methods
+        | ($pages | add) as $rules
+        | if any($rules[]; type != "object" or (.type | type) != "string") then
+            error("active-rules response contains an invalid rule")
+          else
+            reduce $rules[] as $rule (
+              if $classic_linear then ($repository_methods - ["merge"]) else $repository_methods end;
+              if $rule.type == "required_linear_history" then
+                . - ["merge"]
+              elif $rule.type == "pull_request" then
+                if ($rule.parameters.allowed_merge_methods | type) != "array"
+                    or ($rule.parameters.allowed_merge_methods | length) == 0
+                    or any($rule.parameters.allowed_merge_methods[]; (type != "string") or (known_method | not)) then
+                  error("pull_request rule has invalid allowed_merge_methods")
+                else
+                  intersect(.; $rule.parameters.allowed_merge_methods)
+                end
+              elif $rule.type == "merge_queue" then
+                error("an active merge_queue rule requires the merge queue")
+              else . end
+            ) | join(" ")
+          end
+      end
+    ' 2>&1); then
+    echo "cannot resolve merge policy for $repo branch '$base_branch': $effective_methods" >&2
+    exit 2
+  fi
+
+  if [[ -z "$effective_methods" ]]; then
+    echo "refusing #$pr: repository settings and target-branch rules allow no common merge method" >&2
+    exit 1
+  fi
+  if [[ -n "$merge_method" ]]; then
+    if [[ " $effective_methods " != *" $merge_method "* ]]; then
+      echo "refusing #$pr: LAND_MERGE_METHOD=$merge_method is forbidden by effective policy for '$base_branch' (allowed: $effective_methods)" >&2
+      exit 1
+    fi
+  elif [[ " $effective_methods " == *" merge "* ]]; then
+    merge_method=merge
+  elif [[ " $effective_methods " == *" squash "* ]]; then
+    merge_method=squash
+  else
+    merge_method=rebase
+  fi
+  echo "landing #$pr with merge_method=$merge_method (effective methods for '$base_branch': $effective_methods)" >&2
 
   # A passed gate establishes the AI Team's own exact-head review evidence; it
   # cannot waive GitHub branch protections. Keep GitHub's response visible on

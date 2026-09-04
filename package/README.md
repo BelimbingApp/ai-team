@@ -218,10 +218,14 @@ field GitHub acts on at merge. The Development panel populates it without
 touching the body, so a pull request can read as closing nothing and still close
 an issue (BelimbingApp/ai-team#67). A lane that declares none while GitHub would
 close one, or names a different one, is refused: declare the lane or unlink it.
-`land.sh` resolves the merge method from the repository's own settings —
-`merge` when allowed so the reviewed commit survives verbatim, else `squash`,
-else `rebase` — and refuses before merging when none is. Override with
-`LAND_MERGE_METHOD=merge|squash|rebase` (BelimbingApp/ai-team#66).
+`land.sh` resolves the merge method from the intersection of repository
+settings, classic protection on the pull request's target branch, and every
+active matching repository or parent ruleset. It prefers `merge` when the
+effective policy allows it so the reviewed commit survives verbatim, else
+`squash`, else `rebase`, and refuses before merging when policy is unreadable,
+ambiguous, or has no common method. `LAND_MERGE_METHOD=merge|squash|rebase`
+selects from that effective set; it does not bypass policy
+(BelimbingApp/ai-team#66, BelimbingApp/ai-team#95).
 When a pull request declares no lane through its title, branch, or an exact
 `AI-Team-Lane-Issue: none` line, `ready.sh`, `gate.sh` and `land.sh` refuse and
 name `READY_ISSUE=<n>` — and all three honour it. `orient.sh` does not: it
