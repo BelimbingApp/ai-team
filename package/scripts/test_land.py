@@ -15,6 +15,16 @@ LANE = Path(__file__).with_name("_lane_issue.sh")
 DEFAULT_BRANCH = Path(__file__).with_name("_default_branch.sh")
 TRUSTED_AUTHOR = Path(__file__).with_name("_trusted_author.sh")
 HYGIENE = Path(__file__).with_name("label_hygiene.sh")
+CANONICAL_UNPROTECTED_JSON = (
+    '{"message":"Branch not protected",'
+    '"documentation_url":"https://docs.github.com/rest/branches/'
+    'branch-protection#get-branch-protection","status":"404"}'
+)
+# Captured from the production command with xxd: the API body has no newline,
+# so gh's stderr diagnostic begins immediately after the closing brace.
+CANONICAL_UNPROTECTED_RESPONSE = (
+    CANONICAL_UNPROTECTED_JSON + "gh: Branch not protected (HTTP 404)"
+)
 
 
 class LandHarness(unittest.TestCase):
@@ -87,12 +97,7 @@ class LandHarness(unittest.TestCase):
                     ;;
                   "api repos/example/canonical/branches/main/protection")
                     if [ "${LAND_TEST_PROTECTION_STATUS:-404}" != "0" ]; then
-                      if [ -n "${LAND_TEST_PROTECTION_FAILURE:-}" ]; then
-                        printf '%s\\n' "$LAND_TEST_PROTECTION_FAILURE" >&2
-                      else
-                        printf '{"message":"Branch not protected","status":"404"}\\n' >&2
-                        printf 'gh: Branch not protected (HTTP 404)\\n' >&2
-                      fi
+                      printf '%s\\n' "$LAND_TEST_PROTECTION_FAILURE" >&2
                       exit 1
                     fi
                     printf '%s\\n' "$LAND_TEST_PROTECTION"
@@ -166,7 +171,7 @@ class LandHarness(unittest.TestCase):
         classic_linear: bool | None = None,
         protection: dict | None = None,
         protection_status: str | None = None,
-        protection_failure: str = "",
+        protection_failure: str | None = None,
         rules_pages: list[list[dict]] | None = None,
         rules_status: str = "0",
         undeclared_lane: bool = False,
@@ -201,7 +206,10 @@ class LandHarness(unittest.TestCase):
                     "required_linear_history": {"enabled": classic_linear}
                 }
             ),
-            LAND_TEST_PROTECTION_FAILURE=protection_failure,
+            LAND_TEST_PROTECTION_FAILURE=(
+                CANONICAL_UNPROTECTED_RESPONSE
+                if protection_failure is None else protection_failure
+            ),
             LAND_TEST_RULES_PAGES=json.dumps(
                 rules_pages if rules_pages is not None else [[]]
             ),
@@ -597,6 +605,24 @@ class MergeMethodTest(LandHarness):
         self.assertIn("cannot read classic protection", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
 
+    def test_live_concatenated_unprotected_response_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=CANONICAL_UNPROTECTED_RESPONSE,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
+    def test_canonical_json_without_gh_diagnostic_is_accepted(self):
+        result = self.run_land(
+            protection_status="404",
+            protection_failure=CANONICAL_UNPROTECTED_JSON,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("-f merge_method=merge", self.merge_call())
+
     def test_ambiguous_classic_linear_history_fails_closed(self):
         result = self.run_land(protection={
             "required_linear_history": {"enabled": "yes"}
@@ -628,6 +654,48 @@ class MergeMethodTest(LandHarness):
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot read classic protection", result.stderr)
         self.assertNotIn("-X PUT", self.gh_log.read_text(encoding="utf-8"))
+
+    def test_canonical_404_with_extra_or_contradictory_evidence_fails_closed(self):
+        poisoned_responses = [
+            CANONICAL_UNPROTECTED_JSON + "not-json",
+            CANONICAL_UNPROTECTED_JSON
+            + '{"message":"Not Found","status":"404"}',
+            CANONICAL_UNPROTECTED_JSON + "gh: Forbidden (HTTP 403)",
+        ]
+        for response in poisoned_responses:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    protection_status="404", protection_failure=response
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
+
+    def test_poisoned_canonical_404_fails_closed_even_with_override(self):
+        poisoned_responses = [
+            CANONICAL_UNPROTECTED_JSON + "not-json",
+            CANONICAL_UNPROTECTED_JSON
+            + '{"message":"Not Found","status":"404"}',
+            CANONICAL_UNPROTECTED_JSON + "gh: Forbidden (HTTP 403)",
+        ]
+        for response in poisoned_responses:
+            with self.subTest(response=response):
+                self.gh_log.write_text("", encoding="utf-8")
+                result = self.run_land(
+                    merge_method="squash",
+                    protection_status="404",
+                    protection_failure=response,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot read classic protection", result.stderr)
+                self.assertNotIn(
+                    "-X PUT", self.gh_log.read_text(encoding="utf-8")
+                )
 
     def test_malformed_pull_request_rule_fails_closed(self):
         result = self.run_land(rules_pages=[[{
