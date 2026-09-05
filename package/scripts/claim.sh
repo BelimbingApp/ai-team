@@ -309,13 +309,17 @@ else
     lane_root="$(dirname "$outermost")/.ai-team-lanes"
   fi
   mkdir -p "$lane_root"
-  worktree="$lane_root/$(basename "$root")-${agent}-issue-${issue}"
+  # One worktree per agent per repository, recycled across lanes. A worktree
+  # per issue multiplied checkouts of a large application until the disk was
+  # the bottleneck; the lane is the branch, not the directory.
+  worktree="$lane_root/$(basename "$root")-${agent}"
 fi
 
 local_branch=0
 remote_branch=0
 pushed_branch_sha=
 fresh_local_sha=
+worktree_recycled=0
 git show-ref --verify --quiet "refs/heads/$branch" && local_branch=1
 git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1 && remote_branch=1
 
@@ -348,7 +352,13 @@ rollback_partial_claim() {
       echo "fresh claim worktree $worktree changed during rollback; preserving it and its refs" >&2
       return 0
     fi
-    if ! git worktree remove "$worktree" >/dev/null 2>&1; then
+    if [[ $worktree_recycled -eq 1 ]]; then
+      # The directory predates this claim: leave it, parked on the base tip.
+      git -C "$worktree" switch -q --detach "origin/$base_branch" >/dev/null 2>&1 || {
+        echo "cannot park recycled worktree $worktree; preserving its refs" >&2
+        return 0
+      }
+    elif ! git worktree remove "$worktree" >/dev/null 2>&1; then
       echo "fresh claim worktree $worktree changed while rollback removed it; preserving its refs" >&2
       return 0
     fi
@@ -447,7 +457,37 @@ if [[ $resume -eq 0 ]]; then
     exit 1
   }
   restore_root_off_claim
-  git worktree add -b "$branch" "$worktree" "origin/$base_branch"
+  if git worktree list --porcelain 2>/dev/null | grep -qx "worktree $worktree"; then
+    # Recycle the agent's worktree: it must be clean, and whatever it had
+    # checked out must already be on origin (landed or pushed) so switching
+    # away loses nothing.
+    recycled_status=$(git -C "$worktree" status --porcelain --untracked-files=normal 2>/dev/null) || {
+      echo "cannot read the state of $worktree; refusing to recycle it" >&2
+      exit 2
+    }
+    if [[ -n "$recycled_status" ]]; then
+      echo "refusing to claim: $worktree has uncommitted changes from a previous lane; commit, push, or discard them first" >&2
+      exit 1
+    fi
+    if ! git -C "$worktree" branch -r --contains HEAD 2>/dev/null | grep -q .; then
+      echo "refusing to claim: $worktree is on $(git -C "$worktree" rev-parse --short HEAD), which is on no remote branch; push or discard it first" >&2
+      exit 1
+    fi
+    previous_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    git -C "$worktree" switch -q -c "$branch" "origin/$base_branch" || {
+      echo "cannot switch $worktree to a new branch for #$issue" >&2
+      exit 2
+    }
+    worktree_recycled=1
+    if [[ -n "$previous_branch" ]] && git merge-base --is-ancestor "$previous_branch" "origin/$base_branch" 2>/dev/null; then
+      git branch -q -D "$previous_branch" >/dev/null 2>&1 && echo "recycled $worktree; deleted landed branch $previous_branch"
+    fi
+  elif [[ -d "$worktree" ]]; then
+    echo "refusing to claim: $worktree exists but is not a registered worktree of this checkout" >&2
+    exit 1
+  else
+    git worktree add -b "$branch" "$worktree" "origin/$base_branch"
+  fi
   fresh_local_sha=$(git -C "$worktree" rev-parse HEAD)
   git -C "$worktree" commit --allow-empty -m "claim: #$issue" || {
     echo "claim commit failed for #$issue — rolling back" >&2

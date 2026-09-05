@@ -291,6 +291,43 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         self.assertIn("must exactly match origin/main", result.stderr)
         self.assertIsNone(self.remote_ref("agent/composer-issue-42"))
 
+    def test_fresh_claim_recycles_a_clean_parked_worktree(self):
+        # One worktree per agent, reused across lanes: a registered, clean
+        # worktree parked on origin/main is switched to the new lane branch
+        # instead of a second checkout being created beside it.
+        worktree = Path(self.dir.name) / "wt-recycled"
+        self.git(["fetch", "-q", "origin", "main"])
+        self.git(["worktree", "add", "-q", "--detach", str(worktree), "origin/main"])
+        result = self.run_claim(worktree=worktree)
+        self.assert_claim_success(result)
+        self.assertEqual(self.git_out(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree), CLAIM_BRANCH)
+        self.assertEqual(
+            self.git_out(["worktree", "list", "--porcelain"]).count("worktree "), 2,
+            "recycling must not add a worktree",
+        )
+
+    def test_fresh_claim_refuses_a_dirty_parked_worktree(self):
+        worktree = Path(self.dir.name) / "wt-dirty-parked"
+        self.git(["fetch", "-q", "origin", "main"])
+        self.git(["worktree", "add", "-q", "--detach", str(worktree), "origin/main"])
+        (worktree / "leftover.txt").write_text("from a previous lane\n", encoding="utf-8")
+        result = self.run_claim(worktree=worktree)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uncommitted changes from a previous lane", result.stderr)
+        self.assertIsNone(self.remote_ref(CLAIM_BRANCH), "a refused claim must push nothing")
+
+    def test_fresh_claim_refuses_a_parked_worktree_with_unpushed_work(self):
+        worktree = Path(self.dir.name) / "wt-unpushed-parked"
+        self.git(["fetch", "-q", "origin", "main"])
+        self.git(["worktree", "add", "-q", "--detach", str(worktree), "origin/main"])
+        subprocess.run(
+            ["git", "commit", "-q", "--allow-empty", "-m", "never pushed"],
+            cwd=worktree, check=True, env=self.git_env(),
+        )
+        result = self.run_claim(worktree=worktree)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("on no remote branch", result.stderr)
+
     def test_fresh_claim_rollback_preserves_a_concurrently_changed_local_ref(self):
         parent = self.git_out(["rev-parse", "HEAD"])
         tree = self.git_out(["rev-parse", "HEAD^{tree}"])

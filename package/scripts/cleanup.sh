@@ -3,12 +3,13 @@
 # cleanup.sh — leave the checkout clean when you stop.
 #
 #   docs/ai-team/scripts/cleanup.sh          dry run: shows what it would remove
-#   docs/ai-team/scripts/cleanup.sh --yes    delete merged branches, prune worktrees
+#   docs/ai-team/scripts/cleanup.sh --yes    delete merged branches, remove finished worktrees
 #
 # A task is done when nothing you created is left lying around, and untidiness is
 # invisible to whoever made it. This removes only what is provably finished:
-# local branches fully merged into the default branch, and stale worktree refs. It
-# never touches an unmerged branch or an active worktree. Background loops and
+# local branches fully merged into the default branch, and worktrees that are
+# clean with a HEAD already on origin. It never touches an unmerged branch, a
+# dirty worktree, or one holding unpushed commits. Background loops and
 # heartbeats it only *lists* — a shell cannot cancel your tool's scheduler; stop
 # those where you started them (your heartbeat cron, your watcher). Remote branch
 # deletion remains explicit because a shared checkout cannot infer which remote
@@ -68,14 +69,48 @@ done < <(git for-each-ref --format='%(refname:short)' refs/heads/)
 
 echo
 echo "== worktrees =="
-git worktree list 2>/dev/null | sed 's/^/  /'
+# A worktree is finished when it is clean and its HEAD is already on origin —
+# landed into the default branch or pushed to a remote branch. Those are
+# removed with --yes; anything holding unpushed work is listed and kept. The
+# checkout you run this from is never removed.
+self_top=$(git rev-parse --show-toplevel 2>/dev/null)
+any=0
+while IFS= read -r w; do
+  [ -z "$w" ] && continue
+  [ "$w" = "$ROOT" ] && continue
+  [ "$w" = "$self_top" ] && continue
+  any=1
+  if [ ! -d "$w" ]; then
+    echo "  $w — directory gone (prunable)"
+    continue
+  fi
+  wbranch=$(git -C "$w" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "detached")
+  wstatus=$(git -C "$w" status --porcelain --untracked-files=normal 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$wstatus" != "0" ]; then
+    echo "  kept $w [$wbranch] — has uncommitted changes"
+    continue
+  fi
+  if ! git -C "$w" branch -r --contains HEAD 2>/dev/null | grep -q .; then
+    echo "  kept $w [$wbranch] — HEAD is on no remote branch (unpushed work)"
+    continue
+  fi
+  if [ "$apply" -eq 1 ]; then
+    if git worktree remove --force "$w" >/dev/null 2>&1; then
+      echo "  removed $w [$wbranch]"
+      [ "$wbranch" != "detached" ] && git merge-base --is-ancestor "$wbranch" "origin/$BASE" 2>/dev/null \
+        && git branch -D "$wbranch" >/dev/null 2>&1 && echo "  deleted $wbranch"
+    else
+      echo "  kept $w [$wbranch] — git refused to remove it"
+    fi
+  else
+    echo "  would remove $w [$wbranch] — clean and on origin"
+  fi
+done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0, 10)}')
+[ "$any" -eq 0 ] && echo "  none besides this checkout"
 if [ "$apply" -eq 1 ]; then
   pruned=$(git worktree prune -v 2>&1)
-  [ -n "$pruned" ] && printf '%s\n' "$pruned" | sed 's/^/  pruned: /' || echo "  nothing stale to prune"
-  echo "  note: your own active worktree cannot self-remove; run 'git worktree remove <path>'"
-  echo "        from another checkout once this session ends."
-else
-  echo "  (--yes runs 'git worktree prune' — removes only stale refs, never an active worktree)"
+  [ -n "$pruned" ] && printf '%s\n' "$pruned" | sed 's/^/  pruned: /'
+  echo "  note: the worktree you are running from cannot self-remove; run cleanup from the root checkout."
 fi
 
 echo
