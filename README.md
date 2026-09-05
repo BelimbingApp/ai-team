@@ -505,6 +505,9 @@ after author pushes, reviews peers before claiming more work, and continues an
 active lane. If nothing is actionable, honestly idle. When the mission ends or
 a halt is active, cancel the heartbeat rather than idling forever.
 
+Human-facing times: **Asia/Kuala_Lumpur**, labelled. Machine data: ISO-8601 UTC.
+Never compare across zones.
+
 Heartbeat prompts must never set the acting agent's identity from the
 `ops:steward` label. Name the appointment explicitly and require `CLAIM_AGENT`
 for the acting runtime (BelimbingApp/ai-team#51).
