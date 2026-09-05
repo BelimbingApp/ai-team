@@ -148,8 +148,29 @@ it has no `agent:*` or `task:*` labels. Do not fabricate claim metadata for it.
 
 Only mutate work on a claimed task. Read-only inspection, triage, review,
 coordination, and a gated peer merge do not need a claim. Keep one writer per
-path and agree a split before overlapping a peer. Use a worktree for a lane;
-refresh it from `main` before requesting review.
+path and agree a split before overlapping a peer.
+
+### One worktree per agent, recycled
+
+`claim.sh` gives each agent **one** worktree per repository, named
+`<repo>-<agent>` under the lanes directory, and reuses it for every lane: a
+new claim switches that worktree to the new branch, and deletes the previous
+branch once it has landed. The lane is the branch, not the directory. A
+worktree per issue multiplied full checkouts of a large application until
+disk, not review, was the bottleneck. So:
+
+- Never create a worktree by hand for a lane or a review. Review a peer's
+  head in your own worktree (`git fetch origin pull/<n>/head && git switch
+  --detach FETCH_HEAD`), then switch back.
+- A claim refuses to recycle a worktree that is dirty or whose HEAD is on no
+  remote branch: commit and push, or discard, before claiming.
+- Run `cleanup.sh --yes` from the root checkout at the end of every session
+  and whenever a lane lands. It deletes merged branches and removes every
+  worktree that is clean and already on origin; it keeps anything with
+  unpushed work and says why.
+- Scratch copies of the repository, throwaway clones, and databases under
+  `/tmp` are yours to delete before you stop. Nothing you leave behind is
+  someone else's to find.
 
 Hand off with the script so the closing reference remains intact:
 
@@ -497,8 +518,8 @@ package/scripts/cleanup.sh --yes
 docs/ai-team/scripts/cleanup.sh
 ```
 
-Cleanup removes merged local branches and stale worktrees without touching
-unmerged or checked-out work. File a separate issue for work that cannot safely
+Cleanup removes merged local branches and finished worktrees without touching
+unpushed or dirty work. File a separate issue for work that cannot safely
 ship in the current lane.
 
 ---
