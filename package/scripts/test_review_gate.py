@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -25,6 +26,7 @@ class GateHarness(unittest.TestCase):
         head_sha=SHA,
         identity=None,
         comments=(),
+        cwd=None,
     ):
         if identity is None:
             identity = {
@@ -51,10 +53,69 @@ class GateHarness(unittest.TestCase):
                 ["bash", bash_path(SCRIPT)],
                 stub_directory=Path(directory),
                 env=env,
+                cwd=cwd,
                 text=True,
                 capture_output=True,
                 check=False,
             )
+
+    def git(self, repository, *arguments, check=True, input=None):
+        return subprocess.run(
+            [
+                "git",
+                "-c", "user.name=Review Gate Test",
+                "-c", "user.email=review-gate@example.invalid",
+                *arguments,
+            ],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=check,
+            input=input,
+        )
+
+    def commit_file(self, repository, path, content, message):
+        file = repository / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(content, encoding="utf-8")
+        self.git(repository, "add", path)
+        self.git(repository, "commit", "-qm", message)
+        return self.git(repository, "rev-parse", "HEAD").stdout.strip()
+
+    def clean_merge_history(self):
+        directory = tempfile.TemporaryDirectory()
+        repository = Path(directory.name)
+        self.git(repository, "init", "-q", "-b", "main")
+        self.commit_file(repository, "shared.txt", "base\n", "base")
+        self.git(repository, "switch", "-qc", "feature")
+        accepted = self.commit_file(repository, "feature.txt", "feature\n", "feature")
+        self.git(repository, "switch", "-q", "main")
+        base = self.commit_file(repository, "main.txt", "main\n", "main")
+        self.git(repository, "switch", "-q", "feature")
+        self.git(repository, "merge", "--no-ff", "-qm", "merge main", "main")
+        head = self.git(repository, "rev-parse", "HEAD").stdout.strip()
+        return directory, repository, accepted, base, head
+
+    def run_carry_gate(self, repository, accepted, base, head, reviews=None,
+                       base_ref="main"):
+        identity = {
+            "user": {"id": 1, "login": "human-author", "type": "User"},
+            "head": {"repo": {"id": 100}},
+            "base": {
+                "repo": {"id": 100, "default_branch": "main"},
+                "sha": base,
+                "ref": base_ref,
+            },
+        }
+        if reviews is None:
+            reviews = [self.review(commit_id=accepted, head_marker=accepted)]
+        return self.run_gate(
+            reviews,
+            reviewed=head,
+            head_sha=head,
+            identity=identity,
+            cwd=repository,
+        )
 
     def review(
         self,
@@ -607,6 +668,137 @@ printf 'signal-exit=%s\n' "$rc"
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("changes required by reviewer", result.stdout)
+
+    def test_acceptance_carries_across_a_clean_two_parent_main_merge(self):
+        directory, repository, accepted, base, head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        result = self.run_carry_gate(repository, accepted, base, head)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"carried from accepted first parent {accepted}", result.stdout
+        )
+
+    def test_carry_forward_refuses_an_extra_tree_change_in_the_merge_commit(self):
+        directory, repository, accepted, base, _head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        head = self.commit_file(repository, "ride-along.txt", "extra\n", "extra")
+        tree = self.git(repository, "rev-parse", "HEAD^{tree}").stdout.strip()
+        authored_merge = self.git(
+            repository,
+            "commit-tree", tree, "-p", accepted, "-p", base,
+            input="authored merge\n",
+        ).stdout.strip()
+        result = self.run_carry_gate(
+            repository, accepted, base, authored_merge
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+
+    def test_carry_forward_refuses_wrong_parent_order(self):
+        directory, repository, accepted, base, head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        tree = self.git(repository, "rev-parse", f"{head}^{{tree}}").stdout.strip()
+        reversed_merge = self.git(
+            repository,
+            "commit-tree", tree, "-p", base, "-p", accepted,
+            input="reversed merge\n",
+        ).stdout.strip()
+        result = self.run_carry_gate(
+            repository, accepted, base, reversed_merge
+        )
+
+        self.assertEqual(result.returncode, 1)
+
+    def test_carry_forward_refuses_a_second_parent_outside_base_history(self):
+        directory, repository, accepted, base, _head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        self.git(repository, "switch", "-q", "--detach", accepted)
+        rogue = self.commit_file(repository, "rogue.txt", "rogue\n", "rogue")
+        self.git(repository, "switch", "-q", "feature")
+        self.git(repository, "reset", "--hard", accepted)
+        self.git(repository, "merge", "--no-ff", "-qm", "merge rogue", rogue)
+        head = self.git(repository, "rev-parse", "HEAD").stdout.strip()
+        result = self.run_carry_gate(repository, accepted, base, head)
+
+        self.assertEqual(result.returncode, 1)
+
+    def test_carry_forward_refuses_a_manually_resolved_conflict(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        repository = Path(directory.name)
+        self.git(repository, "init", "-q", "-b", "main")
+        self.commit_file(repository, "conflict.txt", "base\n", "base")
+        self.git(repository, "switch", "-qc", "feature")
+        accepted = self.commit_file(repository, "conflict.txt", "feature\n", "feature")
+        self.git(repository, "switch", "-q", "main")
+        base = self.commit_file(repository, "conflict.txt", "main\n", "main")
+        self.git(repository, "switch", "-q", "feature")
+        self.git(repository, "merge", "--no-ff", "main", check=False)
+        head = self.commit_file(repository, "conflict.txt", "resolved\n", "resolve")
+        result = self.run_carry_gate(repository, accepted, base, head)
+
+        self.assertEqual(result.returncode, 1)
+
+    def test_later_changes_required_on_carried_parent_supersedes_acceptance(self):
+        directory, repository, accepted, base, head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        reviews = [
+            self.review(
+                commit_id=accepted,
+                head_marker=accepted,
+                at="2026-01-01T00:00:00Z",
+            ),
+            self.review(
+                commit_id=accepted,
+                head_marker=accepted,
+                body="**From:** reviewer\n\n**Verdict:** changes required",
+                at="2026-01-01T00:01:00Z",
+            ),
+        ]
+
+        result = self.run_carry_gate(
+            repository, accepted, base, head, reviews=reviews
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("changes required by reviewer", result.stdout)
+
+    def test_carry_forward_refuses_an_ambiguous_parent_verdict(self):
+        directory, repository, accepted, base, head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        reviews = [self.review(
+                commit_id=accepted,
+                head_marker=accepted,
+                body=(
+                    "**From:** reviewer\n\n**Verdict:** accept\n\n"
+                    "**Verdict:** changes required"
+                ),
+            )]
+        result = self.run_carry_gate(
+            repository, accepted, base, head, reviews=reviews
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("rejected for format", result.stdout)
+
+    def test_carry_forward_refuses_a_non_default_target_branch(self):
+        directory, repository, accepted, base, head = self.clean_merge_history()
+        self.addCleanup(directory.cleanup)
+        result = self.run_carry_gate(
+            repository, accepted, base, head, base_ref="release"
+        )
+
+        self.assertEqual(result.returncode, 1)
+
+    def test_carry_forward_refuses_missing_commit_objects(self):
+        result = self.run_gate([
+            self.review(commit_id=STALE_SHA, head_marker=STALE_SHA),
+        ])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("carried from accepted first parent", result.stdout)
 
     def test_comment_style_verdict_is_rejected(self):
         result = self.run_gate([

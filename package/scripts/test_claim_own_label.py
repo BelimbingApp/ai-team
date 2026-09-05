@@ -45,6 +45,8 @@ class ClaimOwnLabelTest(unittest.TestCase):
 
         self.bin = base / "bin"
         self.bin.mkdir()
+        self.lane = base / "lane"
+        self.pr_create_marker = base / "pr-created"
         gh = self.bin / "gh"
         gh.write_text(
             textwrap.dedent(
@@ -68,6 +70,7 @@ class ClaimOwnLabelTest(unittest.TestCase):
                   "pr list") printf '%s\\n' "${CLAIM_TEST_PR_LIST:-[]}" ;;
                   "label list") printf '[{"name":"agent:fable"}]\\n' ;;
                   "pr create")
+                    touch "${CLAIM_TEST_PR_CREATE_MARKER:-/dev/null}"
                     prev=""
                     for arg in "$@"; do
                       if [ "$prev" = "--body-file" ] && [ -f "$arg" ]; then
@@ -114,6 +117,8 @@ class ClaimOwnLabelTest(unittest.TestCase):
         env["CLAIM_TEST_PR_LIST"] = pr_list
         env["CLAIM_TEST_REMOVE_READY_EXIT"] = remove_ready_exit
         env["CLAIM_TEST_BODY_CAPTURE"] = bash_path(self.bin / "captured-pr-body")
+        env["CLAIM_TEST_PR_CREATE_MARKER"] = bash_path(self.pr_create_marker)
+        env["CLAIM_WORKTREE"] = str(self.lane)
         return run_with_bash_path(
             ["bash", bash_path(SCRIPT), "42"],
             stub_directory=self.bin,
@@ -153,22 +158,57 @@ class ClaimOwnLabelTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("already held by agent:sol", result.stderr)
 
-    def test_own_label_with_an_open_claim_pr_is_still_refused_by_the_registry(self):
+    def create_pushed_claim_branch(self, branch="agent/fable-issue-42"):
+        subprocess.run(
+            ["git", "branch", branch, "origin/main"], cwd=self.clone,
+            check=True, env=self.git_env(),
+        )
+        subprocess.run(
+            ["git", "push", "-q", "-u", "origin", branch], cwd=self.clone,
+            check=True, env=self.git_env(),
+        )
+
+    def open_pr(self, *, number=88, holder="fable"):
+        return {
+            "number": number,
+            "title": "self-filed follow-up (#42)",
+            "body": f"**From:** {holder}\n\nCloses #42",
+            "headRefName": f"agent/{holder}-issue-42",
+            "labels": [{"name": f"agent:{holder}"}],
+            "url": f"https://example/pull/{number}",
+        }
+
+    def test_own_label_with_one_open_claim_pr_recreates_its_missing_worktree(self):
+        self.create_pushed_claim_branch()
+        subprocess.run(
+            ["git", "branch", "-D", "agent/fable-issue-42"], cwd=self.clone,
+            check=True, env=self.git_env(), capture_output=True,
+        )
         pr_list = json.dumps(
-            [
-                {
-                    "number": 88,
-                    "title": "self-filed follow-up (#42)",
-                    "body": "Closes #42",
-                    "headRefName": "agent/fable-issue-42",
-                    "labels": [{"name": "agent:fable"}],
-                    "url": "https://example/pull/88",
-                }
-            ]
+            [self.open_pr()]
         )
         result = self.run_claim(self.issue(["agent:fable"]), pr_list=pr_list)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("resumed #42: PR #88", result.stdout)
+        self.assertTrue(self.lane.is_dir())
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.lane,
+            check=True, env=self.git_env(), capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(branch, "agent/fable-issue-42")
+        self.assertFalse(self.pr_create_marker.exists(), "resume must not create a duplicate PR")
+
+    def test_multiple_own_open_claim_prs_are_ambiguous_and_refused(self):
+        pr_list = json.dumps([self.open_pr(number=88), self.open_pr(number=89)])
+        result = self.run_claim(self.issue(["agent:fable"]), pr_list=pr_list)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("an open PR already holds it", result.stderr)
+        self.assertIn("open PR already holds it", result.stderr)
+
+    def test_foreign_open_claim_pr_is_refused(self):
+        pr_list = json.dumps([self.open_pr(holder="sol")])
+        result = self.run_claim(self.issue(["task:ready"]), pr_list=pr_list)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agent:sol", result.stderr)
 
     def test_an_unqueued_issue_with_no_labels_at_all_is_claimable(self):
         # #366's second data set: refusing an unlabelled issue forced an agent

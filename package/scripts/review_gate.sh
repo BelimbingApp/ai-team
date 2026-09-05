@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Decide whether a pull request has an independent, exact-head acceptance.
+# Decide whether a pull request has an independent acceptance for its head.
 #
 # This is the package's single review grammar. `gate.sh` uses it as its
 # pre-flight review step; the GitHub Actions workflow uses it as the required
@@ -33,6 +33,10 @@
 # `**HEAD reviewed:**` marker. GitHub's review `commit_id` remains required as
 # corroboration, but is insufficient by itself because a Dependabot rebase can
 # rewrite that field on an older review to the replacement head.
+# Exact-head evidence is the normal path. A prior exact acceptance may carry
+# across one provably clean two-parent merge of the default branch: the accepted
+# commit must be the first parent, the trusted base history must contain the
+# second parent, and Git's recomputed merge tree must equal the commit tree.
 # Exit 0 means an independent acceptance exists and no independent
 # changes-required verdict supersedes it. Exit 1 is a review failure; exit 2 is
 # an invocation or GitHub-read failure.
@@ -173,6 +177,40 @@ fi
 identity_json=$(jq -c '.identity // {}' "$input" 2>/dev/null || printf '{}')
 automated_author=$(ai_team_trusted_automated_author_lane "$identity_json")
 
+# A review normally binds only the exact current head. The sole carry-forward
+# is a clean two-parent merge whose first parent is the reviewed work and whose
+# second parent is already in the target branch's trusted history. Recompute
+# the merge tree instead of trusting the commit's parent shape: an amended
+# merge, a conflict resolution, a shallow/missing object, or any inability to
+# prove the history leaves carry_from empty and falls back to exact-head only.
+carry_from=""
+reviewed_sha=$(jq -r '.reviewed // "" | ascii_downcase' "$input" 2>/dev/null || true)
+base_sha=$(jq -r '.identity.base.sha // "" | ascii_downcase' "$input" 2>/dev/null || true)
+base_ref=$(jq -r '.identity.base.ref // ""' "$input" 2>/dev/null || true)
+default_branch=$(jq -r '.identity.base.repo.default_branch // ""' "$input" 2>/dev/null || true)
+if [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ && "$base_sha" =~ ^[0-9a-f]{40}$ ]] \
+    && [[ -n "$base_ref" && "$base_ref" == "$default_branch" ]] \
+    && git cat-file -e "$reviewed_sha^{commit}" 2>/dev/null \
+    && git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+  parents=$(git show -s --format=%P "$reviewed_sha" 2>/dev/null || true)
+  read -r -a parent_list <<<"$parents"
+  if [[ "${#parent_list[@]}" == "2" ]]; then
+    first_parent="${parent_list[0]}"
+    second_parent="${parent_list[1]}"
+    if git merge-base --is-ancestor "$second_parent" "$base_sha" 2>/dev/null; then
+      commit_tree=$(git rev-parse "$reviewed_sha^{tree}" 2>/dev/null || true)
+      merge_tree=""
+      if merge_tree=$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+          git -c core.hooksPath=/dev/null merge-tree --write-tree \
+          "$first_parent" "$second_parent" 2>/dev/null) \
+          && [[ "$merge_tree" =~ ^[0-9a-f]{40}$ ]] \
+          && [[ "$merge_tree" == "$commit_tree" ]]; then
+        carry_from="$first_parent"
+      fi
+    fi
+  fi
+fi
+
 # The filter is a fixed, reviewed constant that grows with every diagnostic.
 # Keep it out of argv (#83): Windows rejects large *payloads* before jq starts,
 # and a 50,000-byte review body must still trip that bound — but the filter
@@ -229,20 +267,29 @@ cat >"$filter_file" <<'JQFILTER'
       ["FAIL: expected exactly one agent:<id> author lane, found \($authors | length)"]
     else
       (if $automated_author != "" then $automated_author else $authors[0] end) as $author
-      | [$input.reviews[] | select(.commit_id == $input.reviewed)] as $at_head
-      | [$at_head[]
+      | ([$input.reviewed] + (if $carry_from == "" then [] else [$carry_from] end)) as $eligible_heads
+      | [$input.reviews[] | select(.commit_id as $commit | $eligible_heads | index($commit))] as $at_eligible_head
+      | [$at_eligible_head[]
          | . + {agent: from_agent, verdict: review_verdict, reviewed_head: reviewed_head}
          | select(.agent != "")]
         | sort_by(.agent, .submitted_at, .id)
         | group_by(.agent)
         | map(last) as $latest
-      | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "accept") | .agent]
-         | unique | join(", ")) as $accepted
-      | ([$latest[] | select(.agent != $author and .reviewed_head == $input.reviewed and .verdict == "changes required") | .agent]
+      | ([$latest[]
+          | select(.agent != $author and .reviewed_head == .commit_id and .verdict == "accept")
+          | select(.commit_id == $input.reviewed)
+          | .agent] | unique | join(", ")) as $accepted_exact
+      | ([$latest[]
+          | select(.agent != $author and .reviewed_head == .commit_id and .verdict == "accept")
+          | select($carry_from != "" and .commit_id == $carry_from)
+          | .agent] | unique | join(", ")) as $accepted_carried
+      | ([$latest[]
+          | select(.agent != $author and .reviewed_head == .commit_id and .verdict == "changes required")
+          | .agent]
          | unique | join(", ")) as $blocking
       | ([$latest[] | select(.agent != $author and .verdict == "") | .agent] | unique) as $malformed
-      | ([$latest[] | select(.agent != $author and .reviewed_head != $input.reviewed) | .agent] | unique) as $unbound
-      | ([$at_head[]
+      | ([$latest[] | select(.agent != $author and .reviewed_head != .commit_id) | .agent] | unique) as $unbound
+      | ([$at_eligible_head[]
           | select(.state == "APPROVED")
           | . + {agent: from_agent}
           | select(.agent == "")
@@ -253,7 +300,7 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.agent != "" and comment_verdict)
           | .agent]
          | unique) as $comment_agents
-      | ([$at_head[]
+      | ([$at_eligible_head[]
           | select(.state != "APPROVED")
           | . + {agent: from_agent}
           | select(.agent == "")
@@ -265,10 +312,14 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.raw | length == 1)
           | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
          | unique) as $malformed_from
-      | [if $accepted == "" then
+      | [if $accepted_exact == "" and $accepted_carried == "" then
            "FAIL: no independent exact-head acceptance; require a pull request review with **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
+         elif $accepted_exact != "" and $accepted_carried != "" then
+           "PASS: independent exact-head acceptance from \($accepted_exact); carried from accepted first parent \($carry_from) by \($accepted_carried)"
+         elif $accepted_carried != "" then
+           "PASS: independent acceptance carried from accepted first parent \($carry_from) by \($accepted_carried) across a verified clean base merge"
          else
-           "PASS: independent exact-head acceptance from \($accepted)"
+           "PASS: independent exact-head acceptance from \($accepted_exact)"
          end,
          if $blocking == "" then
            "PASS: no independent exact-head changes-required verdict"
@@ -277,14 +328,15 @@ cat >"$filter_file" <<'JQFILTER'
          end]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + $malformed_from
-        + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
+        + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)\(if $carry_from == "" then "" else " or verified first parent \($carry_from)" end)"]
         + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / changes required / request changes — there is no follow-up verdict: fix it in this PR or post changes required)"]
         + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
     end
   | .[]
 JQFILTER
 
-result=$(jq -r --arg automated_author "$automated_author" --from-file "$filter_file" "$input" 2>/dev/null) || {
+result=$(jq -r --arg automated_author "$automated_author" \
+  --arg carry_from "$carry_from" --from-file "$filter_file" "$input" 2>/dev/null) || {
   echo "ERROR: review input is malformed" >&2
   exit 2
 }

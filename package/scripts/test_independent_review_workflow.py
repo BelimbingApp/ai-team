@@ -23,6 +23,7 @@ ROOT = Path(
 PACKAGE_DIRECTORY = SCRIPT_DIRECTORY.parent
 PACKAGE_PATHSPEC = PACKAGE_DIRECTORY.relative_to(ROOT).as_posix()
 PACKAGE_WORKFLOW = ROOT / ".github" / "workflows" / "independent-review.yml"
+ADOPTER_WORKFLOW = ROOT / ".github" / "workflows" / "ai-team-independent-review.yml"
 ADOPTER_TEMPLATE = PACKAGE_DIRECTORY / "templates" / "independent-review.yml"
 WORKFLOW_SHA = "c" * 40
 REPOSITORY = "example/project"
@@ -70,6 +71,10 @@ class IndependentReviewWorkflowTest(unittest.TestCase):
         workflows = [("adopter", ADOPTER_TEMPLATE)]
         if PACKAGE_PATHSPEC == "package":
             workflows.append(("package", PACKAGE_WORKFLOW))
+        elif ADOPTER_WORKFLOW.is_file():
+            workflows.append(("installed adopter", ADOPTER_WORKFLOW))
+            if PACKAGE_WORKFLOW.is_file():
+                workflows.append(("legacy installed adopter", PACKAGE_WORKFLOW))
         return workflows
 
     def run_materializer(
@@ -196,7 +201,13 @@ esac
                 self.assertIn("gh api --method GET", workflow)
                 self.assertIn('-f "ref=$REVIEW_GATE_WORKFLOW_SHA"', workflow)
                 self.assertIn('"$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"', workflow)
+                history = run_block(workflow, "Fetch pull request history for review carry-forward")
+                self.assertIn('refs/heads/$PULL_BASE_REF:refs/review-gate/base', history)
+                self.assertIn('refs/pull/$PULL_NUMBER/head:refs/review-gate/head', history)
+                self.assertIn('refs/review-gate/base^{commit}', history)
+                self.assertIn('refs/review-gate/head^{commit}', history)
                 self.assertNotIn("${{", run_block(workflow, "Materialize trusted review grammar"))
+                self.assertNotIn("${{", history)
                 self.assertNotIn("${{", run_block(workflow, "Verify independent review of this exact head"))
 
     def test_source_and_adopter_paths_are_exact(self):
@@ -216,6 +227,9 @@ esac
         fixture base checkout, with subtree_pull_gate.sh stubbed in
         RUNNER_TEMP. Returns (result, outputs, gate_invocations)."""
         workflow = ADOPTER_TEMPLATE.read_text(encoding="utf-8")
+        history_script = run_block(
+            workflow, "Fetch pull request history for review carry-forward"
+        )
         script = run_block(workflow, "Recognize a trusted subtree pull")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -281,12 +295,13 @@ esac
             outputs_file.write_text("", encoding="utf-8")
             env = os.environ.copy()
             env["PULL_BASE_SHA"] = base_sha
+            env["PULL_BASE_REF"] = "main"
             env["PULL_HEAD_SHA"] = head_sha
             env["PULL_NUMBER"] = "9"
             env["RUNNER_TEMP"] = bash_path(runner_temp)
             env["GITHUB_OUTPUT"] = bash_path(outputs_file)
             result = subprocess.run(
-                [_bash_executable(), "-c", script],
+                [_bash_executable(), "-c", history_script + script],
                 cwd=repo,
                 env=env,
                 text=True,

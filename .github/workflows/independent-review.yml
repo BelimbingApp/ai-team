@@ -1,7 +1,8 @@
+# The package repository installs its own template (dogfood): identical to
+# package/templates/independent-review.yml with the package-layout paths.
 name: independent review
 
-# The package repository installs its own template (dogfood): identical to
-# templates/independent-review.yml with the package-layout paths. The
+# Copy this file into an adopting repository at .github/workflows/. The
 # privileged workflow fetches only the mounted grammar from the exact trusted
 # commit that supplied this workflow; it never checks out pull-request code.
 # Review submissions do not trigger the privileged workflow: a
@@ -89,37 +90,65 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      # Fetch commits as inert objects for review_gate.sh's narrow merge proof.
+      # The trusted grammar only reads commit metadata and recomputes a tree;
+      # no pull-request-controlled file or executable is loaded.
+      - name: Fetch pull request history for review carry-forward
+        env:
+          PULL_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_NUMBER" =~ ^[0-9]+$ ]]
+          git check-ref-format "refs/heads/$PULL_BASE_REF" >/dev/null
+          git fetch -q --no-tags origin \
+            "+refs/heads/$PULL_BASE_REF:refs/review-gate/base" \
+            "+refs/pull/$PULL_NUMBER/head:refs/review-gate/head"
+          git cat-file -e "$PULL_BASE_SHA^{commit}"
+          git cat-file -e 'refs/review-gate/base^{commit}'
+          [[ "$(git rev-parse 'refs/review-gate/head^{commit}')" == "$PULL_HEAD_SHA" ]]
+
       # A pure, verifiable subtree pull needs no adopter-side agent review —
       # its content already passed the package repository's own gate before
-      # reaching the split branch (#61). Exit 0 marks the exemption; exit 1
-      # falls through to the ordinary review requirement; exit 2 (cannot
-      # judge) also falls through — the exemption fails closed, never open.
+      # reaching the split branch (#61). The exemption is OPT-IN with one
+      # source of truth: the adopter-committed `.ai-team/subtree-pull` file
+      # (`<upstream-repo> <branch> <prefix>`), read from the TRUSTED BASE
+      # checkout — the same file gate.sh reads, so the two paths cannot
+      # disagree and copying this template changes no adopter's policy.
+      # Exit 0 marks the exemption; exit 1 (not the shape) and exit 2
+      # (cannot judge) both fall through to the ordinary review requirement —
+      # the exemption fails closed, never open.
       - name: Recognize a trusted subtree pull
         id: pull_shape
         env:
           PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PULL_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PULL_NUMBER: ${{ github.event.pull_request.number }}
-          # Adopter-declared pull source; the defaults are correct for a
-          # standard docs/ai-team mount of this package.
-          AI_TEAM_MOUNT_PREFIX: package
-          AI_TEAM_UPSTREAM_REPO: BelimbingApp/ai-team
-          AI_TEAM_UPSTREAM_BRANCH: package-mount
         run: |
           set -euo pipefail
+          echo "trusted=false" >> "$GITHUB_OUTPUT"
+          if [[ ! -r .ai-team/subtree-pull ]]; then
+            echo "no .ai-team/subtree-pull on the trusted base — exemption not enabled" >&2
+            exit 0
+          fi
+          read -r pull_upstream pull_branch pull_prefix < .ai-team/subtree-pull || true
+          if [[ -z "${pull_upstream:-}" || -z "${pull_branch:-}" || -z "${pull_prefix:-}" ]]; then
+            echo "malformed .ai-team/subtree-pull — exemption not enabled" >&2
+            exit 0
+          fi
           [[ "$PULL_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PULL_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          git fetch -q --no-tags origin "+refs/pull/$PULL_NUMBER/head:refs/shape-check/head"
-          [[ "$(git rev-parse refs/shape-check/head)" == "$PULL_HEAD_SHA" ]] || {
+          [[ "$(git rev-parse 'refs/review-gate/head^{commit}')" == "$PULL_HEAD_SHA" ]] || {
             echo "fetched PR head does not match the event head; not judging" >&2
-            echo "trusted=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
           if "$RUNNER_TEMP/subtree_pull_gate.sh" "$PULL_BASE_SHA" "$PULL_HEAD_SHA" \
-              "$AI_TEAM_MOUNT_PREFIX" "$AI_TEAM_UPSTREAM_REPO" "$AI_TEAM_UPSTREAM_BRANCH"; then
+              "$pull_prefix" "$pull_upstream" "$pull_branch"; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "trusted=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify independent review of this exact head
@@ -129,12 +158,6 @@ jobs:
           REVIEW_GATE_REPOSITORY: ${{ github.repository }}
           REVIEW_GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Accounts no agent lane ever posts through, as <numeric-id>:<login>
-          # separated by whitespace or commas. Their exact-head APPROVED review
-          # counts as one independent acceptance with no body markers. Empty
-          # means the exception is off, which is the default. Keep this in step
-          # with .ai-team/principals so CI and a local gate.sh pre-flight agree.
-          AI_TEAM_HUMAN_PRINCIPALS: ""
         run: |
           "$RUNNER_TEMP/review_gate.sh" "$REVIEW_GATE_PR_NUMBER" "$REVIEW_GATE_HEAD_SHA"
 

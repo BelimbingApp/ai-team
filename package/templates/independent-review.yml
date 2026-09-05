@@ -88,6 +88,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      # Fetch commits as inert objects for review_gate.sh's narrow merge proof.
+      # The trusted grammar only reads commit metadata and recomputes a tree;
+      # no pull-request-controlled file or executable is loaded.
+      - name: Fetch pull request history for review carry-forward
+        env:
+          PULL_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PULL_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PULL_NUMBER" =~ ^[0-9]+$ ]]
+          git check-ref-format "refs/heads/$PULL_BASE_REF" >/dev/null
+          git fetch -q --no-tags origin \
+            "+refs/heads/$PULL_BASE_REF:refs/review-gate/base" \
+            "+refs/pull/$PULL_NUMBER/head:refs/review-gate/head"
+          git cat-file -e "$PULL_BASE_SHA^{commit}"
+          git cat-file -e 'refs/review-gate/base^{commit}'
+          [[ "$(git rev-parse 'refs/review-gate/head^{commit}')" == "$PULL_HEAD_SHA" ]]
+
       # A pure, verifiable subtree pull needs no adopter-side agent review —
       # its content already passed the package repository's own gate before
       # reaching the split branch (#61). The exemption is OPT-IN with one
@@ -118,8 +140,7 @@ jobs:
           fi
           [[ "$PULL_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PULL_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          git fetch -q --no-tags origin "+refs/pull/$PULL_NUMBER/head:refs/shape-check/head"
-          [[ "$(git rev-parse refs/shape-check/head)" == "$PULL_HEAD_SHA" ]] || {
+          [[ "$(git rev-parse 'refs/review-gate/head^{commit}')" == "$PULL_HEAD_SHA" ]] || {
             echo "fetched PR head does not match the event head; not judging" >&2
             exit 0
           }
