@@ -527,7 +527,7 @@ if [[ -z "$accepted_agents" ]]; then
     # line, which a line-anchored **Verdict:** would never match.
     def has_accept_marker:
       # Approve is the GitHub word for accept (#70).
-      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve)(?:[[:space:]]|$)"; "i");
+      (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept|approve)(?:[[:space:]]|$)"; "i");
     [.[] | . + {agent: from_agent} | select(.agent != "" and .agent != $author and has_accept_marker) | .agent]
     | unique | join("\n")
   ' 2>/dev/null)

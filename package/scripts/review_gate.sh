@@ -202,7 +202,7 @@ cat >"$filter_file" <<'JQFILTER'
     | if ($h | length) == 1 then $h[0] else "" end;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
-       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept(?: with follow-up)?|approve|changes required|request changes)[[:space:]]*$"; "i").v
+       | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept|approve|changes required|request changes)[[:space:]]*$"; "i").v
        | ascii_downcase
        | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
   def review_verdict:
@@ -212,12 +212,12 @@ cat >"$filter_file" <<'JQFILTER'
       elif ($e | length) > 1 then ""
       elif ($e | length) == 1 and $e[0] == "changes required" then "changes required"
       elif .state == "APPROVED"
-           or (($e | length) == 1 and ($e[0] == "accept" or $e[0] == "accept with follow-up"))
+           or (($e | length) == 1 and $e[0] == "accept")
       then "accept"
       else ""
       end;
   def comment_verdict:
-    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept(?: with follow-up)?|approve|changes required|request changes)(?:[[:space:]]|$)"; "i");
+    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept|approve|changes required|request changes)(?:[[:space:]]|$)"; "i");
   . as $input
   | (label_names) as $labels
   | ([$labels[] | select(startswith("agent:")) | ltrimstr("agent:")] | unique) as $authors
@@ -278,7 +278,7 @@ cat >"$filter_file" <<'JQFILTER'
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)"]
-        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / accept with follow-up / changes required / request changes)"]
+        + [$malformed[] | "WARN: a review marker from \(.) was seen at \($input.reviewed[0:8]) but rejected for format — **Verdict:** must stand alone on its own line (accept / approve / changes required / request changes — there is no follow-up verdict: fix it in this PR or post changes required)"]
         + [$comment_agents[] | "WARN: a verdict from \(.) was found in an issue comment; the gate reads pull request reviews only"]
     end
   | .[]

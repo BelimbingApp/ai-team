@@ -324,6 +324,17 @@ printf 'signal-exit=%s\n' "$rc"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("independent exact-head acceptance from reviewer", result.stdout)
 
+    def test_accept_with_follow_up_is_not_a_verdict(self):
+        # Owner decision 2026-09-05: two verdicts only. A follow-up is either
+        # fixed in this PR or it is changes required; the old form is malformed.
+        body = "**From:** reviewer\n\n**Verdict:** accept with follow-up"
+        result = self.run_gate([self.review(body=body)])
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("independent exact-head acceptance from reviewer", result.stdout)
+        self.assertIn("rejected for format", result.stdout)
+        self.assertIn("there is no follow-up verdict", result.stdout)
+
     def test_standalone_fixture_mode_never_sources_the_origin_helper(self):
         result = self.run_standalone_gate(fixture=True)
 

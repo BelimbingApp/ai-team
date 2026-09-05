@@ -415,12 +415,15 @@ gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n
 
 `**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
 you inspected. It is mandatory even for a native approval. `**Verdict:**` is
-also alone on its line and is `accept`, `accept with follow-up`, or `changes
-required` — GitHub's own words `approve` and `request changes` count as the
-same verdicts, case-insensitively. A shared account may record it as `COMMENTED`; the exact `From`
+also alone on its line and is exactly `accept` or `changes required` —
+GitHub's own words `approve` and `request changes` count as the same verdicts,
+case-insensitively. There is no third verdict: a finding is fixed in this PR
+before it merges, or the verdict is `changes required`. An "accept with
+follow-up" is rejected by the gate as malformed, because every follow-up it
+ever produced was a second review cycle for work that belonged in the first.
+A shared account may record the verdict as `COMMENTED`; the exact `From`
 marker and lane label establish independence. Run `gate.sh` after posting to
-verify it registered. Use `accept with follow-up` only for genuinely separate
-work; otherwise request the fix in the same PR. Write `**From:**` with the bare
+verify it registered. Write `**From:**` with the bare
 lane name, never an `agent:`-prefixed value (the prefix voids the review), and
 when posting through the API pass the body from a file — a raw string field
 posts the filename itself instead of the file.
