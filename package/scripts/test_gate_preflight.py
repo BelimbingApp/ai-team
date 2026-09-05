@@ -1037,6 +1037,49 @@ class GateMechanismTest(unittest.TestCase):
         self.assertIn("history may have been rewritten", result.stdout)
         self.assertNotIn("BEHIND origin/main", result.stdout)
 
+    def advance_main(self, filename: str, content: str) -> str:
+        """Move canonical main one commit past the PR's fork point, touching one file."""
+        base = Path(self.dir.name)
+        clone = base / f"advance-{filename.replace('/', '_')}"
+        env = self.git_env()
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(self.bare), str(clone)], check=True, env=env)
+        (clone / filename).write_text(content)
+        subprocess.run(["git", "add", "."], cwd=clone, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", f"main touches {filename}"], cwd=clone, check=True, env=env)
+        subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/main"], cwd=clone, check=True, env=env)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=clone, check=True, env=env, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def accept_review(self) -> list[dict[str, object]]:
+        return [{
+            "id": 1,
+            "state": "APPROVED",
+            "body": "**From:** reviewer",
+            "commit_id": self.head_sha,
+            "submitted_at": "2026-01-01T00:00:00Z",
+        }]
+
+    def test_behind_main_in_disjoint_files_warns_and_still_passes(self):
+        # The PR changes f.txt; main moved in g.txt. Requiring a refresh here
+        # only invalidates a valid exact-head verdict, so the gate warns and
+        # lets the merge proceed on CI for the merged tree.
+        self.main_sha = self.advance_main("g.txt", "unrelated")
+        result = self.run_gate(origin=CANONICAL_HTTPS, reviewed=self.head_sha, reviews=self.accept_review())
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("WARN    behind origin/main", result.stdout)
+        self.assertIn("in disjoint files", result.stdout)
+        self.assertNotIn("BLOCKED BEHIND", result.stdout)
+
+    def test_behind_main_in_an_overlapping_file_is_refused_and_names_the_file(self):
+        # Main moved in f.txt, the file the PR also changes: CI on the branch
+        # proves nothing about the merged tree, so the refresh is required.
+        self.main_sha = self.advance_main("f.txt", "main rewrote it")
+        result = self.run_gate(origin=CANONICAL_HTTPS, reviewed=self.head_sha, reviews=self.accept_review())
+        self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
+        self.assertIn("BLOCKED BEHIND origin/main", result.stdout)
+        self.assertIn("f.txt", result.stdout)
+
     def test_malformed_review_marker_warns_about_format_instead_of_silence(self):
         # A **From:** marker is present, but the verdict is inline rather than
         # on its own line — gate.sh must say the marker was seen and rejected

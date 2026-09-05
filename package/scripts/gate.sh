@@ -126,14 +126,32 @@ draft=$(printf '%s' "$pr" | jq -r .isDraft)
 [[ "$state" = "OPEN" ]] && say_ok "state is OPEN" || say_bad "state is $state"
 [[ "$draft" = "false" ]] && say_ok "not a draft" || say_bad "PR is a DRAFT — never merge someone's claim"
 
-# 2. Up to date with main. CI green on a tree that never existed on main is not
-#    evidence about main. #326 landed red exactly this way.
+# 2. Relationship to main. A branch behind main is only a problem when main
+#    moved in a file the branch also changes: then CI green on the branch says
+#    nothing about the merged tree (#326 landed red exactly that way), and the
+#    verdict must be re-taken on a refreshed head. When the two change disjoint
+#    files, the merge is mechanical and requiring a refresh only invalidates a
+#    valid exact-head verdict for nothing — that refresh loop was the largest
+#    single latency in the acceptance path.
 if [[ "$reviewed_object_available" != "1" ]]; then
   say_bad "reviewed SHA $REVIEWED is unavailable after fetching PR #$PR — its history may have been rewritten; re-review the current head"
 elif git merge-base --is-ancestor "origin/$BASE" "$REVIEWED" 2>/dev/null; then
   say_ok "contains origin/$BASE ($(git rev-parse --short "origin/$BASE"))"
 else
-  say_bad "BEHIND origin/$BASE ($(git rev-parse --short "origin/$BASE")) — merge $BASE into the branch first"
+  fork_point=$(git merge-base "origin/$BASE" "$REVIEWED" 2>/dev/null || true)
+  overlap=""
+  if [[ -n "$fork_point" ]]; then
+    overlap=$(comm -12 \
+      <(git diff --name-only "$fork_point" "origin/$BASE" | sort -u) \
+      <(git diff --name-only "$fork_point" "$REVIEWED" | sort -u))
+  fi
+  if [[ -z "$fork_point" ]]; then
+    say_bad "no merge base with origin/$BASE — merge $BASE into the branch first"
+  elif [[ -n "$overlap" ]]; then
+    say_bad "BEHIND origin/$BASE ($(git rev-parse --short "origin/$BASE")) and $BASE changed files this branch also changes — merge $BASE in and re-review: $(printf '%s' "$overlap" | tr '\n' ' ')"
+  else
+    say_warn "behind origin/$BASE ($(git rev-parse --short "origin/$BASE")) in disjoint files — landing without a refresh; CI on $BASE is the proof for the merged tree"
+  fi
 fi
 
 # 3. Checks on the REVIEWED sha, not on the PR, not on the branch. The heads of

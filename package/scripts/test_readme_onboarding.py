@@ -7,7 +7,6 @@ README = Path(__file__).parents[1] / "README.md"
 SCRIPTS_README = Path(__file__).parent / "README.md"
 ORIENT = Path(__file__).parent / "orient.sh"
 CLAIM = Path(__file__).parent / "claim.sh"
-REFRESH = Path(__file__).parents[1] / "templates" / "package-refresh.sh"
 
 
 class ReadmeOnboardingTest(unittest.TestCase):
@@ -51,49 +50,19 @@ class ReadmeOnboardingTest(unittest.TestCase):
             f"bare (non-package-prefixed) templates/ reference(s) survive the #26 move: {stale_templates}",
         )
 
-    def test_refresh_is_explicit_and_legacy_exclusion_is_owner_actionable(self):
-        document = README.read_text(encoding="utf-8")
-
-        self.assertIn(
-            "cp docs/ai-team/templates/package-refresh.sh .ai-team/package-refresh.sh",
-            document,
-        )
-        self.assertIn(
-            "cp docs/ai-team/templates/package-refresh.conf ", document
-        )
-        self.assertIn("Joining a session never refreshes", document)
-        self.assertIn("`ai-team/claim-refresh-mutex` compare-and-swap lease", document)
-        self.assertIn("owner-reviewed-full-package-mount-sha", document)
-        self.assertIn('git fetch --no-tags "$package_source" "$package_revision"', document)
-        self.assertIn(
-            'git show "$package_revision:templates/package-refresh.sh"', document
-        )
-        self.assertIn(
-            'git show "$package_revision:templates/package-refresh.conf"', document
-        )
-        self.assertIn("git rm .ai-team/activate.sh", document)
-        self.assertIn("AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION=1", document)
-        self.assertIn("Keep legacy clients stopped", document)
-        self.assertIn("AI_TEAM_RECOVER_MUTEX_SHA=<exact-sha>", document)
-        self.assertIn("AI_TEAM_RECOVER_REFRESH_SHA=<exact-sha>", document)
-        self.assertIn("Neither command steals unknown", document)
-
     def test_start_work_routes_adopters_directly_to_read_only_orientation(self):
         document = README.read_text(encoding="utf-8")
         start_work = document.split("## Start work", 1)[1].split("---", 1)[0]
 
         self.assertIn("# Adopting repository\ndocs/ai-team/scripts/orient.sh", start_work)
         self.assertNotIn(".ai-team/activate.sh", start_work)
+        self.assertNotIn("package-refresh", document)
 
     def test_routine_orientation_and_claim_do_not_run_the_mechanism_suite(self):
         for command in (ORIENT, CLAIM):
             source = command.read_text(encoding="utf-8")
             self.assertNotIn("unittest discover", source)
             self.assertNotIn("test_*.py", source)
-
-        refresh_source = REFRESH.read_text(encoding="utf-8")
-        self.assertNotIn("unittest discover", refresh_source)
-        self.assertNotIn("exec \"$ORIENT\"", refresh_source)
 
 
 class ScriptsReadmeOnboardingTest(unittest.TestCase):

@@ -48,11 +48,8 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
             document,
         )
         self.assertIn("issues: write", document)
-        self.assertIn(
-            "cp docs/ai-team/templates/package-refresh.sh .ai-team/package-refresh.sh",
-            document,
-        )
-        self.assertNotIn("cp docs/ai-team/templates/activate.sh", document)
+        self.assertNotIn("package-refresh", document)
+        self.assertNotIn("activate.sh", document)
 
 
 if __name__ == "__main__":
