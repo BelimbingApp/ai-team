@@ -293,7 +293,7 @@ printf '%s' "$reach_prs" | jq -r '.[]
                  | capture("^\\*\\*From:\\*\\*\\s*(?<a>[a-z0-9]+([._-][a-z0-9]+)*)"; "i") | .a)?) // "") as $agent
              | select($agent != "")
              | (([(.body // "") | split("\n")[]
-                 | (capture("^\\*\\*Verdict:\\*\\*\\s*(?<v>accept( with follow-up)?|approve|changes required|request changes)\\s*$"; "i") | .v)?
+                 | (capture("^\\*\\*Verdict:\\*\\*\\s*(?<v>accept|approve|changes required|request changes)\\s*$"; "i") | .v)?
                  | select(. != null) | ascii_downcase
                  | if . == "approve" then "accept"
                    elif . == "request changes" then "changes required"
