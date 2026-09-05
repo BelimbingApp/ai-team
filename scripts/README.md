@@ -39,13 +39,10 @@ the mounted grammar at `docs/ai-team/scripts/review_gate.sh` and copied
 `docs/ai-team/templates/independent-review.yml` into the adopter's root
 workflow directory. A 404 is never a successful installation signal.
 
-The package also ships the optional maintenance templates
-`templates/package-refresh.sh` and `templates/package-refresh.conf`. Copy both
-to the adopter-owned `.ai-team/` directory. Run the command only to prepare an
-explicit reviewed mount update; routine sessions begin directly with
-`docs/ai-team/scripts/orient.sh`. The command verifies the immutable subtree
-shape while required refresh-PR CI runs the full mechanism suite. See the
-operating guide for the one exclusive migration from legacy claim clients.
+Updating the mount is a plain `git subtree pull` on a branch, opened as a pull
+request; its trusted subtree shape needs green CI, not a reviewer. Routine
+sessions begin directly with `docs/ai-team/scripts/orient.sh`. There is no
+maintenance or activation script to copy.
 
 `blocked_by_sweep.py` is a Python entry point, not a shell command. Run it as
 `python3 docs/ai-team/scripts/blocked_by_sweep.py` (the workflow supplies the
