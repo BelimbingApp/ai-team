@@ -1,6 +1,8 @@
 import os
+import stat
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -26,6 +28,25 @@ class CleanupWorktreeTest(unittest.TestCase):
         self.git("remote", "add", "origin", str(self.bare))
         self.git("push", "-q", "-u", "origin", "main")
         (Path(self.dir.name) / "stubs").mkdir()
+        gh = Path(self.dir.name) / "stubs" / "gh"
+        gh.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                case "$1 $2" in
+                  "repo view") printf 'example/canonical\\n' ;;
+                  "pr list")
+                    [ "${CLEANUP_TEST_PR_LIST_FAIL:-}" != "1" ] || exit 1
+                    printf '%s\\n' "${CLEANUP_TEST_OPEN_PRS:-[]}"
+                    ;;
+                  *) echo "unexpected gh: $*" >&2; exit 1 ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
 
     def tearDown(self):
         self.dir.cleanup()
@@ -45,12 +66,17 @@ class CleanupWorktreeTest(unittest.TestCase):
             capture_output=True, text=True,
         ).stdout.strip()
 
-    def run_cleanup(self, *args):
+    def run_cleanup(self, *args, open_prs="[]", pr_list_fails=False):
+        env = self.env()
+        env["AI_TEAM_TEST_ORIGIN_REPO"] = "example/canonical"
+        env["CLEANUP_TEST_OPEN_PRS"] = open_prs
+        if pr_list_fails:
+            env["CLEANUP_TEST_PR_LIST_FAIL"] = "1"
         return run_with_bash_path(
             ["bash", bash_path(SCRIPT), *args],
             stub_directory=Path(self.dir.name) / "stubs",
             cwd=self.clone,
-            env=self.env(),
+            env=env,
             capture_output=True,
             text=True,
         )
@@ -89,6 +115,54 @@ class CleanupWorktreeTest(unittest.TestCase):
         branches = self.git("branch", "--format=%(refname:short)")
         self.assertNotIn("agent/a-issue-1", branches)
         self.assertIn("agent/a-issue-2", branches)
+
+    def test_yes_preserves_clean_pushed_worktree_for_open_pr(self):
+        active = Path(self.dir.name) / "wt-active"
+        branch = "agent/a-issue-42"
+        self.git("worktree", "add", "-q", "-b", branch, str(active), "origin/main")
+        self.git("commit", "-q", "--allow-empty", "-m", "active lane", cwd=active)
+        self.git("push", "-q", "-u", "origin", branch, cwd=active)
+
+        result = self.run_cleanup(
+            "--yes",
+            open_prs='[{"number":99,"headRefName":"agent/a-issue-42"}]',
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"kept {active} [{branch}] — open PR #99", result.stdout)
+        self.assertTrue(active.is_dir(), "an open PR's worktree is active, not cleanup garbage")
+
+    def test_yes_preserves_clean_pushed_worktree_when_open_pr_registry_is_unavailable(self):
+        uncertain = Path(self.dir.name) / "wt-uncertain"
+        branch = "agent/a-issue-43"
+        self.git("worktree", "add", "-q", "-b", branch, str(uncertain), "origin/main")
+        self.git("commit", "-q", "--allow-empty", "-m", "uncertain lane", cwd=uncertain)
+        self.git("push", "-q", "-u", "origin", branch, cwd=uncertain)
+
+        result = self.run_cleanup("--yes", pr_list_fails=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("open-PR state is unavailable", result.stdout)
+        self.assertTrue(uncertain.is_dir(), "uncertainty must preserve state")
+
+    def test_yes_preserves_worktree_when_registry_has_duplicate_branch_matches(self):
+        ambiguous = Path(self.dir.name) / "wt-ambiguous"
+        branch = "agent/a-issue-44"
+        self.git("worktree", "add", "-q", "-b", branch, str(ambiguous), "origin/main")
+        self.git("commit", "-q", "--allow-empty", "-m", "ambiguous lane", cwd=ambiguous)
+        self.git("push", "-q", "-u", "origin", branch, cwd=ambiguous)
+
+        result = self.run_cleanup(
+            "--yes",
+            open_prs=(
+                '[{"number":100,"headRefName":"agent/a-issue-44"},'
+                '{"number":101,"headRefName":"agent/a-issue-44"}]'
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("open PR #100, #101", result.stdout)
+        self.assertTrue(ambiguous.is_dir(), "ambiguous registry state must be preserved")
 
 
 if __name__ == "__main__":

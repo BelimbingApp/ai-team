@@ -221,7 +221,7 @@ matches=$(jq -c --argjson issue "$issue" '
   [.[]
    | select(((((.title // "") + "\\n" + (.body // "")) | contains(issue_reference))
              or ((agent_labels | length) > 0 and claim_branch)))
-   | {number, title, url, holders: agent_labels, marker: from_marker}]
+   | {number, title, url, headRefName, holders: agent_labels, marker: from_marker}]
 ' <<<"$prs")
 
 # A match carrying no agent:* label is a HALF-CLAIM: claim.sh created the PR
@@ -236,6 +236,10 @@ mine=$(jq -c --arg agent "$agent" \
   '[.[] | select((.holders | length) == 0 and .marker == $agent)]' <<<"$matches")
 blocking=$(jq -c --arg agent "$agent" \
   '[.[] | select((.holders | length) > 0 or .marker != $agent)]' <<<"$matches")
+own_open=$(jq -c --arg agent "$agent" \
+  '[.[] | select(.holders == ["agent:" + $agent] and .marker == $agent)]' <<<"$matches")
+existing_pr=
+existing_branch=
 
 if [[ $(jq length <<<"$blocking") -eq 0 && $(jq length <<<"$mine") -eq 1 ]]; then
   repair_pr=$(jq -r '.[0].number' <<<"$mine")
@@ -245,7 +249,11 @@ if [[ $(jq length <<<"$blocking") -eq 0 && $(jq length <<<"$mine") -eq 1 ]]; the
   exit 0
 fi
 
-if [[ $(jq length <<<"$matches") -gt 0 ]]; then
+if [[ $own_label -eq 1 && $(jq length <<<"$matches") -eq 1 && $(jq length <<<"$own_open") -eq 1 ]]; then
+  existing_pr=$(jq -r '.[0].number' <<<"$own_open")
+  existing_branch=$(jq -r '.[0].headRefName' <<<"$own_open")
+  echo "resuming #$issue: PR #$existing_pr is your own correctly labelled open claim"
+elif [[ $(jq length <<<"$matches") -gt 0 ]]; then
   echo "refusing #$issue: an open PR already holds it:" >&2
   jq -r --arg agent "$agent" '.[]
     | if (.holders | length) == 0
@@ -279,7 +287,11 @@ if ! jq -e --arg want "$agent_label" 'any(.name == $want)' <<<"$labels" >/dev/nu
     --description "AI-team identity and ownership: $agent"
 fi
 
-branch="${CLAIM_BRANCH:-agent/${agent}-issue-${issue}}"
+branch="${CLAIM_BRANCH:-${existing_branch:-agent/${agent}-issue-${issue}}}"
+if [[ -n "$existing_branch" && "$branch" != "$existing_branch" ]]; then
+  echo "refusing #$issue: configured branch $branch does not match open PR #$existing_pr branch $existing_branch" >&2
+  exit 1
+fi
 title="${CLAIM_TITLE:-$(jq -r .title <<<"$issue_json") (#${issue})}"
 # Placing the lane worktree beside $root is only safe when $root's parent is
 # inert. It is not when this repository is a nested checkout: for
@@ -433,6 +445,7 @@ ensure_worktree() {
     # Prefer the local branch ref so the worktree is not detached.
     git worktree add "$worktree" "$branch"
   elif [[ $remote_branch -eq 1 ]]; then
+    git fetch -q origin "$branch:refs/remotes/origin/$branch"
     git worktree add -b "$branch" "$worktree" "origin/$branch"
     local_branch=1
   else
@@ -517,6 +530,14 @@ else
     }
     remote_branch=1
   fi
+fi
+
+if [[ -n "$existing_pr" ]]; then
+  restore_root_off_claim
+  echo "resumed #$issue: PR #$existing_pr on $branch"
+  echo "worktree: $worktree"
+  echo "root checkout left on $(git rev-parse --abbrev-ref HEAD)"
+  exit 0
 fi
 
 body=$(mktemp)

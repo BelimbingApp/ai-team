@@ -8,8 +8,9 @@
 # A task is done when nothing you created is left lying around, and untidiness is
 # invisible to whoever made it. This removes only what is provably finished:
 # local branches fully merged into the default branch, and worktrees that are
-# clean with a HEAD already on origin. It never touches an unmerged branch, a
-# dirty worktree, or one holding unpushed commits. Background loops and
+# clean with a HEAD already on origin and no open PR. It never touches an
+# active PR lane, unmerged branch, dirty worktree, or one holding unpushed
+# commits. Background loops and
 # heartbeats it only *lists* — a shell cannot cancel your tool's scheduler; stop
 # those where you started them (your heartbeat cron, your watcher). Remote branch
 # deletion remains explicit because a shared checkout cannot infer which remote
@@ -28,6 +29,17 @@ apply=0
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not a git checkout" >&2; exit 2; }
 cd "$ROOT" || exit 2
+
+repo=$(ai_team_origin_repo 2>/dev/null || true)
+open_prs_available=1
+open_prs='[]'
+if [ -z "$repo" ] || ! open_prs=$(gh pr list --repo "$repo" --state open --limit 1000 \
+  --json number,headRefName 2>/dev/null) \
+  || ! jq -e 'type == "array" and all(.[]; (.number | type) == "number" and (.headRefName | type) == "string")' \
+    <<<"$open_prs" >/dev/null 2>&1; then
+  open_prs_available=0
+  echo "warning: cannot read open PRs; cleanup will preserve every lane worktree" >&2
+fi
 
 if ! git fetch -q origin "$BASE" 2>/dev/null; then
   echo "cannot refresh origin/$BASE; cleanup stopped without deleting anything" >&2
@@ -69,10 +81,10 @@ done < <(git for-each-ref --format='%(refname:short)' refs/heads/)
 
 echo
 echo "== worktrees =="
-# A worktree is finished when it is clean and its HEAD is already on origin —
-# landed into the default branch or pushed to a remote branch. Those are
-# removed with --yes; anything holding unpushed work is listed and kept. The
-# checkout you run this from is never removed.
+# A worktree is finished when it is clean, its HEAD is already on origin, and
+# its branch belongs to no open PR. Those are removed with --yes; an active PR,
+# uncertain PR registry, or anything holding unpushed work is kept. The checkout
+# you run this from is never removed.
 self_top=$(git rev-parse --show-toplevel 2>/dev/null)
 any=0
 while IFS= read -r w; do
@@ -89,6 +101,19 @@ while IFS= read -r w; do
   if [ "$wstatus" != "0" ]; then
     echo "  kept $w [$wbranch] — has uncommitted changes"
     continue
+  fi
+  if [ "$open_prs_available" -ne 1 ]; then
+    echo "  kept $w [$wbranch] — open-PR state is unavailable"
+    continue
+  fi
+  if [ "$wbranch" != "detached" ]; then
+    open_pr=$(jq -r --arg branch "$wbranch" \
+      '[.[] | select(.headRefName == $branch) | .number | tostring] | join(", #")' \
+      <<<"$open_prs")
+    if [ -n "$open_pr" ]; then
+      echo "  kept $w [$wbranch] — open PR #$open_pr"
+      continue
+    fi
   fi
   if ! git -C "$w" branch -r --contains HEAD 2>/dev/null | grep -q .; then
     echo "  kept $w [$wbranch] — HEAD is on no remote branch (unpushed work)"
