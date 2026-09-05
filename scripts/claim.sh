@@ -61,160 +61,16 @@ repo=$(ai_team_origin_repo) || {
 }
 base_branch=$(ai_team_default_branch)
 
-CLAIM_REFRESH_MUTEX_BRANCH=ai-team/claim-refresh-mutex
-CLAIM_REFRESH_MUTEX_REF="refs/heads/$CLAIM_REFRESH_MUTEX_BRANCH"
-AI_TEAM_CLAIM_REFRESH_MUTEX_PROTOCOL=1
-claim_refresh_mutex_sha=
-claim_refresh_mutex_held=0
-claim_refresh_mutex_empty_retry_count=0
 body=
-
-# Package refresh and ordinary claims both cross the same short, atomic remote-ref
-# boundary before either can make a lane visible. A unique commit makes an
-# empty-ref force-with-lease decisive even when contenders share a clock.
-acquire_claim_refresh_mutex() {
-  local nonce parent tree message observed_lines observed
-  nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || {
-    echo "cannot generate a unique refresh mutex claim" >&2
-    return 2
-  }
-  [[ "$nonce" =~ ^[0-9a-fA-F]{32}$ ]] || {
-    echo "cannot generate a valid refresh mutex claim" >&2
-    return 2
-  }
-  parent=$(git rev-parse HEAD) || return 2
-  tree=$(git rev-parse 'HEAD^{tree}') || return 2
-  message=$(printf 'AI Team refresh/claim mutex\n\nAI-Team-Claim-Refresh-Mutex: true\nAI-Team-Claim-Refresh-Mutex-Base: %s\nAI-Team-Claim-Refresh-Mutex-Owner: claim:%s:#%s\nAI-Team-Claim-Refresh-Mutex-Nonce: %s\n' \
-    "$parent" "$agent" "$issue" "$nonce")
-  claim_refresh_mutex_sha=$(git -c user.name=ai-team-claim-refresh-mutex \
-    -c user.email=ai-team-claim-refresh-mutex@users.noreply.github.com \
-    commit-tree "$tree" -p "$parent" <<<"$message") || {
-    echo "cannot create the refresh mutex commit" >&2
-    return 2
-  }
-
-  if ! git push --quiet --force-with-lease="$CLAIM_REFRESH_MUTEX_REF:" \
-    origin "$claim_refresh_mutex_sha:$CLAIM_REFRESH_MUTEX_REF"; then
-    observed_lines=$(git ls-remote --heads origin "$CLAIM_REFRESH_MUTEX_REF" 2>/dev/null) || {
-      echo "refresh mutex push failed and its remote state cannot be inspected" >&2
-      return 2
-    }
-    observed=$(awk 'NF { print $1; exit }' <<<"$observed_lines")
-    if [[ "$observed" == "$claim_refresh_mutex_sha" ]]; then
-      echo "claim: refresh mutex push response was uncertain, but this claimant owns it" >&2
-    elif [[ -n "$observed" ]]; then
-      if [[ "${AI_TEAM_RECOVER_MUTEX_SHA:-}" == "$observed" ]]; then
-        local stale_message stale_managed stale_base stale_owner stale_nonce stale_parent_line stale_parent stale_tree stale_base_tree recovered_lines recovered_observed
-        git fetch -q --no-tags origin "$CLAIM_REFRESH_MUTEX_BRANCH" || {
-          echo "cannot fetch the exact mutex selected for recovery" >&2
-          return 2
-        }
-        stale_message=$(git show -s --format=%B "$observed" 2>/dev/null || true)
-        stale_managed=$(awk -F': ' '/^AI-Team-Claim-Refresh-Mutex: / { value=$2 } END { print value }' <<<"$stale_message")
-        stale_base=$(awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Base: / { value=$2 } END { print value }' <<<"$stale_message")
-        stale_owner=$(awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Owner: / { value=$2 } END { print value }' <<<"$stale_message")
-        stale_nonce=$(awk -F': ' '/^AI-Team-Claim-Refresh-Mutex-Nonce: / { value=$2 } END { print value }' <<<"$stale_message")
-        stale_parent_line=$(git rev-list --parents -n 1 "$observed" 2>/dev/null || true)
-        stale_parent=$(awk 'NF == 2 { print $2 }' <<<"$stale_parent_line")
-        stale_tree=$(git rev-parse "$observed^{tree}" 2>/dev/null || true)
-        stale_base_tree=$(git rev-parse "$stale_base^{tree}" 2>/dev/null || true)
-        if [[ "$stale_managed" != "true" || "$stale_base" != "$stale_parent" || \
-              -z "$stale_tree" || "$stale_tree" != "$stale_base_tree" || \
-              ! "$stale_base" =~ ^[0-9a-fA-F]{40,64}$ || \
-              ! "$stale_nonce" =~ ^[0-9a-fA-F]{32}$ || \
-              ! "$stale_owner" =~ ^(claim:[a-z0-9]+([._-][a-z0-9]+)*:#[0-9]+|package-refresh:[0-9a-fA-F]{40,64})$ ]]; then
-          echo "selected mutex is malformed or not generated state; refusing recovery" >&2
-          return 2
-        fi
-        if ! git push --quiet --force-with-lease="$CLAIM_REFRESH_MUTEX_REF:$observed" \
-          origin ":$CLAIM_REFRESH_MUTEX_REF"; then
-          recovered_lines=$(git ls-remote --heads origin "$CLAIM_REFRESH_MUTEX_REF" 2>/dev/null) || return 2
-          recovered_observed=$(awk 'NF { print $1; exit }' <<<"$recovered_lines")
-          [[ -z "$recovered_observed" ]] || {
-            echo "refresh mutex changed during exact recovery; refusing to delete $recovered_observed" >&2
-            return 2
-          }
-        fi
-        echo "recovered exact stale generated mutex $observed after owner verification" >&2
-        claim_refresh_mutex_empty_retry_count=0
-        acquire_claim_refresh_mutex
-        return $?
-      fi
-      echo "refusing to claim: another refresh or claim owns origin/$CLAIM_REFRESH_MUTEX_BRANCH" >&2
-      echo "if no process is running, an owner may verify it and rerun with AI_TEAM_RECOVER_MUTEX_SHA=$observed; this script never steals it" >&2
-      return 1
-    else
-      if [[ $claim_refresh_mutex_empty_retry_count -lt 3 ]]; then
-        claim_refresh_mutex_empty_retry_count=$((claim_refresh_mutex_empty_retry_count + 1))
-        echo "claim: refresh mutex CAS failed but the ref is now empty; retrying with a fresh nonce ($claim_refresh_mutex_empty_retry_count/3)" >&2
-        acquire_claim_refresh_mutex
-        return $?
-      fi
-      echo "cannot acquire origin/$CLAIM_REFRESH_MUTEX_BRANCH (check push permission or protection)" >&2
-      return 2
-    fi
-  fi
-  claim_refresh_mutex_empty_retry_count=0
-  claim_refresh_mutex_held=1
-}
-
-release_claim_refresh_mutex() {
-  local observed_lines observed
-  [[ $claim_refresh_mutex_held -eq 1 ]] || return 0
-  if git push --quiet --force-with-lease="$CLAIM_REFRESH_MUTEX_REF:$claim_refresh_mutex_sha" \
-    origin ":$CLAIM_REFRESH_MUTEX_REF"; then
-    claim_refresh_mutex_held=0
-    return 0
-  fi
-  observed_lines=$(git ls-remote --heads origin "$CLAIM_REFRESH_MUTEX_REF" 2>/dev/null) || {
-    echo "cannot release the refresh mutex or inspect its remote state" >&2
-    return 2
-  }
-  observed=$(awk 'NF { print $1; exit }' <<<"$observed_lines")
-  if [[ -z "$observed" ]]; then
-    claim_refresh_mutex_held=0
-    return 0
-  fi
-  if [[ "$observed" != "$claim_refresh_mutex_sha" ]]; then
-    echo "refresh mutex ownership changed unexpectedly; refusing to delete $observed" >&2
-  else
-    echo "cannot release origin/$CLAIM_REFRESH_MUTEX_BRANCH; delete only that exact generated ref after verifying no refresh or claim is running" >&2
-  fi
-  return 2
-}
 
 claim_exit_cleanup() {
   local cleanup_status=$?
   trap - EXIT HUP INT TERM
   [[ -z "$body" ]] || rm -f -- "$body"
-  if ! release_claim_refresh_mutex; then
-    [[ $cleanup_status -ne 0 ]] || cleanup_status=2
-  fi
   exit "$cleanup_status"
 }
 trap claim_exit_cleanup EXIT
 trap 'exit 130' HUP INT TERM
-
-acquire_claim_refresh_mutex || exit $?
-
-# Package refresh owns a repository-wide baseline. A task claim must never
-# start while that fixed remote lock exists, including the short interval
-# before its draft PR is visible on GitHub.
-refuse_package_refresh_lock() {
-  local refresh_ref="refs/heads/ai-team/package-refresh"
-  local refresh_tip
-  refresh_tip=$(git ls-remote --heads origin "$refresh_ref" 2>/dev/null) || {
-    echo "cannot inspect the package-refresh lock on origin" >&2
-    return 2
-  }
-  if [[ -n "$refresh_tip" ]]; then
-    echo "refusing to claim: package refresh is in progress on origin/ai-team/package-refresh" >&2
-    return 1
-  fi
-  return 0
-}
-
-refuse_package_refresh_lock || exit $?
 
 # Read the issue and every open PR before creating a branch, commit, or remote
 # ref. GitHub does not offer a transaction across those resources; this is the
@@ -409,7 +265,6 @@ fi
 # Labels on live Issues and PRs are the identity registry. Create the lane label
 # only after the claim has passed all availability checks, and before creating a
 # branch or PR that would need it.
-refuse_package_refresh_lock || exit $?
 agent_label="agent:$agent"
 labels=$(gh label list --repo "$repo" --limit 1000 --json name 2>/dev/null) || {
   echo "cannot read labels from $repo" >&2
@@ -577,7 +432,6 @@ ensure_worktree() {
 }
 
 git fetch -q origin "$base_branch"
-refuse_package_refresh_lock || exit $?
 
 if [[ $resume -eq 0 ]]; then
   current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || {
@@ -666,8 +520,6 @@ if ! finish_claim_labels "$pr"; then
 fi
 
 restore_root_off_claim
-
-release_claim_refresh_mutex || exit 2
 
 echo "claimed #$issue in draft PR #$pr ($pr_url) as agent:$agent"
 echo "worktree: $worktree"

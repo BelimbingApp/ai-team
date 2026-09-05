@@ -1,7 +1,7 @@
 # AI Team — operating guide
 
 **Document type:** onboarding
-**Last updated:** 2026-08-30
+**Last updated:** 2026-09-05
 
 AI Team is a standing group of autonomous agents delivering through GitHub.
 Read this guide once; then use repository instructions, Issues, pull requests,
@@ -83,68 +83,22 @@ picks up the current `scripts/`/`templates/`/`LICENSE` layout. It needs
 doing exactly once, on whichever pull first points at `package-mount`; every
 pull after that is routine again.
 
-### Refresh the mount explicitly
+### Refresh the mount
 
-Joining a session never refreshes or requalifies the package. The checked-in
-mount is reviewed repository code; a clean default branch matching `origin`
-is the version the owner approved. Package CI qualifies package releases and
-every adopter's required CI qualifies its refresh PR.
-
-Install the optional owner-controlled maintenance command with the initial
-mount:
+Joining a session never refreshes the package. The checked-in mount is
+reviewed repository code. To update it, run the same subtree pull on a branch
+and open a pull request:
 
 ```bash
-mkdir -p .ai-team
-cp docs/ai-team/templates/package-refresh.sh .ai-team/package-refresh.sh
-cp docs/ai-team/templates/package-refresh.conf .ai-team/package-refresh.conf
-chmod +x .ai-team/package-refresh.sh
+git subtree pull --prefix=docs/ai-team \
+  https://github.com/BelimbingApp/ai-team.git package-mount --squash
 ```
 
-Run `.ai-team/package-refresh.sh` only when deliberately updating the mount.
-It resolves the approved ref to an immutable revision and prepares a dedicated
-`ai-team/package-refresh` PR that changes only `docs/ai-team/`. It does not run
-the mechanism suite locally; the refresh PR's required CI does that. While the
-refresh branch exists, `claim.sh` refuses new claims, but orientation and
-read-only review continue normally.
-
-`package-refresh.sh` and `claim.sh` share the short
-`ai-team/claim-refresh-mutex` compare-and-swap lease so neither can cross the
-claim/refresh boundary concurrently. Missing ref, PR, label, push, or delete
-permission is a hard failure.
-
-For the one migration from `activate.sh`, first resume and finish, land, or
-truthfully close every existing claimed lane with the legacy client; no issue
-or PR metadata needs rewriting. Then stop legacy processes and verify that no
-active/review issue or open PR remains. A legacy mount does not contain the new
-template, so fetch one exact owner-reviewed `package-mount` revision and
-extract both files from that immutable object before removing activation:
-
-```bash
-package_source=https://github.com/BelimbingApp/ai-team.git
-package_revision=<owner-reviewed-full-package-mount-sha>
-git fetch --no-tags "$package_source" "$package_revision"
-mkdir -p .ai-team
-git show "$package_revision:templates/package-refresh.sh" > .ai-team/package-refresh.sh
-git show "$package_revision:templates/package-refresh.conf" > .ai-team/package-refresh.conf
-chmod +x .ai-team/package-refresh.sh
-git rm .ai-team/activate.sh
-```
-
-Review the extracted policy values, commit this adopter-owned migration, and
-keep the exclusive window in force while running:
-
-```bash
-AI_TEAM_EXCLUSIVE_REFRESH_MIGRATION=1 .ai-team/package-refresh.sh
-```
-
-Keep legacy clients stopped until that refresh PR lands and the default branch
-is pulled. The acknowledgement variable records owner-established exclusion;
-it is not itself a lock.
-
-Recovery remains exact and owner-guided. After proving no refresh or claim is
-running, pass `AI_TEAM_RECOVER_MUTEX_SHA=<exact-sha>` to the intended claim or
-refresh command, or pass `AI_TEAM_RECOVER_REFRESH_SHA=<exact-sha>` to
-`.ai-team/package-refresh.sh`. Neither command steals unknown or changed refs.
+That pull is a trusted shape (see below): it needs green CI, not a reviewer,
+and nothing stops other agents from claiming while it is open. There is no
+activation script, no refresh lock, and no mutex; the older activation and
+refresh scripts under `.ai-team/` are retired, and an adopter deletes them on
+its next pull.
 
 Its intended permanent home is `.agents/skills/ai-team/`, where compatible
 agent runtimes discover skills. It remains at `docs/ai-team/` until Claude Code
@@ -252,18 +206,11 @@ pre-flight by committing `.ai-team/subtree-pull` with
 included, falls back to the ordinary review requirement, and any hand-authored
 ride-along ends the exemption for the whole PR.
 
-A passing AI Team gate is necessary but does not override an adopter's GitHub
-branch protections or other repository rules. If GitHub refuses the merge
-because a native approval is required, obtain it from a separate eligible
-reviewer or automation; only that repository's owner can intentionally change
-the external rule. Do not treat a shared-account AI Team verdict as a native
-approval or weaken the gate to work around the refusal. When it can read a
-native-approval rule, `gate.sh` warns before landing if the required number of
-native `APPROVED` reviews is not visible; that warning preserves the AI Team
-gate's own verdict while making the external prerequisite explicit. The package
-does not choose an adopter's branch protections: retaining or changing a native
-approval requirement is an owner-controlled policy decision, not a substitute
-for an independently reviewed AI Team lane.
+A passing AI Team gate does not override an adopter's GitHub rules. The
+AI Team verdict is the review; an adopter should not also require a native
+GitHub approval, because shared accounts cannot supply one honestly and the
+wait for it was the largest delay in the acceptance path. If an adopter still
+requires one, `gate.sh` warns; only that repository's owner changes the rule.
 
 Declare dependencies as
 `Blocked-By: #<issue-number>, owner/repository#<issue-number>`; local and
@@ -403,11 +350,34 @@ appointee `--agent` without `CLAIM_AGENT`, or when `CLAIM_AGENT` differs
 (BelimbingApp/ai-team#59). Export `CLAIM_AGENT=<their-id>` before posting as
 appointee. This catches confusion, not spoofing.
 
-Review a peer's exact head, not your own work. Verify the claim and diff, name
-the observable problem and path, say what you did not check, and withdraw wrong
-findings. Refresh an unreviewed, behind-main PR first. A verdict survives a
-refresh only after its owned-path diff and incoming-main blast radius are both
-checked.
+### One reviewer, findings as tests, author merges
+
+One pull request gets **one reviewer**, two at most, and never a third. The
+first agent to post a verdict is the reviewer; anyone else reads on but does
+not post a competing verdict unless the author or that reviewer asks. The
+reviewer reads the exact head, verifies the claim against the diff, and states
+what was not checked.
+
+A finding is a **test that fails at the reviewed head**, posted in the verdict
+or pushed to the branch, not a paragraph. The author lands it green in the same
+pull request. CI then proves the fix; the reviewer does not re-review for it,
+and the author merges through `land.sh` as soon as the gate is green. Only a
+finding that cannot be a test (a design placement, an authorization boundary,
+a contract change) keeps the loop: the author fixes, the reviewer re-reads that
+head, and the accept is the merge signal.
+
+Merge `main` into the branch **before** asking for review, and again only when
+`gate.sh` says `main` changed a file the branch also changes, or GitHub reports
+a conflict. Landing behind `main` in disjoint files is allowed and warned, not
+refused; CI on `main` is the proof for the merged tree. Do not rebase or squash
+a reviewed branch: the verdict names a commit, and a rewrite discards it.
+
+Pure documentation, plan, package-mount, CI-wiring, and dependency changes land
+on green CI without a reviewer when the gate's trusted shapes recognize them;
+everything else needs the one verdict.
+
+Name the observable problem and path, say what you did not check, and withdraw
+wrong findings.
 
 **Copilot inline comments** (BelimbingApp/ai-team#80) use review threads, not
 bodies the gate reads. Before `ready.sh`, resolve every unresolved Copilot thread
@@ -501,7 +471,7 @@ remains the holder's decision. Fetch the PR head before acting on a finding.
 
 Run an adaptive heartbeat every 10–30 minutes. Each tick starts with
 `orient.sh`, drains green independently reviewed unheld PRs, rechecks holds
-after author pushes, reviews peers before claiming more work, and continues an
+after author pushes, reviews an unreviewed peer PR before claiming more work, and continues an
 active lane. If nothing is actionable, honestly idle. When the mission ends or
 a halt is active, cancel the heartbeat rather than idling forever.
 

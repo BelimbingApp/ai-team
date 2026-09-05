@@ -11,8 +11,6 @@ from _test_support import bash_path, run_with_bash_path
 
 SCRIPT = Path(__file__).with_name("claim.sh")
 CLAIM_BRANCH = "agent/composer-issue-42"
-PACKAGE_REFRESH_BRANCH = "ai-team/package-refresh"
-CLAIM_REFRESH_MUTEX_BRANCH = "ai-team/claim-refresh-mutex"
 
 
 class ClaimMultiRemoteTest(unittest.TestCase):
@@ -91,11 +89,7 @@ class ClaimMultiRemoteTest(unittest.TestCase):
                     fi
                     ;;
                   "pr list")
-                    if printf '%s' "$*" | grep -q -- '--head ai-team/package-refresh'; then
-                      printf '0\\n'
-                    else
-                      printf '[]\\n'
-                    fi
+                    printf '[]\\n'
                     ;;
                   "label list")
                     printf '[{{"name":"agent:composer"}}]\\n'
@@ -196,8 +190,6 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         *,
         worktree: Path,
         resume_branch: str | None = None,
-        recover_mutex_sha: str | None = None,
-        mutate_mutex_to: str | None = None,
         fail_create: bool = False,
         mutate_local_to: str | None = None,
         dirty_worktree: bool = False,
@@ -215,10 +207,6 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         env["CLAIM_TEST_WORKTREE_BASH"] = bash_path(worktree)
         if resume_branch:
             env["CLAIM_BRANCH"] = resume_branch
-        if recover_mutex_sha:
-            env["AI_TEAM_RECOVER_MUTEX_SHA"] = recover_mutex_sha
-        if mutate_mutex_to:
-            env["CLAIM_TEST_MUTATE_MUTEX_TO"] = mutate_mutex_to
         if fail_create:
             env["CLAIM_TEST_FAIL_CREATE"] = "1"
         if mutate_local_to:
@@ -248,62 +236,6 @@ class ClaimMultiRemoteTest(unittest.TestCase):
             capture_output=True,
         )
         return result.stdout.strip() if result.returncode == 0 else None
-
-    def create_generated_mutex(self) -> str:
-        parent = self.git_out(["rev-parse", "HEAD"])
-        tree = self.git_out(["rev-parse", "HEAD^{tree}"])
-        message = (
-            "AI Team refresh/claim mutex\n\n"
-            "AI-Team-Claim-Refresh-Mutex: true\n"
-            f"AI-Team-Claim-Refresh-Mutex-Base: {parent}\n"
-            "AI-Team-Claim-Refresh-Mutex-Owner: claim:stale:#7\n"
-            "AI-Team-Claim-Refresh-Mutex-Nonce: 0123456789abcdef0123456789abcdef\n"
-        )
-        created = subprocess.run(
-            ["git", "commit-tree", tree, "-p", parent],
-            cwd=self.clone,
-            env=self.git_env(),
-            input=message,
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-        self.git(["push", "-q", "origin", f"{created}:refs/heads/{CLAIM_REFRESH_MUTEX_BRANCH}"])
-        return created
-
-    def install_mutex_mutation_shim(self) -> None:
-        git = self.bin / "git"
-        git.write_text(
-            textwrap.dedent(
-                """\
-                #!/usr/bin/env bash
-                set -eu
-                if [ -n "${AI_TEAM_TEST_ORIGIN_REPO:-}" ] && \
-                   [ "${1:-}" = "remote" ] && [ "${2:-}" = "get-url" ] && [ "${3:-}" = "origin" ]; then
-                  printf 'https://github.com/%s.git\\n' "$AI_TEAM_TEST_ORIGIN_REPO"
-                  exit 0
-                fi
-                recovery_delete=false
-                if [ "${1:-}" = "push" ]; then
-                  for argument in "$@"; do
-                    case "$argument" in
-                      --force-with-lease=refs/heads/ai-team/claim-refresh-mutex:?*)
-                        recovery_delete=true
-                        ;;
-                    esac
-                  done
-                fi
-                if [ "$recovery_delete" = true ] && [ -n "${CLAIM_TEST_MUTATE_MUTEX_TO:-}" ]; then
-                  "$CLAIM_TEST_REAL_GIT" --git-dir="$CLAIM_TEST_BARE" update-ref \
-                    refs/heads/ai-team/claim-refresh-mutex "$CLAIM_TEST_MUTATE_MUTEX_TO"
-                  unset CLAIM_TEST_MUTATE_MUTEX_TO
-                fi
-                exec "$CLAIM_TEST_REAL_GIT" "$@"
-                """
-            ),
-            encoding="utf-8",
-        )
-        git.chmod(git.stat().st_mode | stat.S_IXUSR)
 
     def create_pushed_claim_branch(self, *, checkout: bool) -> str:
         """Create CLAIM_BRANCH from origin/main, empty claim commit, push. Optionally stay checked out."""
@@ -358,68 +290,6 @@ class ClaimMultiRemoteTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("must exactly match origin/main", result.stderr)
         self.assertIsNone(self.remote_ref("agent/composer-issue-42"))
-
-    def test_package_refresh_remote_lock_refuses_the_claim(self):
-        self.git(["push", "-q", "origin", f"main:refs/heads/{PACKAGE_REFRESH_BRANCH}"])
-        worktree = Path(self.dir.name) / "wt-refresh-lock"
-
-        result = self.run_claim(worktree=worktree)
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("package refresh is in progress", result.stderr)
-        remote_claim = subprocess.run(
-            ["git", "--git-dir", str(self.bare), "rev-parse", "--verify", f"refs/heads/{CLAIM_BRANCH}"],
-            text=True,
-            capture_output=True,
-            env=self.git_env(),
-        )
-        self.assertNotEqual(remote_claim.returncode, 0)
-        gh_calls = self.gh_log.read_text(encoding="utf-8") if self.gh_log.exists() else ""
-        self.assertNotIn("pr create", gh_calls)
-
-    def test_claim_mutex_recovery_rejects_unknown_and_accepts_exact_generated_ref(self):
-        self.git(["push", "-q", "origin", f"main:refs/heads/{CLAIM_REFRESH_MUTEX_BRANCH}"])
-        unknown = self.remote_ref(CLAIM_REFRESH_MUTEX_BRANCH)
-        self.assertIsNotNone(unknown)
-
-        malformed = self.run_claim(
-            worktree=Path(self.dir.name) / "wt-malformed-mutex",
-            recover_mutex_sha=unknown,
-        )
-
-        self.assertEqual(malformed.returncode, 2, malformed.stdout + malformed.stderr)
-        self.assertIn("malformed or not generated state", malformed.stderr)
-        self.assertEqual(self.remote_ref(CLAIM_REFRESH_MUTEX_BRANCH), unknown)
-        self.git(["push", "-q", "origin", "--delete", CLAIM_REFRESH_MUTEX_BRANCH])
-
-        stale = self.create_generated_mutex()
-        refused = self.run_claim(worktree=Path(self.dir.name) / "wt-stale-mutex")
-        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertEqual(self.remote_ref(CLAIM_REFRESH_MUTEX_BRANCH), stale)
-
-        recovered = self.run_claim(
-            worktree=Path(self.dir.name) / "wt-recovered-mutex",
-            recover_mutex_sha=stale,
-        )
-        self.assert_claim_success(recovered)
-        self.assertIn("recovered exact stale generated mutex", recovered.stderr)
-        self.assertIsNone(self.remote_ref(CLAIM_REFRESH_MUTEX_BRANCH))
-
-    def test_claim_mutex_changed_during_exact_recovery_is_preserved(self):
-        stale = self.create_generated_mutex()
-        replacement = self.git_out(["rev-parse", "HEAD"])
-        self.install_mutex_mutation_shim()
-
-        result = self.run_claim(
-            worktree=Path(self.dir.name) / "wt-raced-mutex",
-            recover_mutex_sha=stale,
-            mutate_mutex_to=replacement,
-        )
-
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("changed during exact recovery", result.stderr)
-        self.assertEqual(self.remote_ref(CLAIM_REFRESH_MUTEX_BRANCH), replacement)
-        self.assertIsNone(self.remote_ref(CLAIM_BRANCH))
 
     def test_fresh_claim_rollback_preserves_a_concurrently_changed_local_ref(self):
         parent = self.git_out(["rev-parse", "HEAD"])
