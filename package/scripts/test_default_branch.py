@@ -53,7 +53,6 @@ class DefaultBranchResolutionTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
-                  "issue list") ;;
                   "issue list")
                     # Empty means "no halt". [] reads as an active halt and
                     # orient.sh exits before the section under test.
