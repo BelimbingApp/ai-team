@@ -37,6 +37,13 @@
 # across one provably clean two-parent merge of the default branch: the accepted
 # commit must be the first parent, the trusted base history must contain the
 # second parent, and Git's recomputed merge tree must equal the commit tree.
+# A reviewer-supplied failing test has one separate, deliberately narrow path:
+# a review bound to the test commit must name that same commit with
+# `**Finding test commit:**` and opt into `**Clearance:** exact-head CI`. The
+# current head must be the test commit's immediate child. A marker-only review
+# also requires the same reviewer to have accepted the test commit's immediate
+# parent; a changes-required marker is itself the review verdict. This permits
+# exactly one author correction while refusing arbitrary descendants.
 # Exit 0 means an independent acceptance exists and no independent
 # changes-required verdict supersedes it. Exit 1 is a review failure; exit 2 is
 # an invocation or GitHub-read failure.
@@ -211,6 +218,27 @@ if [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ && "$base_sha" =~ ^[0-9a-f]{40}$ ]] \
   fi
 fi
 
+# CI clearance for a reviewer-supplied failing test is structurally limited to
+# one correction commit. Git supplies the two immutable edges; jq below still
+# requires the reviewer marker, identity, binding, and either the finding
+# verdict or that same reviewer's acceptance of the finding's parent.
+clearance_finding=""
+clearance_parent=""
+if [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ ]] \
+    && git cat-file -e "$reviewed_sha^{commit}" 2>/dev/null; then
+  reviewed_parents=$(git show -s --format=%P "$reviewed_sha" 2>/dev/null || true)
+  read -r -a reviewed_parent_list <<<"$reviewed_parents"
+  if [[ "${#reviewed_parent_list[@]}" == "1" ]]; then
+    candidate_finding="${reviewed_parent_list[0]}"
+    finding_parents=$(git show -s --format=%P "$candidate_finding" 2>/dev/null || true)
+    read -r -a finding_parent_list <<<"$finding_parents"
+    if [[ "${#finding_parent_list[@]}" == "1" ]]; then
+      clearance_finding="$candidate_finding"
+      clearance_parent="${finding_parent_list[0]}"
+    fi
+  fi
+fi
+
 # The filter is a fixed, reviewed constant that grows with every diagnostic.
 # Keep it out of argv (#83): Windows rejects large *payloads* before jq starts,
 # and a 50,000-byte review body must still trip that bound — but the filter
@@ -238,6 +266,15 @@ cat >"$filter_file" <<'JQFILTER'
        | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
        | ascii_downcase)] | unique) as $h
     | if ($h | length) == 1 then $h[0] else "" end;
+  def finding_test_commit:
+    ([((.body // "") | split("\n")[]
+       | capture("^\\*\\*Finding test commit:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
+       | ascii_downcase)] | unique) as $h
+    | if ($h | length) == 1 then $h[0] else "" end;
+  def exact_head_ci_clearance:
+    ([((.body // "") | split("\n")[]
+       | select(test("^\\*\\*Clearance:\\*\\*[[:space:]]*exact-head CI[[:space:]]*$"; "i")))]
+     | length) == 1;
   def explicit_verdicts:
     [((.body // "") | split("\n")[]
        | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept|approve|changes required|request changes)[[:space:]]*$"; "i").v
@@ -269,6 +306,14 @@ cat >"$filter_file" <<'JQFILTER'
       (if $automated_author != "" then $automated_author else $authors[0] end) as $author
       | ([$input.reviewed] + (if $carry_from == "" then [] else [$carry_from] end)) as $eligible_heads
       | [$input.reviews[] | select(.commit_id as $commit | $eligible_heads | index($commit))] as $at_eligible_head
+      | [$input.reviews[]
+         | . + {agent: from_agent, verdict: review_verdict,
+                reviewed_head: reviewed_head,
+                finding_test_commit: finding_test_commit,
+                ci_clearance: exact_head_ci_clearance}
+         | select(.agent != "")]
+        | sort_by(.agent, .submitted_at, .id) as $all_attributable
+      | ($all_attributable | group_by(.agent) | map(last)) as $latest_all
       | [$at_eligible_head[]
          | . + {agent: from_agent, verdict: review_verdict, reviewed_head: reviewed_head}
          | select(.agent != "")]
@@ -287,6 +332,25 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.agent != $author and .reviewed_head == .commit_id and .verdict == "changes required")
           | .agent]
          | unique | join(", ")) as $blocking
+      | ([$latest_all[]
+          | select(.agent != $author)
+          | select(.commit_id == $clearance_finding)
+          | select(.reviewed_head == .commit_id)
+          | select(.finding_test_commit == .commit_id)
+          | select(.ci_clearance)
+          | select(.state != "DISMISSED")
+          | . as $marker
+          | select(
+              .verdict == "changes required"
+              or (.verdict == ""
+                  and any($all_attributable[];
+                    .agent == $marker.agent
+                    and .commit_id == $clearance_parent
+                    and .reviewed_head == .commit_id
+                    and .verdict == "accept"
+                    and ((.submitted_at // "") < ($marker.submitted_at // "")))))
+          | .agent]
+         | unique | join(", ")) as $ci_cleared
       | ([$latest[] | select(.agent != $author and .verdict == "") | .agent] | unique) as $malformed
       | ([$latest[] | select(.agent != $author and .reviewed_head != .commit_id) | .agent] | unique) as $unbound
       | ([$at_eligible_head[]
@@ -312,8 +376,10 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.raw | length == 1)
           | "WARN: review from \(.login) ignored: **From:** \(.raw[0]) is not a bare lane name"]
          | unique) as $malformed_from
-      | [if $accepted_exact == "" and $accepted_carried == "" then
+      | [if $accepted_exact == "" and $accepted_carried == "" and $ci_cleared == "" then
            "FAIL: no independent exact-head acceptance; require a pull request review with **From:** <reviewer>, **HEAD reviewed:** `<full-sha>`, and APPROVED or **Verdict:** accept"
+         elif $ci_cleared != "" then
+           "PASS: reviewer failing test \($clearance_finding) cleared by exact-head CI for \($ci_cleared)"
          elif $accepted_exact != "" and $accepted_carried != "" then
            "PASS: independent exact-head acceptance from \($accepted_exact); carried from accepted first parent \($carry_from) by \($accepted_carried)"
          elif $accepted_carried != "" then
@@ -336,7 +402,10 @@ cat >"$filter_file" <<'JQFILTER'
 JQFILTER
 
 result=$(jq -r --arg automated_author "$automated_author" \
-  --arg carry_from "$carry_from" --from-file "$filter_file" "$input" 2>/dev/null) || {
+  --arg carry_from "$carry_from" \
+  --arg clearance_finding "$clearance_finding" \
+  --arg clearance_parent "$clearance_parent" \
+  --from-file "$filter_file" "$input" 2>/dev/null) || {
   echo "ERROR: review input is malformed" >&2
   exit 2
 }

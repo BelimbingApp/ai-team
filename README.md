@@ -373,60 +373,61 @@ appointee. This catches confusion, not spoofing.
 
 ### One reviewer, findings as tests, author merges
 
-One pull request gets **one reviewer**, two at most, and never a third. The
-first agent to post a verdict is the reviewer; anyone else reads on but does
-not post a competing verdict unless the author or that reviewer asks. The
-reviewer reads the exact head, verifies the claim against the diff, and states
-what was not checked.
+One pull request gets **one reviewer**, two at most, never a third. The first
+verdict names the reviewer; others do not compete unless asked. Review the
+exact head against the claim and state what was not checked.
 
-A finding is a **test that fails at the reviewed head**, posted in the verdict
-or pushed to the branch, not a paragraph. The author lands it green in the same
-pull request. CI then proves the fix; the reviewer does not re-review for it,
-and the author merges through `land.sh` as soon as the gate is green. Only a
-finding that cannot be a test (a design placement, an authorization boundary,
-a contract change) keeps the loop: the author fixes, the reviewer re-reads that
-head, and the accept is the merge signal.
+A finding is a **test that fails at the reviewed head**, posted or pushed, not
+a paragraph. The author fixes it in this PR; CI clears it without re-review.
+Untestable findings (placement, authorization, contract) still require the
+reviewer to accept the corrected exact head.
 
-Merge `main` into the branch **before** asking for review, and again only when
-`gate.sh` says `main` changed a file the branch also changes, or GitHub reports
-a conflict. Landing behind `main` in disjoint files is allowed and warned, not
-refused; CI on `main` is the proof for the merged tree. Do not rebase or squash
-a reviewed branch: the verdict names a commit, and a rewrite discards it.
+When the reviewer pushes the failing test, bind that commit and its CI-clearance
+contract in the same `changes required` review:
 
-Pure documentation, plan, package-mount, CI-wiring, and dependency changes land
-on green CI without a reviewer when the gate's trusted shapes recognize them;
-everything else needs the one verdict.
+```text
+**From:** <reviewer>
 
-Name the observable problem and path, say what you did not check, and withdraw
-wrong findings.
+**HEAD reviewed:** `<failing-test-full-sha>`
 
-**Copilot inline comments** (BelimbingApp/ai-team#80) use review threads, not
-bodies the gate reads. Before `ready.sh`, resolve every unresolved Copilot thread
-(fix or decline with reason). Reviewers cite agreed points in the verdict.
-Copilot cannot satisfy Independent review.
+**Verdict:** changes required
 
-Post a verdict as a PR review, not an issue comment (`gh pr comment` is
-invisible to the gate):
+**Finding test commit:** `<failing-test-full-sha>`
+
+**Clearance:** exact-head CI
+```
+
+The author fixes the test in the immediate next commit. Only that direct child
+can clear through CI; another commit requires exact-head review. The finding,
+head, and API `commit_id` bindings must match. Untestable findings cannot use
+this path.
+
+When a test follows an existing acceptance, post the marker without `Verdict`.
+The same reviewer must have accepted its direct parent; this is not a second
+verdict. A marker lacking that acceptance or `changes required` grants nothing.
+
+Merge `main` before review, then only when `gate.sh` names overlapping changes
+or GitHub reports conflict. Disjoint drift warns; CI on `main` proves the
+merged tree. Never rebase or squash a reviewed branch: it destroys the binding.
+
+Trusted documentation, plan, mount, CI, and dependency shapes land on green CI;
+everything else needs a verdict. Name observable evidence and withdraw errors.
+
+Resolve every **Copilot inline comment** before `ready.sh`; it cannot satisfy
+Independent review.
+
+Post verdicts as PR reviews; issue comments are invisible to the gate:
 
 ```bash
 reviewed_head=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
 gh pr review <pr-number> --comment --body "$(printf '**From:** <your-agent-id>\n\n**HEAD reviewed:** %s\n\n**Verdict:** accept\n' "$reviewed_head")"
 ```
 
-`**HEAD reviewed:**` is alone on its line and names the exact 40-character SHA
-you inspected. It is mandatory even for a native approval. `**Verdict:**` is
-also alone on its line and is exactly `accept` or `changes required` —
-GitHub's own words `approve` and `request changes` count as the same verdicts,
-case-insensitively. There is no third verdict: a finding is fixed in this PR
-before it merges, or the verdict is `changes required`. An "accept with
-follow-up" is rejected by the gate as malformed, because every follow-up it
-ever produced was a second review cycle for work that belonged in the first.
-A shared account may record the verdict as `COMMENTED`; the exact `From`
-marker and lane label establish independence. Run `gate.sh` after posting to
-verify it registered. Write `**From:**` with the bare
-lane name, never an `agent:`-prefixed value (the prefix voids the review), and
-when posting through the API pass the body from a file — a raw string field
-posts the filename itself instead of the file.
+`HEAD reviewed` names the exact 40-character SHA. `Verdict` is `accept` or
+`changes required`; GitHub's `approve` and `request changes` synonyms work.
+Each stands alone. Shared accounts may yield `COMMENTED`; markers establish
+identity. Use a bare lane name in `From`, run `gate.sh`, and pass API bodies
+from files.
 
 Three constraints bind every verdict:
 
@@ -442,9 +443,11 @@ Three constraints bind every verdict:
 `package/scripts/review_gate.sh` is the canonical review grammar here, and
 `gate.sh` uses it. It counts only the newest review whose API `commit_id` and
 explicit `HEAD reviewed` marker both name the exact head, from a stable `From`
-identity distinct from the single author lane; a newer review revokes that
-reviewer's earlier acceptance. The explicit marker is durable proof: GitHub may
-rewrite an older Dependabot review's API `commit_id` when the bot rebases it.
+identity distinct from the single author lane, except for the two narrow
+proofs above: a clean base merge and the immediate fix child of a bound failing
+test. A newer review revokes that reviewer's earlier acceptance or clearance
+marker. The explicit marker is durable proof: GitHub may rewrite an older
+Dependabot review's API `commit_id` when the bot rebases it.
 After upgrading the grammar, repost any marker-less review and rerun the check
 on already-reviewed PRs. To make the same
 rule a required GitHub check in an adopter, copy
