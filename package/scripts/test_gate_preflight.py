@@ -819,6 +819,22 @@ class GateMechanismTest(unittest.TestCase):
         )
         self.assertIn("GATE: FAIL", result.stdout)
 
+    def test_verified_clean_main_merge_carry_counts_as_review_success(self):
+        carried = "b" * 40
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            review_gate_body=(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                f"'PASS: independent acceptance carried from accepted first parent {carried} by reviewer across a verified clean base merge'\n"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("carried from accepted first parent", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
     def test_same_lane_approval_is_not_independent(self):
         result = self.run_gate(
             origin=CANONICAL_HTTPS,
