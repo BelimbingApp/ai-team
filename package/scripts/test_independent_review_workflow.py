@@ -190,6 +190,16 @@ esac
                     )
                     self.assertNotIn("head.ref", workflow)
 
+    def test_workflows_mint_ai_team_github_app_token(self):
+        for name, path in self.workflows():
+            with self.subTest(workflow=name):
+                workflow = path.read_text(encoding="utf-8")
+                self.assertIn("uses: actions/create-github-app-token@v2", workflow)
+                self.assertIn("GH_TOKEN: ${{ steps.app-token.outputs.token }}", workflow)
+                self.assertNotIn("GH_TOKEN: ${{ github.token }}", workflow)
+                self.assertIn("AI_TEAM_GITHUB_APP_ID", workflow)
+                self.assertIn("AI_TEAM_GITHUB_APP_PRIVATE_KEY", workflow)
+
     def test_workflows_pin_the_contents_request_and_quote_event_values(self):
         for name, path in self.workflows():
             with self.subTest(workflow=name):

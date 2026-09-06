@@ -9,6 +9,8 @@ name: independent review
 # a review changes instead.
 # That grammar fetches immutable REST author/head identity; never classify a PR
 # from github.actor, which is the reviewer on review-triggered runs.
+# API calls use an AI Team GitHub App installation token (#621), not a
+# shared user PAT and not the default Actions GITHUB_TOKEN alone.
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled]
@@ -25,9 +27,28 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Require AI Team GitHub App credentials
+        env:
+          AI_TEAM_GITHUB_APP_ID: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
+          AI_TEAM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.AI_TEAM_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AI_TEAM_GITHUB_APP_ID" || -z "$AI_TEAM_GITHUB_APP_PRIVATE_KEY" ]]; then
+            echo '::error::AI_TEAM_GITHUB_APP_ID and AI_TEAM_GITHUB_APP_PRIVATE_KEY must be configured; see docs/runbooks/ai-team-github-app.md.'
+            exit 1
+          fi
+
+      - name: Mint AI Team GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AI_TEAM_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Materialize trusted review grammar
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REVIEW_GATE_REPOSITORY: ${{ github.repository }}
           REVIEW_GATE_WORKFLOW_SHA: ${{ github.workflow_sha }}
           REVIEW_GATE_DIR: docs/ai-team/scripts
@@ -152,7 +173,7 @@ jobs:
       - name: Verify independent review of this exact head
         if: steps.pull_shape.outputs.trusted != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REVIEW_GATE_REPOSITORY: ${{ github.repository }}
           REVIEW_GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
