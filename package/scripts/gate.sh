@@ -473,12 +473,14 @@ fi
 # Keep the comment-stream diagnostic below focused on the case where a review
 # was not already accepted. Comments are informational only and never count.
 accepted_agents=""
-if grep -qE '^PASS: (independent exact-head acceptance|trusted subtree pull)' <<< "$review_output"; then
+if [[ "$review_exit" == "0" ]] && grep -q '^PASS:' <<< "$review_output"; then
   accepted_agents="present"
 elif ! grep -q '^FAIL:' <<< "$review_output"; then
-  # A malformed or partially shipped delegate must not turn the review
-  # dimension into silence. Gate success requires affirmative acceptance.
-  say_bad "review gate did not report an independent exact-head acceptance"
+  # review_gate.sh owns the review grammar. gate.sh consumes its exit status
+  # plus an affirmative PASS record instead of reparsing human-facing success
+  # wording and drifting behind new fail-closed carry shapes (#641). A silent
+  # or partially shipped delegate still cannot erase the review dimension.
+  say_bad "review gate did not report an affirmative review success"
 fi
 
 # 5d. gh pr review --approve is refused on our own PRs (shared account), and
