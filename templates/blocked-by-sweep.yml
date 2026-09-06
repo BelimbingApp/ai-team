@@ -3,6 +3,12 @@ name: AI Team blocked-by sweep
 # Copy this adopter-owned workflow to .github/workflows/. The mechanism suite
 # already runs on every pull request; keeping this workflow schedule-only
 # prevents an optional sweep check from becoming a path-dependent gate check.
+#
+# Cross-repo Blocked-By references (BelimbingApp/blb-people#N and
+# BelimbingApp/blb-people-connector#N) need an installation token whose App
+# can read Issues on those repos and write Issues on this board. Mint a fresh
+# token each run from AI_TEAM_GITHUB_APP_ID / AI_TEAM_GITHUB_APP_PRIVATE_KEY
+# (#621). Do not store a user PAT for this automation.
 on:
   schedule:
     - cron: "17,47 * * * *"
@@ -27,8 +33,27 @@ jobs:
       - name: Check out the adopter
         uses: actions/checkout@v5
 
+      - name: Require AI Team GitHub App credentials
+        env:
+          AI_TEAM_GITHUB_APP_ID: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
+          AI_TEAM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.AI_TEAM_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AI_TEAM_GITHUB_APP_ID" || -z "$AI_TEAM_GITHUB_APP_PRIVATE_KEY" ]]; then
+            echo '::error::AI_TEAM_GITHUB_APP_ID and AI_TEAM_GITHUB_APP_PRIVATE_KEY must be configured; see docs/runbooks/ai-team-github-app.md.'
+            exit 1
+          fi
+
+      - name: Mint AI Team GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
+          private-key: ${{ secrets.AI_TEAM_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Run the Blocked-By sweep
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: python3 docs/ai-team/scripts/blocked_by_sweep.py
