@@ -88,7 +88,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      # Fetch commits as inert objects for review_gate.sh's narrow merge proof.
+      # Fetch commits as inert objects for review_gate.sh's narrow clean-merge
+      # and reviewer-test immediate-fix proofs.
       # The trusted grammar only reads commit metadata and recomputes a tree;
       # no pull-request-controlled file or executable is loaded.
       - name: Fetch pull request history for review carry-forward
