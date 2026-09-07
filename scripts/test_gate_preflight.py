@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from _test_support import bash_path, run_with_bash_path
@@ -34,8 +35,11 @@ GH_STUB = textwrap.dedent(
           --argjson closing "${GATE_TEST_CLOSING:-[]}" \
           '{headRefOid:$head,headRefName:$branch,title:$title,body:$body,isDraft:false,state:"OPEN",mergeable:"MERGEABLE",labels:$labels,closingIssuesReferences:$closing}'
         ;;
-      "pr list")
-        printf '%s\\n' "$GATE_TEST_MERGED_HEADS"
+      "api repos/$GATE_TEST_CANONICAL/pulls?"*)
+        # The REST closed-pull listing gate.sh reads for the merged baseline
+        # (#103). GitHub has no state=merged here, so the fixture carries
+        # unmerged closures too and merged_at is what separates them.
+        printf '%s\\n' "$GATE_TEST_CLOSED_PULLS"
         ;;
       "api repos/$GATE_TEST_CANONICAL/commits/"*check-runs*)
         head="${2#repos/$GATE_TEST_CANONICAL/commits/}"
@@ -238,6 +242,21 @@ class GateMechanismTest(unittest.TestCase):
         effective_identity = json.loads(json.dumps(identity))
         effective_identity.setdefault("head", {})["sha"] = effective_head
         effective_identity["labels"] = [{"name": label} for label in effective_labels]
+        # gate.sh reads PR state from the REST pull payload rather than from
+        # GraphQL (#103), so the stubbed identity has to be the whole REST
+        # document and not just the fields the trusted-author boundary reads.
+        # Values and defaults mirror the `pr view` stub above, field for field:
+        # lower-case state, `draft`, boolean `mergeable`, head.sha and head.ref.
+        effective_identity["head"]["ref"] = (
+            branch if branch is not None else "agent/author-issue-42"
+        )
+        effective_identity["title"] = title if title is not None else "Fix (#42)"
+        effective_identity["body"] = body if body is not None else "Closes #42"
+        effective_identity.setdefault("number", 1)
+        effective_identity.setdefault("state", "open")
+        effective_identity.setdefault("draft", False)
+        effective_identity.setdefault("merged", False)
+        effective_identity.setdefault("mergeable", True)
         env["GATE_TEST_IDENTITY"] = json.dumps(effective_identity)
         if reviews is None:
             reviews = [{
@@ -285,7 +304,18 @@ class GateMechanismTest(unittest.TestCase):
         if baseline_check_runs_by_head is None:
             baseline = main_check_runs if baseline_check_runs is None else baseline_check_runs
             baseline_check_runs_by_head = {head: baseline for head in merged_heads}
-        env["GATE_TEST_MERGED_HEADS"] = "\n".join(merged_heads)
+        # Newest merge first, matching the order the fixtures state them in;
+        # merged_at descends so gate.sh's own sort has to run to reproduce it.
+        env["GATE_TEST_CLOSED_PULLS"] = json.dumps([
+            {
+                "number": index + 1,
+                "merged_at": (
+                    datetime(2026, 1, 31, tzinfo=timezone.utc) - timedelta(hours=index)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "head": {"sha": merged_head},
+            }
+            for index, merged_head in enumerate(merged_heads)
+        ])
         env["GATE_TEST_BASELINE_CHECK_RUNS"] = json.dumps({
             head: {"check_runs": runs} for head, runs in baseline_check_runs_by_head.items()
         })
