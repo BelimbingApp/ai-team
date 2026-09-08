@@ -137,6 +137,26 @@ class ClaimOwnLabelTest(unittest.TestCase):
             "url": "https://example/issues/42",
         }
 
+    def test_new_claim_refuses_another_open_lane_before_writing(self):
+        for labels, body in [([{"name": "agent:fable"}], ""),
+                             ([], "**From:** fable\n")]:
+            with self.subTest(labels=labels):
+                prs = json.dumps([{"number": 77, "title": "other (#70)",
+                    "body": body, "headRefName": "agent/fable-issue-70",
+                    "labels": labels, "url": "https://example/pull/77"}])
+                result = self.run_claim(self.issue(["task:ready"]), pr_list=prs)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("finish or hand off", result.stderr)
+                self.assertFalse(self.pr_create_marker.exists())
+                self.assertFalse(self.lane.exists())
+
+    def test_other_agent_lane_does_not_consume_author_capacity(self):
+        prs = json.dumps([{"number": 77, "title": "other (#70)",
+            "body": "**From:** peer\n", "headRefName": "agent/peer-issue-70",
+            "labels": [{"name": "agent:peer"}], "url": "https://example/pull/77"}])
+        result = self.run_claim(self.issue(["task:ready"]), pr_list=prs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_own_label_without_task_ready_resumes_and_claims(self):
         result = self.run_claim(self.issue(["agent:fable"]))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -185,7 +205,9 @@ class ClaimOwnLabelTest(unittest.TestCase):
             check=True, env=self.git_env(), capture_output=True,
         )
         pr_list = json.dumps(
-            [self.open_pr()]
+            [self.open_pr(), {"number": 77, "title": "older lane (#70)",
+                "body": "**From:** fable\n", "headRefName": "agent/fable-issue-70",
+                "labels": [{"name": "agent:fable"}], "url": "https://example/pull/77"}]
         )
         result = self.run_claim(self.issue(["agent:fable"]), pr_list=pr_list)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
