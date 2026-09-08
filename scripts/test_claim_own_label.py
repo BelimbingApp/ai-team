@@ -157,6 +157,16 @@ class ClaimOwnLabelTest(unittest.TestCase):
         result = self.run_claim(self.issue(["task:ready"]), pr_list=prs)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_truncated_registry_cannot_prove_capacity(self):
+        prs = json.dumps([{"number": n, "title": "other work", "body": "",
+            "headRefName": "peer", "labels": [], "url": "https://example/pull/1"}
+            for n in range(100)])
+        result = self.run_claim(self.issue(["task:ready"]), pr_list=prs)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot prove author capacity", result.stderr)
+        self.assertFalse(self.pr_create_marker.exists())
+        self.assertFalse(self.lane.exists())
+
     def test_own_label_without_task_ready_resumes_and_claims(self):
         result = self.run_claim(self.issue(["agent:fable"]))
         self.assertEqual(result.returncode, 0, result.stderr)
