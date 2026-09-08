@@ -62,10 +62,12 @@ class ClaimMultiRemoteTest(unittest.TestCase):
                   "repo view")
                     printf 'example/canonical\\n'
                     ;;
-                  "issue list")
+                  "api repos/example/canonical/issues?state=open&labels=ops:halt&per_page=100")
                     if [ "${{CLAIM_TEST_HALT:-}}" = "1" ]; then
                       printf '  HALT #8 — maintenance\\n'
                     fi
+                    ;;
+                  "issue list")
                     ;;
                   "issue view")
                     # claim.sh reads the labels back after writing them and

@@ -104,6 +104,13 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                     [[ "$*" == *"--repo example/origin"* ]] || exit 18
                     exit 19
                     ;;
+                  "api repos/example/origin/issues?state=open&labels=ops:halt&per_page=100")
+                    if [ "${ORIGIN_ROUTING_SCRIPT:-}" = "claim.sh" ]; then
+                      printf ''
+                    else
+                      printf '  ORIGIN ROUTING PROBE\\n'
+                    fi
+                    ;;
                   "issue list")
                     scoped_repo=''
                     previous=''
@@ -112,8 +119,7 @@ class OriginRepositoryRoutingTest(unittest.TestCase):
                       previous="$argument"
                     done
                     [ "$scoped_repo" = 'example/origin' ] || exit 18
-                    if [[ "$*" == *"--label ops:halt"* ]] && [ "${ORIGIN_ROUTING_SCRIPT:-}" = "claim.sh" ]; then printf ''
-                    else printf '  ORIGIN ROUTING PROBE\\n'; fi
+                    printf '  ORIGIN ROUTING PROBE\\n'
                     ;;
                   "pr list") printf '' ;;
                   "api"*)
