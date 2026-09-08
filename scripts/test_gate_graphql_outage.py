@@ -52,7 +52,15 @@ OUTAGE_GH_STUB = textwrap.dedent(
       "repos/{OUTAGE_CANONICAL}/pulls/1/reviews") printf '%s\\n' "$OUTAGE_REVIEWS" ;;
       "repos/{OUTAGE_CANONICAL}/pulls/1/files") printf '1\\n' ;;
       "repos/{OUTAGE_CANONICAL}/issues/1/comments") printf '%s\\n' "$OUTAGE_COMMENTS" ;;
-      repos/*/pulls\\?*) printf '%s\\n' "$OUTAGE_CLOSED_PULLS" ;;
+      repos/*/pulls\\?*)
+        # Page the closed list the way REST does, so a fixture can put a merged
+        # pull request beyond page one and the gate has to go and find it.
+        case "$path" in
+          *"&page="*) page="${{path##*&page=}}"; page="${{page%%&*}}" ;;
+          *) page=1 ;;
+        esac
+        jq -c --argjson page "$page" '.[(($page - 1) * 100):($page * 100)]' <<<"$OUTAGE_CLOSED_PULLS"
+        ;;
       repos/*/rules/branches/*) printf '[]\\n' ;;
       repos/*/git/refs/heads/*) printf '%s\\n' "$OUTAGE_HEAD" ;;
       *) exit 0 ;;
@@ -305,6 +313,60 @@ class GateGraphqlOutageTest(unittest.TestCase):
         self.assertNotIn("cannot observe a common expected check name", result.stdout)
         self.assertNotIn("bootstrapping from checks observed", result.stdout)
         self.assertIn("latest run of each passing", result.stdout)
+
+    def test_an_unexhausted_closed_list_does_not_prove_absent_merge_history(self):
+        # workflow-audit's [P1]. REST has no state=merged, so merged and
+        # unmerged closures share one 100-slot window and a page can be
+        # entirely unmerged while older merged pull requests exist. Reading one
+        # page and calling that "no baseline" bootstraps the expected names
+        # from the candidate's own head, dropping every required historical
+        # check name -- strictly weaker proof than the baseline this enforces.
+        #
+        # Absence of merge history is only proven by reaching the end of the
+        # list. Here the list never ends within the page budget, so the gate
+        # must refuse rather than assume. The page cap is what makes this
+        # reachable at all: without it an adopter with a very long closed list
+        # would page forever instead of failing closed.
+        result = self.run_gate(closed_pulls=[
+            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+            for n in range(1000)
+        ])
+        self.assertNotIn("bootstrapping from checks observed", result.stdout)
+        self.assertIn("refusing to bootstrap", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_the_merged_baseline_is_found_beyond_the_first_closed_page(self):
+        # The same window, with the merge actually present on page two. Failing
+        # closed is the safe half; this is the half that keeps the gate usable,
+        # so the fix cannot be "always refuse". The baseline head must be read.
+        merged_head = "b" * 40
+        closed_pulls = [
+            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+            for n in range(100)
+        ]
+        closed_pulls.append(
+            {"number": 900, "merged_at": "2026-01-09T00:00:00Z",
+             "head": {"sha": merged_head}}
+        )
+        result = self.run_gate(
+            closed_pulls=closed_pulls,
+            check_runs_by_head={self.head_sha: PASSING_CI, merged_head: PASSING_CI},
+        )
+        self.assertEqual(
+            self.logged_check_run_heads(), [self.head_sha, merged_head],
+            result.stdout + result.stderr,
+        )
+        self.assertNotIn("bootstrapping from checks observed", result.stdout)
+        self.assertNotIn("refusing to bootstrap", result.stdout)
+        self.assertIn("latest run of each passing", result.stdout)
+
+    def test_a_genuinely_empty_closed_list_still_bootstraps(self):
+        # The real first pull request in a repository. The list is exhausted on
+        # page one, so absence of merge history is proven rather than assumed,
+        # and the documented bootstrap must still be reachable.
+        result = self.run_gate(closed_pulls=[])
+        self.assertIn("bootstrapping from checks observed", result.stdout)
+        self.assertNotIn("refusing to bootstrap", result.stdout)
 
     def test_the_comment_tail_survives_the_outage(self):
         # `gh pr view --json comments` is GraphQL and returns the same set the
