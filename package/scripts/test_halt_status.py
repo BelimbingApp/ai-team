@@ -20,6 +20,11 @@ class HaltStatusTest(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env bash
+                    expected_endpoint='repos/example/repository/issues?state=open&labels=ops:halt&per_page=100'
+                    if [[ "$1" != api || "$2" != "$expected_endpoint" || "$*" != *'select(.pull_request == null)'* ]]; then
+                      printf 'unexpected invocation: %s\\n' "$*" >&2
+                      exit 99
+                    fi
                     case "$HALT_TEST_MODE" in
                       none) exit 0 ;;
                       active) printf '%s\\n' '  HALT #42 — maintenance' ;;
@@ -56,6 +61,10 @@ class HaltStatusTest(unittest.TestCase):
         result = self.run_status("failure")
         self.assertEqual(result.returncode, 2)
         self.assertIn("HALT STATUS UNKNOWN", result.stdout)
+
+    def test_probe_uses_rest_and_filters_pull_requests(self):
+        result = self.run_status("none")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

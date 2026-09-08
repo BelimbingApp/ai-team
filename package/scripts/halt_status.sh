@@ -11,8 +11,12 @@ if [ -z "$repo" ]; then
 fi
 
 echo "== operations =="
-if ! halt=$(gh issue list --repo "$repo" --state open --label "ops:halt" \
-  --json number,title --jq '.[]|"  HALT #\(.number) — \(.title)"' 2>/dev/null); then
+# REST has a separate rate-limit budget from the GraphQL queries used by the
+# rest of orientation. This probe must remain available when that shared
+# GraphQL budget is exhausted. The Issues endpoint also returns pull requests,
+# so explicitly exclude them before treating a label as a team-wide halt.
+if ! halt=$(gh api "repos/$repo/issues?state=open&labels=ops:halt&per_page=100" \
+  --jq '.[]|select(.pull_request == null)|"  HALT #\(.number) — \(.title)"' 2>/dev/null); then
   echo "  *** HALT STATUS UNKNOWN — STAND DOWN ***"
   echo "  Cannot query the shared board; do not claim new work."
   exit 2
