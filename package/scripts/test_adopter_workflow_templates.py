@@ -35,7 +35,22 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
             "run: python3 docs/ai-team/scripts/blocked_by_sweep.py", SWEEP
         )
         self.assertIn("GITHUB_REPOSITORY: ${{ github.repository }}", SWEEP)
-        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", SWEEP)
+        self.assertIn("uses: actions/create-github-app-token@v2", SWEEP)
+        self.assertIn(
+            "GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN || github.token }}",
+            SWEEP,
+        )
+        self.assertIn("AI_TEAM_BLOCKED_BY_SWEEP_TOKEN", SWEEP)
+        self.assertIn("Choose the sweep credential", SWEEP)
+        self.assertIn("if: steps.credentials.outputs.source == 'app'", SWEEP)
+        self.assertIn('echo "source=github"', SWEEP)
+        self.assertNotIn("exit 1", SWEEP.split("- name: Choose the sweep credential", 1)[1].split("- name: Mint", 1)[0])
+        self.assertNotIn(
+            "GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN }}",
+            SWEEP,
+        )
+        self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", SWEEP)
+        self.assertNotIn("GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}", SWEEP)
 
     def test_install_guide_names_all_adopter_owned_templates(self):
         document = (TEMPLATES.parent / "README.md").read_text(encoding="utf-8")
