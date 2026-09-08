@@ -42,8 +42,9 @@ cp docs/ai-team/templates/independent-review.yml .github/workflows/ai-team-indep
 
 After copying, optionally store `AI_TEAM_GITHUB_APP_ID` and
 `AI_TEAM_GITHUB_APP_PRIVATE_KEY` (see
-`docs/ai-team/runbooks/ai-team-github-app.md`). Until then the review gate keeps
-`GITHUB_TOKEN` and the sweep keeps `AI_TEAM_BLOCKED_BY_SWEEP_TOKEN` when set.
+`docs/ai-team/runbooks/ai-team-github-app.md`). Until then both keep
+`GITHUB_TOKEN`; optional `AI_TEAM_BLOCKED_BY_SWEEP_TOKEN` covers private
+cross-repo blockers before the App exists.
 
 The mechanism workflow runs the mounted suite on every pull request and on
 pushes to `main`; if the adopter uses another default branch, change that one
