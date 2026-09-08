@@ -89,6 +89,10 @@ class LandHarness(unittest.TestCase):
                 #!/usr/bin/env bash
                 set -euo pipefail
                 printf '%s\\n' "$*" >>"$LAND_TEST_GH_LOG"
+                if [ "${LAND_TEST_GRAPHQL_OUTAGE:-0}" = "1" ] && [ "$1" != "api" ]; then
+                  echo "GraphQL: API rate limit already exceeded for user ID 1106470" >&2
+                  exit 1
+                fi
                 case "$1 $2" in
                   "repo view")
                     printf 'example/canonical\\n'
@@ -144,15 +148,19 @@ class LandHarness(unittest.TestCase):
                     fi
                     ;;
                   "api --paginate")
-                    if [[ "$*" != *"rules/branches/main?per_page=100"* ]]; then
+                    if [[ "$*" == *"issues/42/comments"* ]]; then
+                      printf '%s\\n' "$LAND_TEST_COMMENTS"
+                    elif [[ "$*" == *"pulls?state=open&base="* ]]; then
+                      printf '%s\\n' "$LAND_TEST_STACKED_JSON"
+                    elif [[ "$*" != *"rules/branches/main?per_page=100"* ]]; then
                       echo "unexpected paginated gh: $*" >&2
                       exit 1
-                    fi
-                    if [ "${LAND_TEST_RULES_STATUS:-0}" != "0" ]; then
+                    elif [ "${LAND_TEST_RULES_STATUS:-0}" != "0" ]; then
                       printf 'gh: could not read active rules\\n' >&2
                       exit "${LAND_TEST_RULES_STATUS}"
+                    else
+                      printf '%s\\n' "$LAND_TEST_RULES_PAGES"
                     fi
-                    printf '%s\\n' "$LAND_TEST_RULES_PAGES"
                     ;;
                   "pr list")
                     printf '%s\\n' "${LAND_TEST_STACKED:-}"
@@ -200,6 +208,7 @@ class LandHarness(unittest.TestCase):
         rules_status: str = "0",
         undeclared_lane: bool = False,
         ready_issue: str | None = None,
+        graphql_outage: bool = False,
     ):
         env = os.environ.copy()
         env.update(
@@ -238,6 +247,12 @@ class LandHarness(unittest.TestCase):
                 rules_pages if rules_pages is not None else [[]]
             ),
             LAND_TEST_RULES_STATUS=rules_status,
+            LAND_TEST_COMMENTS=json.dumps([]),
+            LAND_TEST_STACKED_JSON=json.dumps([
+                {"number": int(number.strip().lstrip("#"))}
+                for number in stacked.split(",") if number.strip()
+            ]),
+            LAND_TEST_GRAPHQL_OUTAGE="1" if graphql_outage else "0",
             PATH=f"{self.cwd / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         )
         if trusted_bot:
@@ -247,9 +262,17 @@ class LandHarness(unittest.TestCase):
                 LAND_TEST_BRANCH="dependabot/npm_and_yarn/alpinejs-3.16.3",
                 LAND_TEST_LABELS=json.dumps([{"name": "dependencies"}]),
                 LAND_TEST_IDENTITY=json.dumps({
+                    "number": 42,
+                    "state": "closed" if state == "MERGED" else "open",
+                    "merged": state == "MERGED",
+                    "merge_commit_sha": "b" * 40 if state == "MERGED" else None,
+                    "draft": False,
+                    "title": "Bump Alpine.js from 3.16.2 to 3.16.3",
+                    "body": "Generated dependency update.",
                     "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
-                    "head": {"repo": {"id": 100}},
-                    "base": {"repo": {"id": 100}},
+                    "head": {"ref": "dependabot/npm_and_yarn/alpinejs-3.16.3", "repo": {"id": 100}},
+                    "base": {"ref": base_branch, "repo": {"id": 100}},
+                    "labels": [{"name": "dependencies"}],
                 }),
             )
         else:
@@ -262,9 +285,19 @@ class LandHarness(unittest.TestCase):
                     {"name": "task:review"},
                 ]),
                 LAND_TEST_IDENTITY=json.dumps({
+                    "number": 42,
+                    "state": "closed" if state == "MERGED" else "open",
+                    "merged": state == "MERGED",
+                    "merge_commit_sha": "b" * 40 if state == "MERGED" else None,
+                    "draft": False,
+                    "title": "Fix lane (#42)",
+                    "body": "Closes #42",
                     "user": {"id": 1, "login": "human-author", "type": "User"},
-                    "head": {"repo": {"id": 100}},
-                    "base": {"repo": {"id": 100}},
+                    "head": {"ref": "agent/author-issue-42", "repo": {"id": 100}},
+                    "base": {"ref": base_branch, "repo": {"id": 100}},
+                    "labels": [
+                        {"name": "agent:author"}, {"name": "task:review"}
+                    ],
                 }),
             )
         if merge_method is not None:
@@ -285,6 +318,21 @@ class LandHarness(unittest.TestCase):
             env["LAND_TEST_ATTRIBUTION"] = "**From:** kiat-luna — merged at " + "b" * 40
         else:
             env.pop("LAND_TEST_ATTRIBUTION", None)
+        # The REST pull representation is assembled after all the individual
+        # lane fixtures above, so every existing test keeps exercising its own
+        # title, body, branch, base, and label shape.
+        identity = json.loads(env["LAND_TEST_IDENTITY"])
+        identity.update(
+            title=env["LAND_TEST_TITLE"],
+            body=env["LAND_TEST_BODY"],
+            labels=json.loads(env["LAND_TEST_LABELS"]),
+        )
+        identity["head"]["ref"] = env["LAND_TEST_BRANCH"]
+        identity["base"]["ref"] = env["LAND_TEST_BASE_BRANCH"]
+        env["LAND_TEST_IDENTITY"] = json.dumps(identity)
+        env["LAND_TEST_COMMENTS"] = json.dumps(
+            [] if not attributed else [{"body": env["LAND_TEST_ATTRIBUTION"]}]
+        )
         return run_with_bash_path(
             ["bash", bash_path(self.scripts / "land.sh"), "42", reviewed],
             stub_directory=self.cwd / "bin",
@@ -304,6 +352,25 @@ class LandMechanismTest(LandHarness):
         self.assertNotIn("-X PUT", gh_log)
         self.assertNotIn("issue edit", gh_log)
         self.assertNotIn("pr comment", gh_log)
+
+    def test_graphql_outage_uses_rest_for_all_landing_reads(self):
+        # #105: the shared GraphQL budget can be exhausted while REST core is
+        # still available.  Every gh subcommand except api fails here; landing
+        # must nevertheless reach the merge decision through REST reads.
+        result = self.run_land(graphql_outage=True)
+        self.assertNotEqual(result.returncode, 2, result.stdout + result.stderr)
+        gh_log = self.gh_log.read_text(encoding="utf-8")
+        self.assertIn("api repos/example/canonical/pulls/42", gh_log)
+        self.assertIn(
+            "api --paginate repos/example/canonical/issues/42/comments", gh_log
+        )
+        self.assertIn(
+            "api --paginate repos/example/canonical/pulls?state=open&base=",
+            gh_log,
+        )
+        self.assertIn("api -X PUT repos/example/canonical/pulls/42/merge", gh_log)
+        self.assertNotIn("pr view", gh_log)
+        self.assertNotIn("pr list", gh_log)
 
     def test_failed_merge_endpoint_preserves_the_response_and_explains_protections(self):
         result = self.run_land(

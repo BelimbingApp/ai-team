@@ -56,13 +56,35 @@ repo=$(ai_team_origin_repo) || {
 }
 [[ -n "$repo" ]] || { echo "cannot resolve the repository from origin" >&2; exit 2; }
 
-pr_json=$(gh pr view "$pr" --repo "$repo" \
-  --json number,title,body,headRefName,baseRefName,labels,isDraft,state,mergeCommit,comments 2>/dev/null) || {
-  echo "cannot read PR #$pr from $repo" >&2
-  exit 2
-}
+# Keep landing viable when the shared GraphQL budget is exhausted (#105).
+# `gh pr view` and `gh pr list` are GraphQL-backed, while these REST reads use
+# the independent core budget.  Project the pull response once so the rest of
+# this script retains the GraphQL-shaped fields it already consumes.
 pr_identity=$(gh api "repos/$repo/pulls/$pr" 2>/dev/null) || {
   echo "cannot read immutable PR identity for #$pr from $repo" >&2
+  exit 2
+}
+pr_comments=$(gh api --paginate "repos/$repo/issues/$pr/comments" 2>/dev/null \
+  | jq -sc 'add // []' 2>/dev/null) || {
+  echo "cannot read PR #$pr comments from $repo" >&2
+  exit 2
+}
+pr_json=$(jq -cn --argjson pull "$pr_identity" --argjson comments "$pr_comments" '
+  $pull | {
+    number: (.number // 0),
+    title: (.title // ""),
+    body: (.body // ""),
+    headRefName: (.head.ref // ""),
+    baseRefName: (.base.ref // ""),
+    labels: [.labels[]? | {name: (.name // "")}],
+    isDraft: (.draft == true),
+    state: (if .merged == true then "MERGED" else ((.state // "") | ascii_upcase) end),
+    mergeCommit: (if (.merge_commit_sha | type) == "string" then {oid: .merge_commit_sha} else null end),
+    comments: $comments
+  }
+' 2>/dev/null)
+[[ -n "$pr_json" ]] || {
+  echo "cannot read PR #$pr from $repo" >&2
   exit 2
 }
 
@@ -301,8 +323,10 @@ fi
 # refuse: the deletion is not this script's to make, and a PR is worth more than
 # a tidy branch list.
 land_base=$(ai_team_default_branch 2>/dev/null || echo "<default-branch>")
-stacked=$(gh pr list --repo "$repo" --state open --base "$branch" \
-  --json number --jq '[.[].number] | map("#" + tostring) | join(", ")' 2>/dev/null) || stacked=""
+encoded_branch=$(jq -rn --arg value "$branch" '$value | @uri')
+stacked=$(gh api --paginate \
+  "repos/$repo/pulls?state=open&base=$encoded_branch&per_page=100" 2>/dev/null \
+  | jq -sr '[.[][]? | .number] | map("#" + tostring) | join(", ")' 2>/dev/null) || stacked=""
 if [[ -n "$stacked" ]]; then
   cat >&2 <<TXT
 WARNING: $stacked $( [[ "$stacked" == *,* ]] && echo "are" || echo "is" ) stacked on '$branch'.
