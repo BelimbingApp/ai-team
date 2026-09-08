@@ -139,7 +139,9 @@ class ClaimOwnLabelTest(unittest.TestCase):
 
     def test_new_claim_refuses_another_open_lane_before_writing(self):
         for labels, body in [([{"name": "agent:fable"}], ""),
-                             ([], "**From:** fable\n")]:
+                             ([], "**From:** fable\n"),
+                             ([], "**From:**  fable\n"),
+                             ([], "**FROM:**\tFABLE\r\n")]:
             with self.subTest(labels=labels):
                 prs = json.dumps([{"number": 77, "title": "other (#70)",
                     "body": body, "headRefName": "agent/fable-issue-70",
