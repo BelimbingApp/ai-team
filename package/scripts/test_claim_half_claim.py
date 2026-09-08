@@ -56,6 +56,7 @@ class ClaimHalfClaimTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
+                  "api repos/example/canonical/issues?state=open&labels=ops:halt&per_page=100") ;;
                   "issue list") ;;
                   "issue view")
                     if printf '%s' "$*" | grep -q -- '--json labels'; then

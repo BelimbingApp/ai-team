@@ -59,10 +59,11 @@ class OrientDeliberationsTest(unittest.TestCase):
                     if [[ "$*" == *defaultBranchRef* ]]; then printf 'main\\n'
                     else printf 'example/canonical\\n'; fi
                     ;;
+                  "api "*)
+                    # halt_status.sh reads empty output as no active halt.
+                    ;;
                   "issue list")
-                    if [[ "$*" == *"--label ops:halt"* ]]; then
-                      printf ''
-                    elif [[ "$*" == *"--label ops:steward"* ]]; then
+                    if [[ "$*" == *"--label ops:steward"* ]]; then
                       printf ''
                     elif [[ "$*" == *"--json number,labels --jq"* ]]; then
                       # orient's deliberation-lane scan and decide.sh's own
@@ -97,7 +98,7 @@ class OrientDeliberationsTest(unittest.TestCase):
                       "$ORIENT_TEST_COMMENTS" >"$ORIENT_TEST_COMMENTS.tmp"
                     mv "$ORIENT_TEST_COMMENTS.tmp" "$ORIENT_TEST_COMMENTS"
                     ;;
-                  "pr list"|"api")
+                  "pr list")
                     printf '[]\\n'
                     ;;
                   *)
