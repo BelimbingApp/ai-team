@@ -47,35 +47,68 @@ BASE=$(ai_team_default_branch)
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not a git checkout" >&2; exit 2; }
 cd "$ROOT" || exit 2
 
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
-[[ -n "$REPO" ]] || { echo "cannot resolve the repository from gh" >&2; exit 2; }
-
 # The gate fetches and proves branch containment against *origin*, while gh
-# resolves $REPO independently. If origin is a fork, PR lookup can succeed
-# against the canonical repository while containment is proven against the
-# fork's stale main — a false PASS for a head behind canonical main. So origin
-# must BE the canonical repository, verified before any verdict is printed.
-# The *resolved* URL is what git will actually fetch from — insteadOf
+# resolves the repository independently. If origin is a fork, PR lookup can
+# succeed against the canonical repository while containment is proven against
+# the fork's stale main — a false PASS for a head behind canonical main. So
+# origin must BE the canonical repository, verified before any verdict is
+# printed. The *resolved* URL is what git will actually fetch from — insteadOf
 # rewrites included — and the containment proof is only as canonical as
 # that transport. Tests get hermeticity by shimming git on PATH, never by
 # weakening this invariant.
+#
+# Origin is also the SOURCE of $REPO, not merely its cross-check (#103).
+# `gh repo view` is GraphQL, so the shared account's GraphQL budget used to
+# decide whether this script could run at all: it exited right here, before a
+# single verdict, with a message about repository resolution that told the
+# reader nothing about the outage. claim.sh, ready.sh, land.sh, hold.sh and
+# review_gate.sh already read origin first. The invariant is unchanged, and on
+# this path it is stronger: when $REPO comes from origin, PR lookup and the
+# containment proof cannot address different repositories at all. gh stays the
+# fallback for a checkout whose origin is not a GitHub owner/name, and whenever
+# gh does answer, a disagreement is still refused before any verdict.
 origin_url=$(git remote get-url origin 2>/dev/null)
 origin_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')
-[[ "$origin_repo" = "$REPO" ]] || {
-  echo "origin is '$origin_url' but gh resolves the repository as '$REPO'." >&2
-  echo "The gate proves containment against origin/$BASE, so origin must be the" >&2
-  echo "canonical repository. Run from a clone whose origin is $REPO." >&2
-  exit 2
-}
+gh_repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+if [[ -n "$gh_repo" ]]; then
+  [[ "$origin_repo" = "$gh_repo" ]] || {
+    echo "origin is '$origin_url' but gh resolves the repository as '$gh_repo'." >&2
+    echo "The gate proves containment against origin/$BASE, so origin must be the" >&2
+    echo "canonical repository. Run from a clone whose origin is $gh_repo." >&2
+    exit 2
+  }
+fi
+if [[ "$origin_repo" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  REPO="$origin_repo"
+else
+  REPO="$gh_repo"
+fi
+[[ -n "$REPO" ]] || { echo "cannot resolve the repository from origin or gh" >&2; exit 2; }
 
-# One fetch of PR state; every check below reads from it.
-pr=$(gh pr view "$PR" --repo "$REPO" \
-       --json headRefOid,headRefName,title,body,isDraft,state,mergeable,labels,closingIssuesReferences 2>/dev/null)
-[[ -n "$pr" ]] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
+# One fetch of PR state, over REST core; every check below reads from it.
+# `gh pr view` answers the same questions over GraphQL, whose 5000/hour budget
+# is shared by every agent and every board and runs out (#103) while REST core
+# sits idle on a budget of its own. The projection keeps GraphQL's field names
+# deliberately: this is the single place the two shapes meet, so every consumer
+# below is untouched and cannot drift from the payload. closingIssuesReferences
+# has no REST equivalent; it is fetched on its own, and fails closed, at 5b.
 pr_identity=$(gh api "repos/$REPO/pulls/$PR" 2>/dev/null) || {
   echo "cannot read immutable PR identity for #$PR from $REPO" >&2
   exit 2
 }
+pr=$(printf '%s' "$pr_identity" | jq -c '{
+  headRefOid: (.head.sha // ""),
+  headRefName: (.head.ref // ""),
+  title: (.title // ""),
+  body: (.body // ""),
+  isDraft: (.draft == true),
+  state: (if .merged == true then "MERGED" else ((.state // "") | ascii_upcase) end),
+  mergeable: (if .mergeable == true then "MERGEABLE"
+              elif .mergeable == false then "CONFLICTING"
+              else "UNKNOWN" end),
+  labels: [.labels[]? | {name: (.name // "")}]
+}' 2>/dev/null)
+[[ -n "$pr" ]] || { echo "cannot read PR #$PR from $REPO" >&2; exit 2; }
 
 remote_head=$(printf '%s' "$pr" | jq -r .headRefOid)
 
@@ -185,9 +218,69 @@ runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null 
 # PR heads. A path-filtered job absent from any one of those heads drops out,
 # while a universal job remains expected. If a merged head cannot be read, do
 # not silently turn that observation failure into first-PR bootstrap evidence.
-merged_heads=$(gh pr list --repo "$REPO" --state merged --base "$BASE" --limit 100 \
-  --json headRefOid,mergedAt \
-  --jq 'map(select(.mergedAt != null)) | sort_by(.mergedAt) | reverse | .[0:5] | .[].headRefOid // empty' \
+# REST core, for the same reason as the PR payload above (#103). This endpoint
+# has no state=merged: closed pull requests come back merged and unmerged
+# alike, and merged_at is the only thing that separates them. Measured against
+# the `gh pr list --state merged` listing this replaces, on BelimbingApp
+# ai-team, belimbing and blb-people: the five most recent merged heads were
+# identical in all three.
+#
+# Because merged and unmerged closures share the same 100-slot window, one page
+# can be entirely unmerged while older merged pull requests exist, and this
+# endpoint cannot sort by merge time -- so "the five most recent merges" is not
+# something a single page, or even five merges found early, can establish.
+# Two ways to get it wrong, both measured by workflow-audit on #104: reading one
+# page and calling an empty result "no baseline" bootstraps the expected names
+# from the candidate's own head, dropping every required check name; and
+# stopping at the first five merges encountered picks the wrong five, because
+# pages are ordered by creation and an older-created pull request on a later
+# page can have merged more recently.
+#
+# So read newest-updated first and stop only on a proof. GitHub bumps
+# updated_at when a pull request merges and nothing lowers it, so
+# merged_at <= updated_at always -- checked across 219 merged pull requests in
+# three repositories with no exception, and structural rather than incidental.
+# The listing is monotonically descending in updated_at (verified against the
+# live endpoint), so for any pull request p on a page after the one just read:
+#
+#     merged_at(p) <= updated_at(p) <= min(updated_at) on the page just read
+#
+# Once five merges are held whose fifth-newest merged_at is strictly newer than
+# that page minimum, no later page can contain a newer merge and the baseline is
+# proven. Failing that, the list has to be exhausted. Anything else -- the page
+# budget running out before either proof, or any failed read at any point no
+# matter how many merges were already in hand -- fails closed. An incomplete
+# list is not a small baseline; it is an unknown one.
+merged_pulls='[]'
+closed_page=1
+closed_pages_read=0
+closed_complete=0
+closed_read_failed=0
+while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-20}" ]]; do
+  closed_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&sort=updated&direction=desc&per_page=100&page=$closed_page" 2>/dev/null) || {
+    closed_read_failed=1
+    break
+  }
+  page_len=$(printf '%s' "$closed_json" | jq -r 'length' 2>/dev/null) || { closed_read_failed=1; break; }
+  [[ "$page_len" =~ ^[0-9]+$ ]] || { closed_read_failed=1; break; }
+  merged_pulls=$(jq -nc --argjson kept "$merged_pulls" --argjson page "$closed_json" \
+    '$kept + ($page | map(select(.merged_at != null)))' 2>/dev/null) || { closed_read_failed=1; break; }
+  closed_pages_read=$closed_page
+  if [[ "$page_len" -lt 100 ]]; then
+    closed_complete=1
+    break
+  fi
+  page_min_updated=$(printf '%s' "$closed_json" | jq -r '[.[].updated_at | select(. != null)] | min // empty' 2>/dev/null || true)
+  fifth_merged_at=$(printf '%s' "$merged_pulls" \
+    | jq -r 'sort_by(.merged_at) | reverse | if length >= 5 then .[4].merged_at else empty end' 2>/dev/null || true)
+  if [[ -n "$page_min_updated" && -n "$fifth_merged_at" && "$page_min_updated" < "$fifth_merged_at" ]]; then
+    closed_complete=1
+    break
+  fi
+  closed_page=$((closed_page + 1))
+done
+merged_heads=$(printf '%s' "$merged_pulls" \
+  | jq -r 'sort_by(.merged_at) | reverse | .[0:5] | .[] | .head.sha // empty' \
   2>/dev/null || true)
 baseline_count=0
 baseline_fetch_failed=0
@@ -249,6 +342,10 @@ elif [[ "${bad:-1}" != "0" ]]; then
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
 elif [[ "${baseline_fetch_failed:-0}" = "1" ]]; then
   say_bad "cannot observe check runs for the merged pull-request baseline"
+elif [[ "${closed_read_failed:-0}" = "1" ]]; then
+  say_bad "cannot read the closed pull-request list past page $closed_pages_read; the merged baseline would come from an incomplete list"
+elif [[ "${closed_complete:-0}" != "1" ]]; then
+  say_bad "read $((closed_pages_read * 100)) closed pull requests without proving the five most recent merges; the merged baseline would come from an incomplete list"
 elif [[ "${baseline_count:-0}" -lt 1 ]]; then
   say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
@@ -352,14 +449,34 @@ fi
 # the body at all — so a PR can be truthfully documented as closing nothing and
 # still close an issue. Reconcile the declared lane against the field GitHub
 # acts on, or the board learns about a closure after it has happened.
-closing_refs=$(printf '%s' "$pr" | jq -r '[.closingIssuesReferences[]?.number] | unique | map(tostring) | join(" ")')
+# The one field with no REST equivalent: GET /repos/{owner}/{repo}/pulls/{n}
+# carries no closing-issue list, and the issue timeline reports only
+# `cross-referenced` and `referenced`, which fire for any mention and say
+# nothing about what a merge will close. So this read stays on GraphQL, alone,
+# and an unreadable answer becomes a named BLOCKED unknown rather than being
+# silently read as "closes nothing" — which is the #67 failure exactly. It runs
+# here, late, so a GraphQL outage costs the reviewer one dimension of an
+# otherwise complete report instead of the whole report (#103).
+closing_refs=""
+closing_refs_readable=0
+if closing_json=$(gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences 2>/dev/null) \
+   && closing_refs=$(printf '%s' "$closing_json" | jq -r '
+        if has("closingIssuesReferences")
+        then [.closingIssuesReferences[]?.number] | unique | map(tostring) | join(" ")
+        else error("no closingIssuesReferences field") end' 2>/dev/null); then
+  closing_refs_readable=1
+else
+  closing_refs=""
+fi
 
 case "$lane_issue" in
   error:*)
     say_bad "${lane_issue#error:}"
     ;;
   none)
-    if [ -n "$closing_refs" ]; then
+    if [ "$closing_refs_readable" != "1" ]; then
+      say_bad "closing references unreadable — GitHub answered nothing for closingIssuesReferences (GraphQL only), so what merge will close is unknown; re-run when it answers"
+    elif [ -n "$closing_refs" ]; then
       say_bad "lane declares no issue but GitHub will close #${closing_refs// /, #} on merge — declare the lane or unlink it in the Development panel"
     elif [ -n "$automated_author" ]; then
       say_ok "issue-less trusted automated lane"
@@ -373,7 +490,9 @@ case "$lane_issue" in
     else
       say_bad "body has no closing reference to #$lane_issue — run ready.sh or add Closes #$lane_issue"
     fi
-    if [ -n "$closing_refs" ] && [ " $closing_refs " != " $lane_issue " ]; then
+    if [ "$closing_refs_readable" != "1" ]; then
+      say_bad "closing references unreadable — GitHub answered nothing for closingIssuesReferences (GraphQL only), so a Development-panel link to another issue would be invisible; re-run when it answers"
+    elif [ -n "$closing_refs" ] && [ " $closing_refs " != " $lane_issue " ]; then
       say_bad "lane is #$lane_issue but GitHub will close #${closing_refs// /, #} on merge"
     fi
     ;;
@@ -587,8 +706,10 @@ mergeable=$(printf '%s' "$pr" | jq -r .mergeable)
 # 9. Not a check — the last word on the PR, so a hold written as prose by
 #    somebody who did not know about the label is still in front of you.
 echo "  --- last 3 comments ---"
-gh pr view "$PR" --repo "$REPO" --json comments \
-  --jq '.comments[-3:][]|"            \(.createdAt) \(.author.login): \(.body[0:100]|gsub("\n";" "))"' 2>/dev/null
+# $issue_comments holds the same set gh's GraphQL `comments` field returns; it
+# was already fetched over REST for check 5d, so this is one read, not two (#103).
+printf '%s' "$issue_comments" | jq -r '
+  .[-3:][]? | "            \(.created_at) \(.user.login // "?"): \((.body // "")[0:100] | gsub("\n";" "))"' 2>/dev/null
 
 if [[ "$fail" = "0" ]]; then
   echo "GATE: PASS"
