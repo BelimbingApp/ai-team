@@ -223,11 +223,40 @@ runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null 
 # alike, and merged_at is the only thing that separates them. Measured against
 # the `gh pr list --state merged` listing this replaces, on BelimbingApp
 # ai-team, belimbing and blb-people: the five most recent merged heads were
-# identical in all three, though the REST window holds fewer merged PRs because
-# unmerged closures share its 100 slots.
-merged_heads=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&per_page=100" 2>/dev/null \
-  | jq -r 'map(select(.merged_at != null)) | sort_by(.merged_at) | reverse | .[0:5]
-           | .[] | .head.sha // empty' \
+# identical in all three.
+#
+# Because merged and unmerged closures share the same 100-slot window, one page
+# can be entirely unmerged while older merged pull requests exist. Reading a
+# single page and calling that "no baseline" would bootstrap the expected names
+# from the candidate head and silently drop every required check name -- the
+# opposite of what this check exists to prove (workflow-audit's [P1] on #103).
+# So page until five merged heads are found or the closed list is exhausted.
+# An exhausted list is the only evidence that a repository truly has no merge
+# history; a page cap bounds the cost and fails closed rather than bootstrapping.
+merged_pulls='[]'
+closed_page=1
+closed_pages_read=0
+closed_exhausted=0
+closed_read_failed=0
+while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-10}" ]]; do
+  closed_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&per_page=100&page=$closed_page" 2>/dev/null) || {
+    closed_read_failed=1
+    break
+  }
+  page_len=$(printf '%s' "$closed_json" | jq -r 'length' 2>/dev/null) || { closed_read_failed=1; break; }
+  [[ "$page_len" =~ ^[0-9]+$ ]] || { closed_read_failed=1; break; }
+  merged_pulls=$(jq -nc --argjson kept "$merged_pulls" --argjson page "$closed_json" \
+    '$kept + ($page | map(select(.merged_at != null)))' 2>/dev/null) || { closed_read_failed=1; break; }
+  closed_pages_read=$closed_page
+  if [[ "$page_len" -lt 100 ]]; then
+    closed_exhausted=1
+    break
+  fi
+  [[ "$(printf '%s' "$merged_pulls" | jq -r 'length')" -ge 5 ]] && break
+  closed_page=$((closed_page + 1))
+done
+merged_heads=$(printf '%s' "$merged_pulls" \
+  | jq -r 'sort_by(.merged_at) | reverse | .[0:5] | .[] | .head.sha // empty' \
   2>/dev/null || true)
 baseline_count=0
 baseline_fetch_failed=0
@@ -289,6 +318,10 @@ elif [[ "${bad:-1}" != "0" ]]; then
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
 elif [[ "${baseline_fetch_failed:-0}" = "1" ]]; then
   say_bad "cannot observe check runs for the merged pull-request baseline"
+elif [[ "${baseline_count:-0}" -lt 1 && "${closed_read_failed:-0}" = "1" ]]; then
+  say_bad "cannot read the closed pull-request list; refusing to bootstrap from ${REVIEWED:0:8}"
+elif [[ "${baseline_count:-0}" -lt 1 && "${closed_exhausted:-0}" != "1" ]]; then
+  say_bad "no merged pull request in the $((closed_pages_read * 100)) closed pull requests read, and the list is not exhausted; refusing to bootstrap from ${REVIEWED:0:8}"
 elif [[ "${baseline_count:-0}" -lt 1 ]]; then
   say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
