@@ -270,6 +270,30 @@ elif [[ $(jq length <<<"$matches") -gt 0 ]]; then
   exit 1
 fi
 
+# Finish owned lanes before adding another. Resume/half-claim repair above
+# remain available while an existing backlog drains. A missing label must not
+# make a half-claim invisible to its own author. This is a preflight, not a
+# distributed lock: callers sharing an identity must serialize their claims.
+if [[ -z "$existing_pr" ]]; then
+  if [[ $(jq length <<<"$prs") -ge 100 ]]; then
+    echo "refusing #$issue: open-PR registry reached its read limit; cannot prove author capacity" >&2
+    exit 2
+  fi
+  owned=$(jq -c --arg agent "$agent" '
+    [.[] | select(
+      any(.labels[]?; .name == "agent:" + $agent)
+      or any(((.body // "") | split("\n")[]
+        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
+        | ascii_downcase); . == $agent))
+      | {number, url}]
+  ' <<<"$prs")
+  if [[ $(jq length <<<"$owned") -gt 0 ]]; then
+    echo "refusing #$issue: finish or hand off your open authored lanes before a new claim:" >&2
+    jq -r '.[] | "  #\(.number) — \(.url)"' <<<"$owned" >&2
+    exit 1
+  fi
+fi
+
 # Labels on live Issues and PRs are the identity registry. Create the lane label
 # only after the claim has passed all availability checks, and before creating a
 # branch or PR that would need it.

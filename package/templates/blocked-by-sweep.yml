@@ -1,8 +1,9 @@
 name: AI Team blocked-by sweep
 
 # Copy this adopter-owned workflow to .github/workflows/. The mechanism suite
-# already runs on every pull request; keeping this workflow schedule-only
-# prevents an optional sweep check from becoming a path-dependent gate check.
+# already runs on every pull request. Issue closure wakes the trusted sweep
+# without creating a PR check or checking out a pull-request head. The schedule
+# remains a backstop for cross-repository blockers and missed events.
 #
 # Cross-repo Blocked-By references (BelimbingApp/blb-people#N and
 # BelimbingApp/blb-people-connector#N) need an installation token whose App
@@ -11,6 +12,8 @@ name: AI Team blocked-by sweep
 # (#621). Until those secrets exist the sweep falls back to the shared-user PAT
 # AI_TEAM_BLOCKED_BY_SWEEP_TOKEN with a warning; revoke it once the App is live.
 on:
+  issues:
+    types: [closed]
   schedule:
     - cron: "17,47 * * * *"
   workflow_dispatch:
@@ -33,6 +36,8 @@ jobs:
     steps:
       - name: Check out the adopter
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Choose the sweep credential
         id: credentials
