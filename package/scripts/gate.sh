@@ -257,20 +257,25 @@ closed_pages_read=0
 closed_complete=0
 closed_read_failed=0
 while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-20}" ]]; do
-  closed_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&sort=updated&direction=desc&per_page=100&page=$closed_page" 2>/dev/null) || {
+  # A REST pull object includes bodies, users, links, and repository metadata;
+  # a full 100-item page can exceed Linux's per-argument limit.  Do not feed
+  # that page back to jq through --argjson: project the three baseline fields
+  # while it is still stdin, then retain only the compact projection below.
+  closed_page_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&sort=updated&direction=desc&per_page=100&page=$closed_page" 2>/dev/null \
+    | jq -c '[.[] | {merged_at, updated_at, head: {sha: (.head.sha // "")}}]' 2>/dev/null) || {
     closed_read_failed=1
     break
   }
-  page_len=$(printf '%s' "$closed_json" | jq -r 'length' 2>/dev/null) || { closed_read_failed=1; break; }
+  page_len=$(printf '%s' "$closed_page_json" | jq -r 'length' 2>/dev/null) || { closed_read_failed=1; break; }
   [[ "$page_len" =~ ^[0-9]+$ ]] || { closed_read_failed=1; break; }
-  merged_pulls=$(jq -nc --argjson kept "$merged_pulls" --argjson page "$closed_json" \
+  merged_pulls=$(jq -nc --argjson kept "$merged_pulls" --argjson page "$closed_page_json" \
     '$kept + ($page | map(select(.merged_at != null)))' 2>/dev/null) || { closed_read_failed=1; break; }
   closed_pages_read=$closed_page
   if [[ "$page_len" -lt 100 ]]; then
     closed_complete=1
     break
   fi
-  page_min_updated=$(printf '%s' "$closed_json" | jq -r '[.[].updated_at | select(. != null)] | min // empty' 2>/dev/null || true)
+  page_min_updated=$(printf '%s' "$closed_page_json" | jq -r '[.[].updated_at | select(. != null)] | min // empty' 2>/dev/null || true)
   fifth_merged_at=$(printf '%s' "$merged_pulls" \
     | jq -r 'sort_by(.merged_at) | reverse | if length >= 5 then .[4].merged_at else empty end' 2>/dev/null || true)
   if [[ -n "$page_min_updated" && -n "$fifth_merged_at" && "$page_min_updated" < "$fifth_merged_at" ]]; then
