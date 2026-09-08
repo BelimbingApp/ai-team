@@ -59,6 +59,12 @@ OUTAGE_GH_STUB = textwrap.dedent(
           *"&page="*) page="${{path##*&page=}}"; page="${{page%%&*}}" ;;
           *) page=1 ;;
         esac
+        # A page the fixture declares unreadable: the real failure mode is one
+        # page of a multi-page listing erroring out, not the whole read dying.
+        if [ -n "$OUTAGE_CLOSED_FAIL_PAGE" ] && [ "$page" = "$OUTAGE_CLOSED_FAIL_PAGE" ]; then
+          echo "API rate limit exceeded" >&2
+          exit 1
+        fi
         jq -c --argjson page "$page" '.[(($page - 1) * 100):($page * 100)]' <<<"$OUTAGE_CLOSED_PULLS"
         ;;
       repos/*/rules/branches/*) printf '[]\\n' ;;
@@ -158,6 +164,8 @@ class GateGraphqlOutageTest(unittest.TestCase):
         self,
         *,
         closed_pulls: list[dict[str, object]] | None = None,
+        closed_fail_page: int | None = None,
+        closed_pages: int | None = None,
         check_runs_by_head: dict[str, list[dict[str, object]]] | None = None,
         body: str = "Closes #42",
         branch: str = "agent/author-issue-42",
@@ -220,6 +228,9 @@ class GateGraphqlOutageTest(unittest.TestCase):
                 "head": {"sha": self.main_sha},
             }]
         env["OUTAGE_CLOSED_PULLS"] = json.dumps(closed_pulls)
+        env["OUTAGE_CLOSED_FAIL_PAGE"] = "" if closed_fail_page is None else str(closed_fail_page)
+        if closed_pages is not None:
+            env["GATE_CLOSED_PAGES"] = str(closed_pages)
         if check_runs_by_head is None:
             check_runs_by_head = {self.head_sha: PASSING_CI, self.main_sha: PASSING_CI}
         env["OUTAGE_CHECK_RUNS"] = json.dumps({
@@ -314,26 +325,97 @@ class GateGraphqlOutageTest(unittest.TestCase):
         self.assertNotIn("bootstrapping from checks observed", result.stdout)
         self.assertIn("latest run of each passing", result.stdout)
 
-    def test_an_unexhausted_closed_list_does_not_prove_absent_merge_history(self):
-        # workflow-audit's [P1]. REST has no state=merged, so merged and
-        # unmerged closures share one 100-slot window and a page can be
-        # entirely unmerged while older merged pull requests exist. Reading one
-        # page and calling that "no baseline" bootstraps the expected names
-        # from the candidate's own head, dropping every required historical
-        # check name -- strictly weaker proof than the baseline this enforces.
+    def test_a_page_budget_running_out_does_not_prove_absent_merge_history(self):
+        # REST has no state=merged, so merged and unmerged closures share one
+        # 100-slot window and a page can be entirely unmerged while older merged
+        # pull requests exist. Reading one page and calling that "no baseline"
+        # bootstraps the expected names from the candidate's own head, dropping
+        # every required historical check name.
         #
         # Absence of merge history is only proven by reaching the end of the
-        # list. Here the list never ends within the page budget, so the gate
-        # must refuse rather than assume. The page cap is what makes this
-        # reachable at all: without it an adopter with a very long closed list
-        # would page forever instead of failing closed.
-        result = self.run_gate(closed_pulls=[
-            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
-            for n in range(1000)
-        ])
+        # list. Here the budget runs out first, so the gate must refuse rather
+        # than assume. The budget is stated by the test, not inherited from the
+        # shipped default, so this keeps testing the behaviour and not the
+        # constant.
+        result = self.run_gate(
+            closed_pages=2,
+            closed_pulls=[
+                {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+                for n in range(300)
+            ],
+        )
         self.assertNotIn("bootstrapping from checks observed", result.stdout)
-        self.assertIn("refusing to bootstrap", result.stdout)
+        self.assertIn("without proving the five most recent merges", result.stdout)
         self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_the_latest_merge_can_be_on_page_two_after_five_older_merges(self):
+        # workflow-audit's first [P1] on #104. Stopping at the first five merges
+        # encountered picks the wrong five: the endpoint cannot sort by merge
+        # time, so an older-created pull request on a later page can have merged
+        # more recently than every merge on page one. These five January merges
+        # must not shut the read down while a February merge waits on page two.
+        older = [
+            {"number": n, "merged_at": f"2026-01-0{n}T00:00:00Z",
+             "head": {"sha": str(n) * 40}} for n in range(1, 6)
+        ]
+        newest = "b" * 40
+        closed = older + [
+            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+            for n in range(95)
+        ] + [{"number": 999, "merged_at": "2026-02-01T00:00:00Z",
+              "head": {"sha": newest}}]
+        runs = {self.head_sha: PASSING_CI, newest: PASSING_CI}
+        runs.update({str(n) * 40: PASSING_CI for n in range(1, 6)})
+
+        result = self.run_gate(closed_pulls=closed, check_runs_by_head=runs)
+
+        self.assertEqual(
+            self.logged_check_run_heads()[1:],
+            [newest] + [str(n) * 40 for n in range(5, 1, -1)],
+            result.stdout + result.stderr,
+        )
+
+    def test_an_unreadable_later_page_refuses_even_when_a_merge_was_found(self):
+        # workflow-audit's second [P1]. A partial list is an unknown baseline,
+        # not a small one: page one holds a merge, page two cannot be read, and
+        # any merge hiding beyond it would change the expected names. The
+        # refusal must not be conditional on how many merges are already held.
+        closed = [{"number": 500, "merged_at": "2026-01-05T00:00:00Z",
+                   "head": {"sha": self.main_sha}}] + [
+            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+            for n in range(99)
+        ]
+        result = self.run_gate(closed_pulls=closed, closed_fail_page=2)
+        self.assertIn("cannot read the closed pull-request list", result.stdout)
+        self.assertNotIn("latest run of each passing", result.stdout)
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_updated_at_ordering_proves_completeness_without_reading_on(self):
+        # The half that keeps this affordable. Pages descend by updated_at and
+        # merged_at <= updated_at always, so once the fifth-newest merge is
+        # strictly newer than the page's smallest updated_at, no later page can
+        # hold a newer merge. Page two is declared unreadable: if the proof
+        # holds the gate never asks for it, and a gate that still passes is the
+        # only evidence that it stopped.
+        heads = {n: f"{n:x}" * 40 for n in range(1, 6)}
+        closed = [
+            {"number": n, "merged_at": f"2026-03-0{n}T00:00:00Z",
+             "updated_at": f"2026-03-0{n}T00:00:00Z", "head": {"sha": heads[n]}}
+            for n in range(1, 6)
+        ] + [
+            {"number": 100 + n, "merged_at": None,
+             "updated_at": "2026-02-01T00:00:00Z", "head": {"sha": "a" * 40}}
+            for n in range(95)
+        ]
+        runs = {self.head_sha: PASSING_CI}
+        runs.update({sha: PASSING_CI for sha in heads.values()})
+
+        result = self.run_gate(
+            closed_pulls=closed, check_runs_by_head=runs, closed_fail_page=2
+        )
+
+        self.assertNotIn("cannot read the closed pull-request list", result.stdout)
+        self.assertIn("latest run of each passing", result.stdout)
 
     def test_the_merged_baseline_is_found_beyond_the_first_closed_page(self):
         # The same window, with the merge actually present on page two. Failing

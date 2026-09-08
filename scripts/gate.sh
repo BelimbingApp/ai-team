@@ -226,20 +226,38 @@ runs=$(gh api "repos/$REPO/commits/$REVIEWED/check-runs" --paginate 2>/dev/null 
 # identical in all three.
 #
 # Because merged and unmerged closures share the same 100-slot window, one page
-# can be entirely unmerged while older merged pull requests exist. Reading a
-# single page and calling that "no baseline" would bootstrap the expected names
-# from the candidate head and silently drop every required check name -- the
-# opposite of what this check exists to prove (workflow-audit's [P1] on #103).
-# So page until five merged heads are found or the closed list is exhausted.
-# An exhausted list is the only evidence that a repository truly has no merge
-# history; a page cap bounds the cost and fails closed rather than bootstrapping.
+# can be entirely unmerged while older merged pull requests exist, and this
+# endpoint cannot sort by merge time -- so "the five most recent merges" is not
+# something a single page, or even five merges found early, can establish.
+# Two ways to get it wrong, both measured by workflow-audit on #104: reading one
+# page and calling an empty result "no baseline" bootstraps the expected names
+# from the candidate's own head, dropping every required check name; and
+# stopping at the first five merges encountered picks the wrong five, because
+# pages are ordered by creation and an older-created pull request on a later
+# page can have merged more recently.
+#
+# So read newest-updated first and stop only on a proof. GitHub bumps
+# updated_at when a pull request merges and nothing lowers it, so
+# merged_at <= updated_at always -- checked across 219 merged pull requests in
+# three repositories with no exception, and structural rather than incidental.
+# The listing is monotonically descending in updated_at (verified against the
+# live endpoint), so for any pull request p on a page after the one just read:
+#
+#     merged_at(p) <= updated_at(p) <= min(updated_at) on the page just read
+#
+# Once five merges are held whose fifth-newest merged_at is strictly newer than
+# that page minimum, no later page can contain a newer merge and the baseline is
+# proven. Failing that, the list has to be exhausted. Anything else -- the page
+# budget running out before either proof, or any failed read at any point no
+# matter how many merges were already in hand -- fails closed. An incomplete
+# list is not a small baseline; it is an unknown one.
 merged_pulls='[]'
 closed_page=1
 closed_pages_read=0
-closed_exhausted=0
+closed_complete=0
 closed_read_failed=0
-while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-10}" ]]; do
-  closed_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&per_page=100&page=$closed_page" 2>/dev/null) || {
+while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-20}" ]]; do
+  closed_json=$(gh api "repos/$REPO/pulls?state=closed&base=$BASE&sort=updated&direction=desc&per_page=100&page=$closed_page" 2>/dev/null) || {
     closed_read_failed=1
     break
   }
@@ -249,10 +267,16 @@ while [[ "$closed_page" -le "${GATE_CLOSED_PAGES:-10}" ]]; do
     '$kept + ($page | map(select(.merged_at != null)))' 2>/dev/null) || { closed_read_failed=1; break; }
   closed_pages_read=$closed_page
   if [[ "$page_len" -lt 100 ]]; then
-    closed_exhausted=1
+    closed_complete=1
     break
   fi
-  [[ "$(printf '%s' "$merged_pulls" | jq -r 'length')" -ge 5 ]] && break
+  page_min_updated=$(printf '%s' "$closed_json" | jq -r '[.[].updated_at | select(. != null)] | min // empty' 2>/dev/null || true)
+  fifth_merged_at=$(printf '%s' "$merged_pulls" \
+    | jq -r 'sort_by(.merged_at) | reverse | if length >= 5 then .[4].merged_at else empty end' 2>/dev/null || true)
+  if [[ -n "$page_min_updated" && -n "$fifth_merged_at" && "$page_min_updated" < "$fifth_merged_at" ]]; then
+    closed_complete=1
+    break
+  fi
   closed_page=$((closed_page + 1))
 done
 merged_heads=$(printf '%s' "$merged_pulls" \
@@ -318,10 +342,10 @@ elif [[ "${bad:-1}" != "0" ]]; then
         |"            \(.name): \(.status)/\(.conclusion // "pending")"'
 elif [[ "${baseline_fetch_failed:-0}" = "1" ]]; then
   say_bad "cannot observe check runs for the merged pull-request baseline"
-elif [[ "${baseline_count:-0}" -lt 1 && "${closed_read_failed:-0}" = "1" ]]; then
-  say_bad "cannot read the closed pull-request list; refusing to bootstrap from ${REVIEWED:0:8}"
-elif [[ "${baseline_count:-0}" -lt 1 && "${closed_exhausted:-0}" != "1" ]]; then
-  say_bad "no merged pull request in the $((closed_pages_read * 100)) closed pull requests read, and the list is not exhausted; refusing to bootstrap from ${REVIEWED:0:8}"
+elif [[ "${closed_read_failed:-0}" = "1" ]]; then
+  say_bad "cannot read the closed pull-request list past page $closed_pages_read; the merged baseline would come from an incomplete list"
+elif [[ "${closed_complete:-0}" != "1" ]]; then
+  say_bad "read $((closed_pages_read * 100)) closed pull requests without proving the five most recent merges; the merged baseline would come from an incomplete list"
 elif [[ "${baseline_count:-0}" -lt 1 ]]; then
   say_warn "no merged pull request baseline is available; bootstrapping from checks observed on ${REVIEWED:0:8}"
   say_ok "$n distinct checks on ${REVIEWED:0:8}, latest run of each passing (bootstrap)"
