@@ -22,10 +22,14 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
         )
         self.assertNotIn("issues: write", MECHANISMS)
 
-    def test_sweep_is_schedule_only_and_scopes_issue_write_to_its_job(self):
+    def test_sweep_uses_trusted_issue_close_and_scopes_issue_write_to_its_job(self):
         self.assertIn('schedule:\n    - cron: "17,47 * * * *"', SWEEP)
         self.assertIn("  workflow_dispatch:\n", SWEEP)
+        self.assertIn("  issues:\n    types: [closed]", SWEEP)
         self.assertNotIn("pull_request:", SWEEP)
+        self.assertNotIn("pull_request_target:", SWEEP)
+        self.assertNotIn("github.event.issue.body", SWEEP)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", SWEEP)
         self.assertEqual(SWEEP.count("issues: write"), 1)
         self.assertIn(
             "run: python3 docs/ai-team/scripts/blocked_by_sweep.py", SWEEP
