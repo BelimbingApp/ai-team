@@ -16,13 +16,15 @@ Both workflows detect the two secrets at run time. While they are absent:
 - the independent-review gate keeps using the default Actions `GITHUB_TOKEN`
   (same-repository trusted gate that already worked), with a `::warning::`
   naming this runbook
-- the blocked-by sweep falls back to `AI_TEAM_BLOCKED_BY_SWEEP_TOKEN` with a
-  warning, and fails closed when neither credential exists
+- the blocked-by sweep prefers optional `AI_TEAM_BLOCKED_BY_SWEEP_TOKEN` when
+  set, otherwise keeps the default Actions `GITHUB_TOKEN` (same-repository /
+  public dependency baseline), each with a warning. Inaccessible cross-repo
+  Blocked-By references fail closed inside the sweep itself
 
 Nothing breaks on merge of the staged templates; the warning disappears the
 first run after the secrets are set. Do not hard-require App credentials in the
-canonical review gate until an owner has created the App, stored the secrets,
-and proved a green trusted run.
+canonical review gate or sweep until an owner has created the App, stored the
+secrets, and proved a green trusted run.
 
 ## Permissions to grant the App
 

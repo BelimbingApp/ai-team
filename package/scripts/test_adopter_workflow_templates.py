@@ -37,12 +37,18 @@ class AdopterWorkflowTemplateTest(unittest.TestCase):
         self.assertIn("GITHUB_REPOSITORY: ${{ github.repository }}", SWEEP)
         self.assertIn("uses: actions/create-github-app-token@v2", SWEEP)
         self.assertIn(
-            "GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN }}",
+            "GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN || github.token }}",
             SWEEP,
         )
         self.assertIn("AI_TEAM_BLOCKED_BY_SWEEP_TOKEN", SWEEP)
         self.assertIn("Choose the sweep credential", SWEEP)
         self.assertIn("if: steps.credentials.outputs.source == 'app'", SWEEP)
+        self.assertIn('echo "source=github"', SWEEP)
+        self.assertNotIn("exit 1", SWEEP.split("- name: Choose the sweep credential", 1)[1].split("- name: Mint", 1)[0])
+        self.assertNotIn(
+            "GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN }}",
+            SWEEP,
+        )
         self.assertNotIn("GITHUB_TOKEN: ${{ github.token }}", SWEEP)
         self.assertNotIn("GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}", SWEEP)
 
