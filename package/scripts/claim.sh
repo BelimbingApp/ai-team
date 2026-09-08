@@ -275,6 +275,10 @@ fi
 # make a half-claim invisible to its own author. This is a preflight, not a
 # distributed lock: callers sharing an identity must serialize their claims.
 if [[ -z "$existing_pr" ]]; then
+  if [[ $(jq length <<<"$prs") -ge 100 ]]; then
+    echo "refusing #$issue: open-PR registry reached its read limit; cannot prove author capacity" >&2
+    exit 2
+  fi
   owned=$(jq -c --arg agent "$agent" '
     [.[] | select(
       any(.labels[]?; .name == "agent:" + $agent)
