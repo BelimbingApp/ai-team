@@ -282,8 +282,9 @@ if [[ -z "$existing_pr" ]]; then
   owned=$(jq -c --arg agent "$agent" '
     [.[] | select(
       any(.labels[]?; .name == "agent:" + $agent)
-      or any(((.body // "") | split("\n"))[];
-        . == "**From:** " + $agent or . == "**From:** " + $agent + "\r"))
+      or any(((.body // "") | split("\n")[]
+        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<id>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").id
+        | ascii_downcase); . == $agent))
       | {number, url}]
   ' <<<"$prs")
   if [[ $(jq length <<<"$owned") -gt 0 ]]; then
