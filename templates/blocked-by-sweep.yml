@@ -8,7 +8,8 @@ name: AI Team blocked-by sweep
 # BelimbingApp/blb-people-connector#N) need an installation token whose App
 # can read Issues on those repos and write Issues on this board. Mint a fresh
 # token each run from AI_TEAM_GITHUB_APP_ID / AI_TEAM_GITHUB_APP_PRIVATE_KEY
-# (#621). Do not store a user PAT for this automation.
+# (#621). Until those secrets exist the sweep falls back to the shared-user PAT
+# AI_TEAM_BLOCKED_BY_SWEEP_TOKEN with a warning; revoke it once the App is live.
 on:
   schedule:
     - cron: "17,47 * * * *"
@@ -33,19 +34,27 @@ jobs:
       - name: Check out the adopter
         uses: actions/checkout@v5
 
-      - name: Require AI Team GitHub App credentials
+      - name: Choose the sweep credential
+        id: credentials
         env:
           AI_TEAM_GITHUB_APP_ID: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
           AI_TEAM_GITHUB_APP_PRIVATE_KEY: ${{ secrets.AI_TEAM_GITHUB_APP_PRIVATE_KEY }}
+          AI_TEAM_BLOCKED_BY_SWEEP_TOKEN: ${{ secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "$AI_TEAM_GITHUB_APP_ID" || -z "$AI_TEAM_GITHUB_APP_PRIVATE_KEY" ]]; then
-            echo '::error::AI_TEAM_GITHUB_APP_ID and AI_TEAM_GITHUB_APP_PRIVATE_KEY must be configured; see docs/runbooks/ai-team-github-app.md.'
+          if [[ -n "$AI_TEAM_GITHUB_APP_ID" && -n "$AI_TEAM_GITHUB_APP_PRIVATE_KEY" ]]; then
+            echo "source=app" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$AI_TEAM_BLOCKED_BY_SWEEP_TOKEN" ]]; then
+            echo '::warning::AI_TEAM_GITHUB_APP_ID / AI_TEAM_GITHUB_APP_PRIVATE_KEY are not configured; sweeping with the shared-user PAT AI_TEAM_BLOCKED_BY_SWEEP_TOKEN until the App exists (#621, docs/ai-team/runbooks/ai-team-github-app.md).'
+            echo "source=pat" >> "$GITHUB_OUTPUT"
+          else
+            echo '::error::Configure AI_TEAM_GITHUB_APP_ID and AI_TEAM_GITHUB_APP_PRIVATE_KEY (see docs/ai-team/runbooks/ai-team-github-app.md); cross-repo Blocked-By references cannot be resolved without a credential.'
             exit 1
           fi
 
       - name: Mint AI Team GitHub App installation token
         id: app-token
+        if: steps.credentials.outputs.source == 'app'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.AI_TEAM_GITHUB_APP_ID }}
@@ -55,5 +64,6 @@ jobs:
       - name: Run the Blocked-By sweep
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # App token when minted; the retired PAT only until the App exists (#621).
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AI_TEAM_BLOCKED_BY_SWEEP_TOKEN }}
         run: python3 docs/ai-team/scripts/blocked_by_sweep.py
