@@ -382,6 +382,14 @@ One pull request gets **one reviewer**, two at most, never a third. The first
 verdict names the reviewer; others do not compete unless asked. Review the
 exact head against the claim and state what was not checked.
 
+Take the oldest unreviewed pull request **you did not write**. A split that
+reserves the oldest for one named reviewer stalls the moment that reviewer is
+its author: they cannot review their own lane, and everyone else has been told
+to look further down, so the oldest ages while the queue moves around it. Any
+reservation therefore skips a lane its reserver wrote and moves to the next one
+down. No unreviewed pull request is ever reserved for its own author, and
+taking one that was should need no explanation in the verdict.
+
 A finding is a **test that fails at the reviewed head**, posted or pushed, not
 a paragraph. The author fixes it in this PR; CI clears it without re-review.
 Untestable findings (placement, authorization, contract) still require the
