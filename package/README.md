@@ -42,7 +42,7 @@ cp docs/ai-team/templates/independent-review.yml .github/workflows/ai-team-indep
 
 The mechanism workflow runs the mounted suite on every pull request and on
 pushes to `main`; if the adopter uses another default branch, change that one
-branch in the copied template. The sweep workflow runs on its schedule or
+branch in the copied template. The sweep workflow runs on issue closure, its schedule or
 manual dispatch and is the only job granted `issues: write`. The independent
 review workflow is a `pull_request_target` check: it downloads the mounted
 grammar through the Contents API from the exact trusted commit that supplied
@@ -149,6 +149,11 @@ it has no `agent:*` or `task:*` labels. Do not fabricate claim metadata for it.
 Only mutate work on a claimed task. Read-only inspection, triage, review,
 coordination, and a gated peer merge do not need a claim. Keep one writer per
 path and agree a split before overlapping a peer.
+
+Before ready/review/landing, use [the delivery cycle](DELIVERY.md): finish
+owned lanes first, verify the changed journey proportionately, and hand off
+on meaningful events with the heartbeat as backstop. `claim.sh` refuses a new
+claim while another open PR belongs to that identity; resumes still work.
 
 ### One worktree per agent, recycled
 
