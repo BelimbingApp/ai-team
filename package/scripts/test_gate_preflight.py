@@ -814,9 +814,55 @@ class GateMechanismTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn(
-            "review gate did not report an independent exact-head acceptance",
+            "review gate did not report an affirmative review success",
             result.stdout,
         )
+        self.assertIn("GATE: FAIL", result.stdout)
+
+    def test_verified_clean_main_merge_carry_counts_as_review_success(self):
+        carried = "b" * 40
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            review_gate_body=(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                f"'PASS: independent acceptance carried from accepted first parent {carried} by reviewer across a verified clean base merge'\n"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("carried from accepted first parent", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_reviewer_test_ci_clearance_counts_as_review_success(self):
+        finding = "c" * 40
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            review_gate_body=(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                f"'PASS: reviewer failing test {finding} cleared by exact-head CI for reviewer'\n"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("reviewer failing test", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_pass_diagnostic_cannot_override_a_failing_review_delegate(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            review_gate_body=(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' 'PASS: no independent exact-head changes-required verdict'\n"
+                "exit 1\n"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 1)
         self.assertIn("GATE: FAIL", result.stdout)
 
     def test_same_lane_approval_is_not_independent(self):

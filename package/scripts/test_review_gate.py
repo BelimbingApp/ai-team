@@ -96,6 +96,20 @@ class GateHarness(unittest.TestCase):
         head = self.git(repository, "rev-parse", "HEAD").stdout.strip()
         return directory, repository, accepted, base, head
 
+    def reviewer_test_fix_history(self):
+        directory = tempfile.TemporaryDirectory()
+        repository = Path(directory.name)
+        self.git(repository, "init", "-q", "-b", "main")
+        accepted = self.commit_file(repository, "feature.txt", "feature\n", "feature")
+        finding = self.commit_file(
+            repository,
+            "tests/regression.test",
+            "failing proof\n",
+            "test: expose reviewer finding",
+        )
+        fixed = self.commit_file(repository, "feature.txt", "fixed\n", "fix finding")
+        return directory, repository, accepted, finding, fixed
+
     def run_carry_gate(self, repository, accepted, base, head, reviews=None,
                        base_ref="main"):
         identity = {
@@ -611,6 +625,150 @@ printf 'signal-exit=%s\n' "$rc"
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("no independent exact-head acceptance", result.stdout)
+
+    def test_ci_clears_the_immediate_fix_for_a_reviewer_bound_failing_test(self):
+        directory, repository, accepted, finding, fixed = self.reviewer_test_fix_history()
+        self.addCleanup(directory.cleanup)
+        reviews = [
+            self.review(commit_id=accepted, head_marker=accepted),
+            self.review(
+                body=(
+                    "**From:** reviewer\n\n"
+                    f"**HEAD reviewed:** `{finding}`\n\n"
+                    f"**Finding test commit:** `{finding}`\n\n"
+                    "**Clearance:** exact-head CI"
+                ),
+                commit_id=finding,
+                at="2026-01-01T00:01:00Z",
+                bind_head=False,
+            ),
+        ]
+
+        result = self.run_gate(
+            reviews,
+            reviewed=fixed,
+            head_sha=fixed,
+            cwd=repository,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            f"reviewer failing test {finding} cleared by exact-head CI",
+            result.stdout,
+        )
+
+    def test_changes_required_finding_test_is_the_single_review_verdict(self):
+        directory, repository, _accepted, finding, fixed = self.reviewer_test_fix_history()
+        self.addCleanup(directory.cleanup)
+        result = self.run_gate(
+            [self.review(
+                body=(
+                    "**From:** reviewer\n\n"
+                    "**Verdict:** changes required\n\n"
+                    f"**HEAD reviewed:** `{finding}`\n\n"
+                    f"**Finding test commit:** `{finding}`\n\n"
+                    "**Clearance:** exact-head CI"
+                ),
+                commit_id=finding,
+                bind_head=False,
+            )],
+            reviewed=fixed,
+            head_sha=fixed,
+            cwd=repository,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cleared by exact-head CI", result.stdout)
+
+    def test_marker_only_finding_requires_that_reviewers_prior_acceptance(self):
+        directory, repository, _accepted, finding, fixed = self.reviewer_test_fix_history()
+        self.addCleanup(directory.cleanup)
+        result = self.run_gate(
+            [self.review(
+                body=(
+                    "**From:** reviewer\n\n"
+                    f"**HEAD reviewed:** `{finding}`\n\n"
+                    f"**Finding test commit:** `{finding}`\n\n"
+                    "**Clearance:** exact-head CI"
+                ),
+                commit_id=finding,
+                bind_head=False,
+            )],
+            reviewed=fixed,
+            head_sha=fixed,
+            cwd=repository,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+
+    def test_ci_clearance_marker_does_not_carry_over_an_extra_author_commit(self):
+        directory, repository, accepted, finding, fixed = self.reviewer_test_fix_history()
+        self.addCleanup(directory.cleanup)
+        extra = self.commit_file(repository, "extra.txt", "extra\n", "unreviewed extra")
+        reviews = [
+            self.review(commit_id=accepted, head_marker=accepted),
+            self.review(
+                body=(
+                    "**From:** reviewer\n\n"
+                    f"**HEAD reviewed:** `{finding}`\n\n"
+                    f"**Finding test commit:** `{finding}`\n\n"
+                    "**Clearance:** exact-head CI"
+                ),
+                commit_id=finding,
+                at="2026-01-01T00:01:00Z",
+                bind_head=False,
+            ),
+        ]
+
+        result = self.run_gate(
+            reviews,
+            reviewed=extra,
+            head_sha=extra,
+            cwd=repository,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+
+    def test_untestable_finding_without_clearance_marker_still_blocks(self):
+        directory, repository, _accepted, finding, fixed = self.reviewer_test_fix_history()
+        self.addCleanup(directory.cleanup)
+        reviews = [self.review(
+            body=(
+                "**From:** reviewer\n\n"
+                "**Verdict:** changes required\n\n"
+                f"**HEAD reviewed:** `{finding}`\n\n"
+                "The authorization boundary must remain outside the module."
+            ),
+            commit_id=finding,
+            bind_head=False,
+        )]
+
+        result = self.run_gate(
+            reviews,
+            reviewed=fixed,
+            head_sha=fixed,
+            cwd=repository,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no independent exact-head acceptance", result.stdout)
+
+        accepted = self.review(
+            commit_id=fixed,
+            head_marker=fixed,
+            at="2026-01-01T00:01:00Z",
+        )
+        cleared = self.run_gate(
+            [*reviews, accepted],
+            reviewed=fixed,
+            head_sha=fixed,
+            cwd=repository,
+        )
+
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        self.assertIn("independent exact-head acceptance", cleared.stdout)
 
     def test_current_api_commit_id_cannot_rewrite_a_stale_explicit_head_binding(self):
         result = self.run_gate([
