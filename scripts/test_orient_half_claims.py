@@ -43,13 +43,12 @@ class OrientHalfClaimTest(unittest.TestCase):
                 set -euo pipefail
                 case "$1 $2" in
                   "repo view") printf 'example/canonical\\n' ;;
-                  "issue list")
+                  "api repos/example/canonical/issues?state=open&labels=ops:halt&per_page=100")
                     # halt_status.sh reads emptiness, not '[]', as "no halt".
-                    if [[ "$*" == *"--label ops:halt"* ]]; then
-                      printf ''
-                    else
-                      printf '[]\\n'
-                    fi
+                    printf ''
+                    ;;
+                  "issue list")
+                    printf '[]\\n'
                     ;;
                   "pr list")
                     if [[ "$*" == *"--json number,labels"* ]]; then
