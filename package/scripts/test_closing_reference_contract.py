@@ -63,6 +63,9 @@ class OrientHarness:
                 #!/usr/bin/env bash
                 if [ "$1 $2" = "repo view" ]; then
                   printf 'example/canonical\\n'
+                elif [ "$1" = "api" ]; then
+                  # halt_status.sh queries REST; no output means no halt.
+                  printf ''
                 elif [ "$1 $2" = "pr list" ] && [[ " $* " == *" --label task:review "* ]]; then
                   printf '%s\\n' "$ORIENT_TEST_PRS"
                 fi

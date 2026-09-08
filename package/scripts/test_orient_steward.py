@@ -56,16 +56,17 @@ class OrientStewardMechanismTest(unittest.TestCase):
                     if [[ "$*" == *defaultBranchRef* ]]; then printf 'main\\n'
                     else printf 'example/canonical\\n'; fi
                     ;;
+                  "api "*)
+                    # halt_status.sh reads empty output as no active halt.
+                    ;;
                   "issue list")
-                    if [[ "$*" == *"--label ops:halt"* ]]; then
-                      printf ''
-                    elif [[ "$*" == *"--label ops:steward"* ]]; then
+                    if [[ "$*" == *"--label ops:steward"* ]]; then
                       printf '%s' "${ORIENT_TEST_STEWARDS:-}"
                     else
                       printf '[]\\n'
                     fi
                     ;;
-                  "pr list"|"api")
+                  "pr list")
                     printf '[]\\n'
                     ;;
                   *)
