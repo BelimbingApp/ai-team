@@ -18,6 +18,19 @@ class ReadmeOnboardingTest(unittest.TestCase):
         self.assertNotIn("cross-session messaging", document.lower())
         self.assertIn("direct agent messaging", document)
 
+    def test_readme_forbids_reserving_a_review_for_its_own_author(self):
+        # A queue split that reserves the oldest unreviewed pull request for one
+        # named reviewer deadlocks whenever that reviewer wrote it: they may not
+        # review their own lane, and every other agent has been told to look
+        # further down. Measured on the belimbing board, five unreviewed lanes
+        # all by the reserved reviewer, the oldest at seven and a half hours.
+        # The guide has to state the exclusion, or each agent re-derives it and
+        # explains itself in the verdict.
+        document = README.read_text(encoding="utf-8")
+
+        self.assertIn("you did not write", document)
+        self.assertIn("reserved for its own author", document)
+
     def test_readme_distinguishes_package_and_adopter_script_paths(self):
         document = README.read_text(encoding="utf-8")
 
