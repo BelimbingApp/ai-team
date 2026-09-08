@@ -65,7 +65,9 @@ OUTAGE_GH_STUB = textwrap.dedent(
           echo "API rate limit exceeded" >&2
           exit 1
         fi
-        jq -c --argjson page "$page" '.[(($page - 1) * 100):($page * 100)]' <<<"$OUTAGE_CLOSED_PULLS"
+        # A realistic REST page can exceed Linux's per-argument limit, so
+        # fixtures are files rather than an environment value.
+        jq -c --argjson page "$page" '.[(($page - 1) * 100):($page * 100)]' <"$OUTAGE_CLOSED_PULLS_FILE"
         ;;
       repos/*/rules/branches/*) printf '[]\\n' ;;
       repos/*/git/refs/heads/*) printf '%s\\n' "$OUTAGE_HEAD" ;;
@@ -227,7 +229,9 @@ class GateGraphqlOutageTest(unittest.TestCase):
                 "merged_at": "2026-01-09T00:00:00Z",
                 "head": {"sha": self.main_sha},
             }]
-        env["OUTAGE_CLOSED_PULLS"] = json.dumps(closed_pulls)
+        closed_pulls_file = base / "closed-pulls.json"
+        closed_pulls_file.write_text(json.dumps(closed_pulls), encoding="utf-8")
+        env["OUTAGE_CLOSED_PULLS_FILE"] = str(closed_pulls_file)
         env["OUTAGE_CLOSED_FAIL_PAGE"] = "" if closed_fail_page is None else str(closed_fail_page)
         if closed_pages is not None:
             env["GATE_CLOSED_PAGES"] = str(closed_pages)
@@ -325,6 +329,37 @@ class GateGraphqlOutageTest(unittest.TestCase):
         self.assertNotIn("bootstrapping from checks observed", result.stdout)
         self.assertIn("latest run of each passing", result.stdout)
 
+    def test_large_rest_page_is_projected_before_jq_receives_arguments(self):
+        # #114: production's first REST page was 943,393 bytes.  jq receives
+        # each --argjson value as one argv string, which Linux refuses above
+        # 128 KiB.  Keep the payload file-backed so the stub can realistically
+        # emit a large response without itself hitting that limit.
+        heads = {n: f"{n:x}" * 40 for n in range(1, 6)}
+        closed = [
+            {"number": n, "merged_at": f"2026-03-0{n}T00:00:00Z",
+             "updated_at": f"2026-03-0{n}T00:00:00Z",
+             "head": {"sha": heads[n]}, "body": "x" * 2048}
+            for n in range(1, 6)
+        ] + [
+            {"number": 100 + n, "merged_at": None,
+             "updated_at": "2026-02-01T00:00:00Z",
+             "head": {"sha": "a" * 40}, "body": "x" * 2048}
+            for n in range(95)
+        ]
+        self.assertGreater(len(json.dumps(closed).encode()), 128 * 1024)
+        runs = {self.head_sha: PASSING_CI}
+        runs.update({sha: PASSING_CI for sha in heads.values()})
+
+        result = self.run_gate(closed_pulls=closed, check_runs_by_head=runs)
+
+        self.assertNotIn("Argument list too long", result.stdout + result.stderr)
+        self.assertEqual(
+            self.logged_check_run_heads()[1:],
+            [heads[n] for n in range(5, 0, -1)],
+            result.stdout + result.stderr,
+        )
+        self.assertIn("latest run of each passing", result.stdout)
+
     def test_a_page_budget_running_out_does_not_prove_absent_merge_history(self):
         # REST has no state=merged, so merged and unmerged closures share one
         # 100-slot window and a page can be entirely unmerged while older merged
@@ -381,12 +416,14 @@ class GateGraphqlOutageTest(unittest.TestCase):
         # any merge hiding beyond it would change the expected names. The
         # refusal must not be conditional on how many merges are already held.
         closed = [{"number": 500, "merged_at": "2026-01-05T00:00:00Z",
-                   "head": {"sha": self.main_sha}}] + [
-            {"number": n, "merged_at": None, "head": {"sha": "a" * 40}}
+                   "head": {"sha": self.main_sha}, "body": "x" * 2048}] + [
+            {"number": n, "merged_at": None, "head": {"sha": "a" * 40},
+             "body": "x" * 2048}
             for n in range(99)
         ]
+        self.assertGreater(len(json.dumps(closed).encode()), 128 * 1024)
         result = self.run_gate(closed_pulls=closed, closed_fail_page=2)
-        self.assertIn("cannot read the closed pull-request list", result.stdout)
+        self.assertIn("cannot read the closed pull-request list past page 1", result.stdout)
         self.assertNotIn("latest run of each passing", result.stdout)
         self.assertIn("GATE: FAIL", result.stdout)
 
