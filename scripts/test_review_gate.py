@@ -607,6 +607,52 @@ printf 'signal-exit=%s\n' "$rc"
             )
             self.assertFalse(first_temp.exists(), "first allocated temp must be removed")
 
+    def test_an_unbolded_verdict_is_reported_not_silently_absent(self):
+        # #116, measured on connector#294/#295: a reviewer wrote the markers
+        # without bold, every parser filters on `**From:**`, and the review
+        # vanished. The gate then printed "PASS: no independent exact-head
+        # changes-required verdict" on a pull request that had one at the exact
+        # head. The defect is not the miss -- it is that the miss is reported as
+        # a clean result, so a real P1 could be merged over.
+        body = "From: desktop-luna\nHEAD reviewed: " + SHA + "\nVerdict: changes required"
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=body, bind_head=False),
+        ])
+
+        self.assertNotIn("PASS: no independent exact-head changes-required verdict", result.stdout)
+        self.assertIn("did not parse", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_quoting_the_grammar_is_not_a_verdict(self):
+        # The case that keeps the guard honest: a review that *discusses* the
+        # markers -- in a fence or a blockquote -- must not be read as a verdict
+        # this gate failed to parse, or every conversation about the grammar
+        # blocks its own gate. #359 chose parsed markers over prose precisely so
+        # quoting one is not casting one.
+        #
+        # This review deliberately carries NO parseable **From:** of its own.
+        # An earlier version of this test had one, which meant the review was
+        # excluded before the fence logic was ever consulted -- the assertion
+        # passed either way and proved nothing. Removing the fence handling must
+        # make this test red; that is the only thing that shows it is load
+        # bearing.
+        explaining = (
+            "Some notes on the grammar for whoever picks this up.\n\n"
+            "Write the markers like this:\n\n"
+            "```\nFrom: someone\nHEAD reviewed: " + SHA + "\nVerdict: accept\n```\n\n"
+            "> Verdict: changes required\n\n"
+            "Unbolded ones are invisible to the gate."
+        )
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=explaining, bind_head=False),
+        ])
+
+        self.assertNotIn("did not parse", result.stdout)
+        self.assertIn("PASS: no independent exact-head changes-required verdict", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_native_approval_still_requires_a_from_marker(self):
         result = self.run_gate([
             self.review(state="APPROVED", body="**From:** reviewer"),
