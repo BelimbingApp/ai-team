@@ -256,6 +256,35 @@ cat >"$filter_file" <<'JQFILTER'
     elif (.labels[0] | type) == "string" then .labels
     else [.labels[].name // empty]
     end;
+  # Lines a human wrote as prose rather than as a marker. A review that quotes
+  # the grammar -- in a fence or a blockquote -- is discussing it, not casting a
+  # verdict, and #359 chose parsed markers precisely so the two stay distinct.
+  def unquoted_lines:
+    ((.body // "") | split("\n"))
+    | reduce .[] as $l ({f: false, out: []};
+        if ($l | test("^[[:space:]]*```")) then {f: (.f | not), out: .out}
+        elif .f then .
+        elif ($l | test("^[[:space:]]*>")) then .
+        else {f: .f, out: (.out + [$l])} end)
+    | .out;
+  # A line shaped like one of our markers under any emphasis or casing. Used
+  # only to tell "no verdict was cast" apart from "a verdict was cast and this
+  # parser could not read it" (#116): the first is a fact, the second is a
+  # question, and reporting the second as the first is how a changes-required
+  # verdict at the exact head became "PASS: no changes-required verdict".
+  def candidate_marker_lines:
+    [unquoted_lines[]
+     | select(test("^[[:space:]]*\\**[[:space:]]*(From|HEAD reviewed|Verdict)[[:space:]]*:"; "i"))];
+  # A bold From line that actually carries a value. The trailing \\S matters:
+  # `$malformed_from` below only reports a bold From whose value it could
+  # capture, so an EMPTY `**From:**` matched here but was reported nowhere --
+  # it fell between the two buckets and the gate printed a clean pass over a
+  # cast changes-required. An empty marker looks legitimate to a human
+  # skimming the review, which makes that silence worse than the bug this
+  # patch set out to fix (opus-4.8-extra's block on #117).
+  def has_strict_from_line:
+    ([(.body // "") | split("\n")[]
+      | select(test("^\\*\\*From:\\*\\*[[:space:]]*\\S"; "i"))] | length) > 0;
   def from_agent:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
@@ -365,6 +394,12 @@ cat >"$filter_file" <<'JQFILTER'
           | .agent]
          | unique) as $comment_agents
       | ([$at_eligible_head[]
+          | . + {agent: from_agent, cand: candidate_marker_lines, strict: has_strict_from_line}
+          | select(.agent == "" and .strict == false and (.cand | length) > 0)
+          | {login: (.user.login? // "an unidentified account"),
+             line: (.cand[0] | .[0:60])}]
+         | unique) as $unparsed
+      | ([$at_eligible_head[]
           | select(.state != "APPROVED")
           | . + {agent: from_agent}
           | select(.agent == "")
@@ -387,11 +422,14 @@ cat >"$filter_file" <<'JQFILTER'
          else
            "PASS: independent exact-head acceptance from \($accepted_exact)"
          end,
-         if $blocking == "" then
+         if ($unparsed | length) > 0 then
+           "FAIL: \($unparsed | length) review(s) at this head carry verdict-shaped markers this gate could not parse, so whether changes are required is unknown, not absent"
+         elif $blocking == "" then
            "PASS: no independent exact-head changes-required verdict"
          else
            "FAIL: independent exact-head changes required by \($blocking)"
          end]
+        + [$unparsed[] | "FAIL: review from \(.login) did not parse: `\(.line)` -- markers must be bold and stand alone, as **From:** <id>, **HEAD reviewed:** `<full-sha>` and **Verdict:** <verdict>"]
         + [$unattributed[] | "WARN: an APPROVED review from \(.) was ignored: it carries no **From:** marker"]
         + $malformed_from
         + [$unbound[] | "WARN: a review marker from \(.) was rejected because **HEAD reviewed:** must name exact head \($input.reviewed)\(if $carry_from == "" then "" else " or verified first parent \($carry_from)" end)"]

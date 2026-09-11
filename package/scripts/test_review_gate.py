@@ -607,6 +607,95 @@ printf 'signal-exit=%s\n' "$rc"
             )
             self.assertFalse(first_temp.exists(), "first allocated temp must be removed")
 
+    def test_an_unbolded_verdict_is_reported_not_silently_absent(self):
+        # #116, measured on connector#294/#295: a reviewer wrote the markers
+        # without bold, every parser filters on `**From:**`, and the review
+        # vanished. The gate then printed "PASS: no independent exact-head
+        # changes-required verdict" on a pull request that had one at the exact
+        # head. The defect is not the miss -- it is that the miss is reported as
+        # a clean result, so a real P1 could be merged over.
+        body = "From: desktop-luna\nHEAD reviewed: " + SHA + "\nVerdict: changes required"
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=body, bind_head=False),
+        ])
+
+        self.assertNotIn("PASS: no independent exact-head changes-required verdict", result.stdout)
+        self.assertIn("did not parse", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_an_empty_bold_from_with_an_unbolded_verdict_is_not_a_clean_pass(self):
+        # opus-4.8-extra's block on #117, and it is the same failure this pull
+        # request exists to condemn. `has_strict_from_line` decides whether a
+        # cast changes-required is reported or silently cleared, and nothing
+        # tested it -- neutralising it left all sixty tests green.
+        #
+        # This case is worse than the original bug: an empty `**From:**` looks
+        # legitimate to a human skimming the review, while the verdict beneath
+        # it is invisible to the gate. Before the fix the gate printed
+        # "PASS: no independent exact-head changes-required verdict" with no
+        # warning at all.
+        body = "**From:**\nHEAD reviewed: " + SHA + "\nVerdict: changes required"
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=body, bind_head=False),
+        ])
+
+        self.assertNotIn("PASS: no independent exact-head changes-required verdict", result.stdout)
+        self.assertIn("did not parse", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_a_bold_from_with_a_bad_value_stays_a_malformed_warning(self):
+        # The other half of what has_strict_from_line decides, and the half my
+        # first attempt at covering it missed. A bold `**From:**` carrying a
+        # value the grammar rejects is already reported by the malformed-From
+        # path as a WARN. It must NOT also be reported as an unparseable
+        # verdict, or one mistake produces two contradictory lines and the
+        # reviewer cannot tell which to act on.
+        #
+        # Without this case, neutralising has_strict_from_line to `false` left
+        # the whole suite green -- the discriminator was still untested in the
+        # direction that keeps the two buckets disjoint.
+        # opus-4.8-extra's own example: a trailing dot the agent grammar
+        # rejects, but the malformed-From capture still reads as a value.
+        body = "**From:** opus-max.\n\n**Verdict:** accept"
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=body, bind_head=False),
+        ])
+
+        self.assertIn("is not a bare lane name", result.stdout)
+        self.assertNotIn("did not parse", result.stdout)
+
+    def test_quoting_the_grammar_is_not_a_verdict(self):
+        # The case that keeps the guard honest: a review that *discusses* the
+        # markers -- in a fence or a blockquote -- must not be read as a verdict
+        # this gate failed to parse, or every conversation about the grammar
+        # blocks its own gate. #359 chose parsed markers over prose precisely so
+        # quoting one is not casting one.
+        #
+        # This review deliberately carries NO parseable **From:** of its own.
+        # An earlier version of this test had one, which meant the review was
+        # excluded before the fence logic was ever consulted -- the assertion
+        # passed either way and proved nothing. Removing the fence handling must
+        # make this test red; that is the only thing that shows it is load
+        # bearing.
+        explaining = (
+            "Some notes on the grammar for whoever picks this up.\n\n"
+            "Write the markers like this:\n\n"
+            "```\nFrom: someone\nHEAD reviewed: " + SHA + "\nVerdict: accept\n```\n\n"
+            "> Verdict: changes required\n\n"
+            "Unbolded ones are invisible to the gate."
+        )
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=explaining, bind_head=False),
+        ])
+
+        self.assertNotIn("did not parse", result.stdout)
+        self.assertIn("PASS: no independent exact-head changes-required verdict", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_native_approval_still_requires_a_from_marker(self):
         result = self.run_gate([
             self.review(state="APPROVED", body="**From:** reviewer"),
