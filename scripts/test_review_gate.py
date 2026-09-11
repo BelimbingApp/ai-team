@@ -1383,6 +1383,40 @@ class IssueCommentVerdictTest(GateHarness):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("was found in an issue comment", result.stdout)
 
+    def test_a_comment_quoting_the_grammar_does_not_warn(self):
+        # #121: comment_verdict scanned the raw comment body, so a comment that
+        # DOCUMENTS the grammar (a real From sig-line plus a fenced **Verdict:**
+        # example) was reported as having cast a verdict. Reading unquoted_lines
+        # fixes it -- the same one-stripped-line-set property as #120.
+        fence = "```"
+        result = self.run_gate(
+            reviews=[],
+            comments=[{
+                "body": "**From:** commenter\n\nThe format is:\n\n"
+                        + fence + "\n**Verdict:** accept\n" + fence + "\n",
+            }],
+        )
+        self.assertNotIn("was found in an issue comment", result.stdout)
+
+    def test_a_comment_casting_a_verdict_mid_line_still_warns(self):
+        # Deliberately NOT line-anchored (unlike explicit_verdicts). A verdict
+        # expressed in prose, even mid-sentence, is a person casting one in a
+        # comment -- exactly what this WARN exists to catch. Anchoring to
+        # ^**Verdict:** <word>$ would silence it, trading a false warning for
+        # false silence, which is the failure mode this whole series is about.
+        # This pins the decision so a future anchor is a choice, not an accident.
+        result = self.run_gate(
+            reviews=[],
+            comments=[{
+                "body": "**From:** commenter\n\nHonestly I'd say **Verdict:** "
+                        "changes required here, but let's discuss.",
+            }],
+        )
+        self.assertIn(
+            "WARN: a verdict from commenter was found in an issue comment",
+            result.stdout,
+        )
+
     def test_multiple_comments_from_same_agent_are_deduplicated(self):
         result = self.run_gate(
             reviews=[],
