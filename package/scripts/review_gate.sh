@@ -275,9 +275,16 @@ cat >"$filter_file" <<'JQFILTER'
   def candidate_marker_lines:
     [unquoted_lines[]
      | select(test("^[[:space:]]*\\**[[:space:]]*(From|HEAD reviewed|Verdict)[[:space:]]*:"; "i"))];
+  # A bold From line that actually carries a value. The trailing \\S matters:
+  # `$malformed_from` below only reports a bold From whose value it could
+  # capture, so an EMPTY `**From:**` matched here but was reported nowhere --
+  # it fell between the two buckets and the gate printed a clean pass over a
+  # cast changes-required. An empty marker looks legitimate to a human
+  # skimming the review, which makes that silence worse than the bug this
+  # patch set out to fix (opus-4.8-extra's block on #117).
   def has_strict_from_line:
     ([(.body // "") | split("\n")[]
-      | select(test("^\\*\\*From:\\*\\*"; "i"))] | length) > 0;
+      | select(test("^\\*\\*From:\\*\\*[[:space:]]*\\S"; "i"))] | length) > 0;
   def from_agent:
     ([((.body // "") | split("\n")[]
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
