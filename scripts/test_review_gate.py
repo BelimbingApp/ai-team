@@ -696,6 +696,62 @@ printf 'signal-exit=%s\n' "$rc"
         self.assertIn("PASS: no independent exact-head changes-required verdict", result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_a_fenced_example_review_is_not_an_acceptance(self):
+        # #119: a review that only DOCUMENTS the grammar in a fence carries no
+        # real markers. But from_agent, reviewed_head and explicit_verdicts each
+        # scanned the raw body while only candidate_marker_lines used
+        # unquoted_lines, so the fenced example read as a real acceptance and
+        # cleared the gate -- a doc comment satisfying the control it documents.
+        fence = "```"
+        doc = (
+            "How to record an acceptance:\n\n"
+            + fence + "\n**From:** someexample\n**HEAD reviewed:** `" + SHA
+            + "`\n**Verdict:** accept\n" + fence + "\n\nThat is the whole format."
+        )
+        result = self.run_gate([self.review(body=doc, bind_head=False)])
+
+        self.assertNotIn("acceptance from someexample", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_a_fenced_bold_verdict_does_not_block(self):
+        # explicit_verdicts scanned the raw body, so a bold **Verdict:** quoted
+        # in a fence registered as a real changes-required and blocked a pull
+        # request that had a genuine acceptance.
+        fence = "```"
+        quoting = (
+            "For example, a blocking verdict looks like:\n\n"
+            + fence + "\n**From:** other\n**HEAD reviewed:** `" + SHA
+            + "`\n**Verdict:** changes required\n" + fence + "\n"
+        )
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=quoting, bind_head=False),
+        ])
+
+        self.assertNotIn("changes required by other", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_fenced_from_is_neither_attribution_nor_a_strict_marker(self):
+        # from_agent AND has_strict_from_line both scanned the raw body. A From
+        # quoted in a fence therefore (a) attributed the review to the quoted
+        # name and (b) set the strict guard -- so a real UNBOLDED verdict beside
+        # it was dropped instead of reported as unparseable. This case fails
+        # unless BOTH helpers read unquoted_lines.
+        fence = "```"
+        body = (
+            "The header line is written:\n\n" + fence + "\n**From:** someexample\n"
+            + fence + "\n\nFrom: realreviewer\nHEAD reviewed: " + SHA
+            + "\nVerdict: changes required"
+        )
+        result = self.run_gate([
+            self.review(agent="reviewer"),
+            self.review(body=body, bind_head=False),
+        ])
+
+        self.assertNotIn("someexample", result.stdout)
+        self.assertIn("did not parse", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
     def test_native_approval_still_requires_a_from_marker(self):
         result = self.run_gate([
             self.review(state="APPROVED", body="**From:** reviewer"),
