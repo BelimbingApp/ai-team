@@ -267,6 +267,15 @@ cat >"$filter_file" <<'JQFILTER'
         elif ($l | test("^[[:space:]]*>")) then .
         else {f: .f, out: (.out + [$l])} end)
     | .out;
+  # unquoted_lines is the canonical line set for EVERY marker read below --
+  # from_agent, has_strict_from_line, reviewed_head, finding_test_commit,
+  # exact_head_ci_clearance, explicit_verdicts and the malformed-From capture.
+  # #359 chose parsed markers over prose so quoting one is not casting one; that
+  # only holds if a quoted marker is invisible to the parsers, not just to
+  # candidate_marker_lines. When the value parsers scanned the raw body instead,
+  # a review that merely documented the grammar in a fence read as a real
+  # acceptance/verdict and cleared the gate, and a fenced From misattributed the
+  # review (#119). One stripped line set keeps every helper in agreement.
   # A line shaped like one of our markers under any emphasis or casing. Used
   # only to tell "no verdict was cast" apart from "a verdict was cast and this
   # parser could not read it" (#116): the first is a fact, the second is a
@@ -283,29 +292,29 @@ cat >"$filter_file" <<'JQFILTER'
   # skimming the review, which makes that silence worse than the bug this
   # patch set out to fix (opus-4.8-extra's block on #117).
   def has_strict_from_line:
-    ([(.body // "") | split("\n")[]
+    ([unquoted_lines[]
       | select(test("^\\*\\*From:\\*\\*[[:space:]]*\\S"; "i"))] | length) > 0;
   def from_agent:
-    ([((.body // "") | split("\n")[]
+    ([(unquoted_lines[]
        | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<agent>[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:[[:space:]]|$)"; "i").agent
        | ascii_downcase)] | unique) as $a
     | if ($a | length) == 1 then $a[0] else "" end;
   def reviewed_head:
-    ([((.body // "") | split("\n")[]
+    ([(unquoted_lines[]
        | capture("^\\*\\*HEAD reviewed:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
        | ascii_downcase)] | unique) as $h
     | if ($h | length) == 1 then $h[0] else "" end;
   def finding_test_commit:
-    ([((.body // "") | split("\n")[]
+    ([(unquoted_lines[]
        | capture("^\\*\\*Finding test commit:\\*\\*[[:space:]]*`?(?<sha>[0-9a-f]{40})`?[[:space:]]*$"; "i").sha
        | ascii_downcase)] | unique) as $h
     | if ($h | length) == 1 then $h[0] else "" end;
   def exact_head_ci_clearance:
-    ([((.body // "") | split("\n")[]
+    ([(unquoted_lines[]
        | select(test("^\\*\\*Clearance:\\*\\*[[:space:]]*exact-head CI[[:space:]]*$"; "i")))]
      | length) == 1;
   def explicit_verdicts:
-    [((.body // "") | split("\n")[]
+    [(unquoted_lines[]
        | capture("^\\*\\*Verdict:\\*\\*[[:space:]]*(?<v>accept|approve|changes required|request changes)[[:space:]]*$"; "i").v
        | ascii_downcase
        | ({"approve": "accept", "request changes": "changes required"}[.] // .))] | unique;
@@ -405,7 +414,7 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.agent == "")
           | (.user.login? // "an unidentified account") as $login
           | {login: $login,
-             raw: ([((.body // "") | split("\n")[]
+             raw: ([(unquoted_lines[]
                | capture("^\\*\\*From:\\*\\*[[:space:]]*(?<r>\\S+)(?:[[:space:]]|$)"; "i").r)]
                | unique)}
           | select(.raw | length == 1)
