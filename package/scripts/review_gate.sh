@@ -329,8 +329,17 @@ cat >"$filter_file" <<'JQFILTER'
       then "accept"
       else ""
       end;
+  # Reads unquoted_lines so a comment that only quotes the grammar in a fence
+  # or blockquote is not reported as a cast verdict (#121, the last reader
+  # outside the one-stripped-line-set property #120 established). Deliberately
+  # NOT line-anchored, unlike explicit_verdicts: a verdict written in prose,
+  # even mid-sentence, is a person casting one in a comment and is exactly what
+  # this WARN exists to surface. Anchoring would trade a false warning for false
+  # silence -- the failure mode this whole grammar guards against.
   def comment_verdict:
-    (.body // "") | test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept|approve|changes required|request changes)(?:[[:space:]]|$)"; "i");
+    ([unquoted_lines[]
+      | select(test("\\*\\*Verdict:\\*\\*[[:space:]]*(?:accept|approve|changes required|request changes)(?:[[:space:]]|$)"; "i"))]
+     | length) > 0;
   . as $input
   | (label_names) as $labels
   | ([$labels[] | select(startswith("agent:")) | ltrimstr("agent:")] | unique) as $authors
