@@ -551,47 +551,96 @@ fi
 # can make an unmet native requirement visible before land.sh reaches a refused
 # merge endpoint (#35). A failed inspection remains a warning: this preflight
 # must not turn an unavailable GitHub rules endpoint into a false AI Team block.
+#
+# GitHub enforces approvals from TWO independent sources: repository *rulesets*
+# and *classic branch protection*. Reading only rulesets and then announcing
+# "no requirement" is how a PASSING gate reached a merge GitHub refused with a
+# 405 (blb-people#481, #125): that repository has zero rulesets and a classic
+# rule requiring one approval. Both sources are read here and the stricter one
+# wins, because either can refuse the merge on its own.
+#
+# "Reported as none" and "could not be read" are kept apart deliberately. An
+# unreadable source must never collapse into 0 -- that is the same false ok
+# wearing a different hat. For classic protection only an explicit
+# "Branch not protected" 404 is a measured zero; a permissions failure, a
+# missing branch, or an unparseable body are all undetermined.
+native_undetermined=""
+note_undetermined() { native_undetermined="${native_undetermined:+$native_undetermined, }$1"; }
+
+# Source 1 of 2: repository rulesets.
+rules_required=""
 branch_rules=""
 if branch_rules=$(gh api "repos/$REPO/rules/branches/$BASE" --paginate 2>/dev/null); then
-  required_native_approvals=$(printf '%s' "$branch_rules" | jq -s \
+  rules_required=$(printf '%s' "$branch_rules" | jq -s \
     '[.[][]? | select(.type == "pull_request") | (.parameters.required_approving_review_count? // 0)] | max // 0' \
     2>/dev/null)
-  case "$required_native_approvals" in
-    ''|*[!0-9]*)
-      say_warn "cannot parse GitHub native approval rules for $BASE; a passing AI Team gate does not predict external merge permission"
-      ;;
-    0)
-      say_ok "no GitHub native approval requirement reported for $BASE"
-      ;;
-    *)
-      native_reviews=""
-      if native_reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null); then
-        native_approved=$(printf '%s' "$native_reviews" | jq -s \
-          '[.[][]?
-            | select(.user.login? != null)
-            | {login: .user.login, state: (.state // ""), submitted_at: (.submitted_at // ""), id: (.id // 0)}]
-           | group_by(.login)
-           | map(sort_by(.submitted_at, .id) | last | select(.state == "APPROVED"))
-           | length' 2>/dev/null)
-        case "$native_approved" in
-          ''|*[!0-9]*)
-            say_warn "cannot parse native GitHub reviews; a passing AI Team gate does not predict external merge permission"
-            ;;
-          *)
-            if [[ "$native_approved" -lt "$required_native_approvals" ]]; then
-              say_warn "GitHub requires $required_native_approvals native approval(s) on $BASE, but only $native_approved distinct current APPROVED reviewer(s) are visible — a separate eligible native reviewer or automation is still required before merge"
-            else
-              say_ok "GitHub native approval preflight: requires $required_native_approvals, $native_approved distinct current APPROVED reviewer(s) visible; GitHub still decides eligibility and freshness"
-            fi
-            ;;
-        esac
-      else
-        say_warn "cannot inspect native GitHub reviews; a passing AI Team gate does not predict external merge permission"
-      fi
-      ;;
+  case "$rules_required" in
+    ''|*[!0-9]*) rules_required=""; note_undetermined "rulesets returned an unparseable requirement" ;;
   esac
 else
-  say_warn "cannot inspect GitHub native approval rules for $BASE; a passing AI Team gate does not predict external merge permission"
+  note_undetermined "ruleset endpoint unreadable"
+fi
+
+# Source 2 of 2: classic branch protection. gh writes the error body to stdout
+# even when it exits non-zero, so "this branch has no classic protection" can
+# be told apart from "this token may not read it" without guessing at wording
+# on stderr.
+classic_required=""
+classic_body=""
+if classic_body=$(gh api "repos/$REPO/branches/$BASE/protection" 2>/dev/null); then
+  classic_required=$(printf '%s' "$classic_body" \
+    | jq -r '.required_pull_request_reviews.required_approving_review_count // 0' 2>/dev/null)
+  case "$classic_required" in
+    ''|*[!0-9]*) classic_required=""; note_undetermined "classic protection returned an unparseable requirement" ;;
+  esac
+elif [[ "$(printf '%s' "$classic_body" | jq -r '.message? // ""' 2>/dev/null)" == "Branch not protected" ]]; then
+  # GitHub says the branch carries no classic protection at all. That is a
+  # measured zero from this source, not an unknown.
+  classic_required=0
+else
+  note_undetermined "classic branch protection unreadable"
+fi
+
+required_native_approvals=0
+if [[ -n "$rules_required" ]] && [[ "$rules_required" -gt "$required_native_approvals" ]]; then
+  required_native_approvals="$rules_required"
+fi
+if [[ -n "$classic_required" ]] && [[ "$classic_required" -gt "$required_native_approvals" ]]; then
+  required_native_approvals="$classic_required"
+fi
+
+if [[ "$required_native_approvals" == "0" && -n "$native_undetermined" ]]; then
+  say_warn "GitHub native approval requirement for $BASE is undetermined ($native_undetermined); a passing AI Team gate does not predict external merge permission"
+elif [[ "$required_native_approvals" == "0" ]]; then
+  say_ok "no GitHub native approval requirement reported for $BASE (rulesets and classic branch protection both read)"
+else
+  native_reviews=""
+  if native_reviews=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null); then
+    native_approved=$(printf '%s' "$native_reviews" | jq -s \
+      '[.[][]?
+        | select(.user.login? != null)
+        | {login: .user.login, state: (.state // ""), submitted_at: (.submitted_at // ""), id: (.id // 0)}]
+       | group_by(.login)
+       | map(sort_by(.submitted_at, .id) | last | select(.state == "APPROVED"))
+       | length' 2>/dev/null)
+    case "$native_approved" in
+      ''|*[!0-9]*)
+        say_warn "cannot parse native GitHub reviews; a passing AI Team gate does not predict external merge permission"
+        ;;
+      *)
+        if [[ "$native_approved" -lt "$required_native_approvals" ]]; then
+          say_warn "GitHub requires $required_native_approvals native approval(s) on $BASE, but only $native_approved distinct current APPROVED reviewer(s) are visible — a separate eligible native reviewer or automation is still required before merge"
+        else
+          say_ok "GitHub native approval preflight: requires $required_native_approvals, $native_approved distinct current APPROVED reviewer(s) visible; GitHub still decides eligibility and freshness"
+        fi
+        ;;
+    esac
+  else
+    say_warn "cannot inspect native GitHub reviews; a passing AI Team gate does not predict external merge permission"
+  fi
+  if [[ -n "$native_undetermined" ]]; then
+    say_warn "the true requirement on $BASE may be higher than $required_native_approvals ($native_undetermined)"
+  fi
 fi
 
 # Keep the comment-stream diagnostic below focused on the case where a review

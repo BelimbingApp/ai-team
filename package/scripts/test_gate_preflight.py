@@ -62,6 +62,14 @@ GH_STUB = textwrap.dedent(
       "api repos/$GATE_TEST_CANONICAL/rules/branches/"*)
         printf '%s\\n' "$GATE_TEST_BRANCH_RULES"
         ;;
+      "api repos/$GATE_TEST_CANONICAL/branches/"*"/protection")
+        # Real gh writes the error body to stdout and exits non-zero, which is
+        # exactly how gate.sh tells "no classic protection" apart from "cannot
+        # read it". The stub has to reproduce both halves or the distinction
+        # under test would not exist here.
+        printf '%s\\n' "$GATE_TEST_BRANCH_PROTECTION"
+        exit "${GATE_TEST_BRANCH_PROTECTION_RC:-0}"
+        ;;
       "api repos/$GATE_TEST_CANONICAL/git/refs/heads/"*)
         printf '%s\\n' "$GATE_TEST_HEAD"
         ;;
@@ -188,6 +196,8 @@ class GateMechanismTest(unittest.TestCase):
         ready_issue: str | None = None,
         bind_review_heads: bool = True,
         branch_rules: list[dict[str, object]] | None = None,
+        branch_protection: dict[str, object] | None = None,
+        branch_protection_unreadable: bool = False,
         allow_missing_checks: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         base = Path(self.dir.name)
@@ -322,6 +332,25 @@ class GateMechanismTest(unittest.TestCase):
         env["GATE_TEST_BRANCH_RULES"] = json.dumps(
             [] if branch_rules is None else branch_rules
         )
+        # Classic branch protection is the second source GitHub enforces from.
+        # The default is the answer most adopters get -- a 404 whose body says
+        # the branch carries no classic protection -- so every pre-existing
+        # fixture keeps meaning "rulesets only", which is what it meant before.
+        if branch_protection_unreadable:
+            env["GATE_TEST_BRANCH_PROTECTION"] = json.dumps({
+                "message": "Must have admin rights to Repository.",
+                "status": "403",
+            })
+            env["GATE_TEST_BRANCH_PROTECTION_RC"] = "1"
+        elif branch_protection is None:
+            env["GATE_TEST_BRANCH_PROTECTION"] = json.dumps({
+                "message": "Branch not protected",
+                "status": "404",
+            })
+            env["GATE_TEST_BRANCH_PROTECTION_RC"] = "1"
+        else:
+            env["GATE_TEST_BRANCH_PROTECTION"] = json.dumps(branch_protection)
+            env["GATE_TEST_BRANCH_PROTECTION_RC"] = "0"
         if allow_missing_checks is not None:
             env["GATE_ALLOW_MISSING_CHECKS"] = allow_missing_checks
 
@@ -476,6 +505,92 @@ class GateMechanismTest(unittest.TestCase):
         )
         self.assertIn("GitHub still decides eligibility and freshness", result.stdout)
         self.assertNotIn("only 0 distinct current APPROVED reviewer(s) are visible", result.stdout)
+
+    def test_classic_branch_protection_requirement_is_not_reported_as_absent(self):
+        """A repository with no rulesets can still require approvals.
+
+        blb-people#481 passed this gate and was then refused at the merge
+        endpoint with a 405: zero rulesets, and a classic rule requiring one
+        approval. Reading rulesets alone reported "no requirement" for a branch
+        that had one.
+        """
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[],
+            branch_protection={
+                "required_pull_request_reviews": {"required_approving_review_count": 1},
+                "enforce_admins": {"enabled": True},
+            },
+            reviews=[{
+                "id": 1,
+                "state": "COMMENTED",
+                "body": "**From:** reviewer\n\n**Verdict:** accept",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "user": {"login": "reviewer"},
+            }],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GitHub requires 1 native approval(s)", result.stdout)
+        self.assertNotIn("no GitHub native approval requirement reported", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_unreadable_classic_protection_is_undetermined_not_zero(self):
+        """An unreadable source must not be reported as "no requirement".
+
+        Folding a failed read into 0 would rebuild the same false ok one layer
+        down: the gate would still promise something about external merge
+        permission that it never measured.
+        """
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[],
+            branch_protection_unreadable=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("undetermined", result.stdout)
+        self.assertIn("classic branch protection unreadable", result.stdout)
+        self.assertNotIn("no GitHub native approval requirement reported", result.stdout)
+        self.assertIn("GATE: PASS", result.stdout)
+
+    def test_stricter_of_the_two_native_sources_wins(self):
+        """Either source can refuse the merge on its own, so the max governs."""
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[{
+                "type": "pull_request",
+                "parameters": {"required_approving_review_count": 1},
+            }],
+            branch_protection={
+                "required_pull_request_reviews": {"required_approving_review_count": 2},
+            },
+            reviews=[{
+                "id": 1,
+                "state": "COMMENTED",
+                "body": "**From:** reviewer\n\n**Verdict:** accept",
+                "commit_id": self.head_sha,
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "user": {"login": "reviewer"},
+            }],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GitHub requires 2 native approval(s)", result.stdout)
+
+    def test_no_requirement_is_reported_only_after_both_sources_are_read(self):
+        result = self.run_gate(
+            origin=CANONICAL_HTTPS,
+            reviewed=self.head_sha,
+            branch_rules=[],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "no GitHub native approval requirement reported for main "
+            "(rulesets and classic branch protection both read)",
+            result.stdout,
+        )
 
     def test_duplicate_approvals_from_one_reviewer_do_not_satisfy_the_count(self):
         result = self.run_gate(
