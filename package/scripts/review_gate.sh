@@ -239,6 +239,40 @@ if [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ ]] \
   fi
 fi
 
+# A refusal binds to the head it was written against, and a descendant push
+# made it vanish -- reported as "no independent exact-head changes-required
+# verdict", which reads identically to never having been refused (#127). That
+# is the asymmetry: invalidating a stale ACCEPTANCE fails safe, because the
+# lane cannot land until someone re-accepts; invalidating a stale REFUSAL fails
+# open, because the lane loses a recorded objection and looks cleaner than
+# before the reviewer spoke. Exact-head binding is correct and stays. What
+# changes is that an ancestor refusal is named rather than dropped.
+#
+# Git supplies only the immutable edge -- which reviewed commits are ancestors
+# of this head. The grammar below still decides which of those are refusals
+# that their own reviewer has not since answered. With no repository, or an
+# object we cannot read, the list stays empty and the gate says what it always
+# said: unknowable ancestry must not become a guess in either direction.
+ancestor_heads='[]'
+if [[ "$reviewed_sha" =~ ^[0-9a-f]{40}$ ]] \
+    && git cat-file -e "$reviewed_sha^{commit}" 2>/dev/null; then
+  mapfile -t review_commits < <(
+    jq -r '[.reviews[]? | .commit_id // "" | ascii_downcase]
+           | map(select(test("^[0-9a-f]{40}$"))) | unique | .[]' \
+      "$input" 2>/dev/null || true)
+  ancestors=()
+  for candidate in "${review_commits[@]}"; do
+    [[ "$candidate" == "$reviewed_sha" ]] && continue
+    git cat-file -e "$candidate^{commit}" 2>/dev/null || continue
+    if git merge-base --is-ancestor "$candidate" "$reviewed_sha" 2>/dev/null; then
+      ancestors+=("$candidate")
+    fi
+  done
+  if [[ "${#ancestors[@]}" -gt 0 ]]; then
+    ancestor_heads=$(printf '%s\n' "${ancestors[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  fi
+fi
+
 # The filter is a fixed, reviewed constant that grows with every diagnostic.
 # Keep it out of argv (#83): Windows rejects large *payloads* before jq starts,
 # and a 50,000-byte review body must still trip that bound — but the filter
@@ -379,6 +413,19 @@ cat >"$filter_file" <<'JQFILTER'
           | select(.agent != $author and .reviewed_head == .commit_id and .verdict == "changes required")
           | .agent]
          | unique | join(", ")) as $blocking
+      # $latest_all is each agent's most recent attributable review anywhere on
+      # the lane, so "their latest word is a refusal" is exactly "unanswered".
+      # A reviewer who later accepts -- at this head or any other -- has spoken
+      # again and is not warned about, or every lane that ever went through one
+      # round of changes would warn for the rest of its life.
+      | ([$latest_all[]
+          | select(.agent != $author)
+          | select(.reviewed_head == .commit_id)
+          | select(.verdict == "changes required")
+          | select(.commit_id != $input.reviewed)
+          | select(.commit_id as $c | $ancestor_heads | index($c))
+          | {agent: .agent, commit: .commit_id}]
+         | unique) as $stale_refusals
       | ([$latest_all[]
           | select(.agent != $author)
           | select(.commit_id == $clearance_finding)
@@ -442,6 +489,9 @@ cat >"$filter_file" <<'JQFILTER'
          end,
          if ($unparsed | length) > 0 then
            "FAIL: \($unparsed | length) review(s) at this head carry verdict-shaped markers this gate could not parse, so whether changes are required is unknown, not absent"
+         elif $blocking == "" and ($stale_refusals | length) > 0 then
+           ($stale_refusals[]
+            | "WARN: changes required by \(.agent) at \(.commit[0:8]) (an ancestor of this head); its findings are not known to be addressed -- re-review, or have \(.agent) withdraw it")
          elif $blocking == "" then
            "PASS: no independent exact-head changes-required verdict"
          else
@@ -458,6 +508,7 @@ cat >"$filter_file" <<'JQFILTER'
 JQFILTER
 
 result=$(jq -r --arg automated_author "$automated_author" \
+  --argjson ancestor_heads "$ancestor_heads" \
   --arg carry_from "$carry_from" \
   --arg clearance_finding "$clearance_finding" \
   --arg clearance_parent "$clearance_parent" \

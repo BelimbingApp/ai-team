@@ -67,7 +67,18 @@ GitHub API `commit_id` normally equal the current head. Two fail-closed carries
 exist: a verified clean base merge, and one immediate fix child of a reviewer
 commit bound by matching `Finding test commit` and `Clearance: exact-head CI`
 markers. The latter requires either `changes required` on that commit or the
-same reviewer's acceptance of its direct parent. The lane is issue-less;
+same reviewer's acceptance of its direct parent. A `changes required`
+verdict binds to its head the same way, but the two stale cases are not
+symmetric: a stale acceptance fails safe, since nothing lands until someone
+re-accepts, while a stale refusal would fail open, since the lane loses a
+recorded objection and reads cleaner than before the reviewer spoke. When a
+refusal sits at an ancestor of the current head and its author has not
+reviewed since, the gate emits `WARN: changes required by <reviewer> at
+<sha> (an ancestor of this head)` instead of reporting no refusal. It warns
+rather than blocks, so a reviewer who goes offline cannot strand a lane, and
+it clears as soon as that reviewer reviews again either way. Where ancestry
+cannot be established — no repository, or an object that cannot be read —
+the gate reports what it always did rather than guess. The lane is issue-less;
 landing adds `task:done` only to the PR. Adopters update the mounted package and
 retrigger Independent review; permissions do not change.
 

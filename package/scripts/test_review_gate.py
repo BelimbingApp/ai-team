@@ -1441,3 +1441,134 @@ class IssueCommentVerdictTest(GateHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleRefusalTest(GateHarness):
+    """A refusal at an ancestor of this head must not read as no refusal.
+
+    #127. Exact-head binding is correct and stays: a stale *acceptance* must
+    not carry, which fails safe. A stale *refusal* silently vanishing fails
+    open — the lane loses a recorded objection and reads cleaner than before
+    the reviewer spoke. That happened on belimbing#938, where one of two
+    blockers was fixed, the gate said "no independent exact-head
+    changes-required verdict", and the steward repeated it to the owner.
+    """
+
+    def refused_then_pushed(self):
+        """Reviewer refuses at one commit; the author pushes one more."""
+        directory = tempfile.TemporaryDirectory()
+        repository = Path(directory.name)
+        self.git(repository, "init", "-q", "-b", "main")
+        self.commit_file(repository, "base.txt", "base\n", "base")
+        refused = self.commit_file(repository, "work.txt", "first\n", "work")
+        head = self.commit_file(repository, "work.txt", "second\n", "address one finding")
+        return directory, repository, refused, head
+
+    def run_at(self, repository, head, reviews):
+        identity = {
+            "user": {"id": 1, "login": "human-author", "type": "User"},
+            "head": {"repo": {"id": 100}},
+            "base": {"repo": {"id": 100, "default_branch": "main"}},
+        }
+        return self.run_gate(reviews, reviewed=head, head_sha=head,
+                             identity=identity, cwd=repository)
+
+    def refusal(self, commit, agent="reviewer", at="2026-01-01T00:00:00Z"):
+        return self.review(
+            agent=agent, commit_id=commit, head_marker=commit, at=at,
+            body=f"**From:** {agent}\n\n**Verdict:** changes required",
+        )
+
+    def test_a_refusal_at_an_ancestor_is_named_not_reported_as_absent(self):
+        directory, repository, refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [
+                self.review(agent="accepter", commit_id=head, head_marker=head),
+                self.refusal(refused),
+            ])
+
+        self.assertIn("changes required by reviewer", result.stdout)
+        self.assertIn(refused[:8], result.stdout)
+        # The line that misled a steward must no longer be printed here.
+        self.assertNotIn("PASS: no independent exact-head changes-required verdict",
+                         result.stdout)
+
+    def test_it_warns_rather_than_blocks(self):
+        # The issue argues for WARN first: blocking would strand a lane whose
+        # only reviewer went offline, which is the trap #346 hit.
+        directory, repository, refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [
+                self.review(agent="accepter", commit_id=head, head_marker=head),
+                self.refusal(refused),
+            ])
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("FAIL: independent exact-head changes required", result.stdout)
+
+    def test_the_same_reviewer_accepting_this_head_answers_their_refusal(self):
+        # Otherwise every lane that ever went through one round of changes
+        # warns for the rest of its life, and the warning stops meaning anything.
+        # The acceptance must be timestamped after the refusal: "unanswered"
+        # means the agent's latest word, and two reviews sharing a timestamp
+        # leave that undefined.
+        directory, repository, refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [
+                self.review(agent="reviewer", commit_id=head, head_marker=head,
+                            at="2026-01-02T00:00:00Z"),
+                self.refusal(refused),
+            ])
+
+        self.assertIn("PASS: no independent exact-head changes-required verdict",
+                      result.stdout)
+        self.assertNotIn("an ancestor of this head", result.stdout)
+
+    def test_a_later_refusal_outranks_an_earlier_acceptance_by_the_same_agent(self):
+        # The mirror of the test above, so "latest word" is pinned in both
+        # directions rather than only the convenient one.
+        directory, repository, refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [
+                self.review(agent="reviewer", commit_id=refused, head_marker=refused,
+                            at="2026-01-01T00:00:00Z"),
+                self.review(agent="accepter", commit_id=head, head_marker=head),
+                self.refusal(refused, at="2026-01-03T00:00:00Z"),
+            ])
+
+        self.assertIn("an ancestor of this head", result.stdout)
+        self.assertIn("changes required by reviewer", result.stdout)
+
+    def test_a_refusal_on_an_unrelated_commit_is_not_claimed_as_ancestry(self):
+        # A commit that is not in this lane's history says nothing about it.
+        directory, repository, _refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [
+                self.review(agent="accepter", commit_id=head, head_marker=head),
+                self.refusal(STALE_SHA),
+            ])
+
+        self.assertIn("PASS: no independent exact-head changes-required verdict",
+                      result.stdout)
+        self.assertNotIn("an ancestor of this head", result.stdout)
+
+    def test_an_exact_head_refusal_still_fails_rather_than_warns(self):
+        directory, repository, _refused, head = self.refused_then_pushed()
+        with directory:
+            result = self.run_at(repository, head, [self.refusal(head)])
+
+        self.assertIn("FAIL: independent exact-head changes required by reviewer",
+                      result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_without_git_the_gate_says_nothing_new(self):
+        # Fixture mode with no repository: ancestry is unknowable, so the gate
+        # must fall back to its old answer rather than guess in either
+        # direction. Every other git-dependent block here degrades this way.
+        result = self.run_gate([
+            self.review(agent="accepter"),
+            self.refusal(STALE_SHA),
+        ])
+
+        self.assertIn("PASS: no independent exact-head changes-required verdict",
+                      result.stdout)
